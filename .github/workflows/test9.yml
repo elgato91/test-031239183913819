@@ -38,6 +38,7 @@ jobs:
 
           for i in 1 2 3; do
             PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i su porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
               -e TZ=Europe/Rome \
@@ -45,9 +46,13 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
+            
+            # Attesa di sicurezza per non saturare la registrazione simultanea su Cloudflare
+            echo "Attesa stabilizzazione container $i..."
+            sleep 15
           done
 
-          sleep 15
+          echo "Container attivi:"
           docker ps -a
 
       - name: Verifica IP IPv6 di uscita sui 3 Proxy
@@ -56,8 +61,13 @@ jobs:
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA IP CONTAINER $i ($PORT):"
-            # Utilizziamo api6 per verificare e forzare l'instradamento IPv6
-            curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
+            # Utilizziamo api6 per verificare e forzare l'instradamento IPv6 con logica di retry
+            for attempt in 1 2 3; do
+              curl -s --connect-timeout 8 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json && break || {
+                echo "Tentativo $attempt per porta $PORT fallito, attesa..."
+                sleep 5
+              }
+            done
           done
           echo "=================================================="
 
@@ -138,8 +148,8 @@ jobs:
                   pass
               return default
 
-          # Controlla e valida rigorosamente la connessione IPv6 sul proxy
-          def wait_for_proxy_and_get_tz(port, timeout=45):
+          # Controlla e valida la connessione IPv6 sul proxy con logica estesa
+          def wait_for_proxy_and_get_tz(port, timeout=60):
               print(f"[NODO {node_id}] Validazione IPv6 su porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
@@ -147,21 +157,21 @@ jobs:
               ipv6_ok = False
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=5)
+                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=8)
                       if r.status_code == 200 and ":" in r.json().get("ip", ""):
                           print(f"[NODO {node_id}] IPv6 WARP rilevato: {r.json().get('ip')}", flush=True)
                           ipv6_ok = True
                           break
                   except Exception:
-                      time.sleep(2)
+                      time.sleep(3)
                       
               if not ipv6_ok:
                   return False, "America/Chicago", "US"
 
-              # Risoluzione esplicita della posizione dell'indirizzo IPv6 (evita il dual-stack mismatch di WARP)
+              # Risoluzione della posizione geografica del tunnel
               timezone, country = "America/Chicago", "US"
               try:
-                  r = requests.get("https://ipapi.co/json/", proxies=proxies, timeout=5)
+                  r = requests.get("https://ipapi.co/json/", proxies=proxies, timeout=8)
                   if r.status_code == 200:
                       data = r.json()
                       timezone = data.get("timezone", "America/Chicago")
@@ -187,26 +197,25 @@ jobs:
           if node_id == 3:
               extra_args.append("--disable-http2")
 
-          # Funzione per gestire le automazioni interne alle singole pagine
           def make_page_action(url, query_to_search):
               def page_action(page):
-                  # Gestione flusso per Yelp
+                  # Gestione dei passaggi per Yelp
                   if "yelp.com" in url or "yelp.it" in url:
                       time.sleep(3)
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  # Gestione flusso per Startpage
+                      page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                  # Gestione dei passaggi per Startpage
                   elif "startpage.com" in url:
                       try:
                           page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=25000)
+                          page.wait_for_load_state("domcontentloaded", timeout=30000)
                       except Exception: pass
-                  # Gestione flusso per DuckDuckGo
+                  # Gestione dei passaggi per DuckDuckGo
                   elif "html.duckduckgo.com" in url:
                       try:
                           page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=25000)
+                          page.wait_for_load_state("domcontentloaded", timeout=30000)
                       except Exception: pass
 
                   # Trigger manuale Pixelscan
@@ -217,7 +226,7 @@ jobs:
                               btn.click()
                       except Exception: pass
 
-                  # Risoluzione Cloudflare Turnstile (Fallback manuale oltre al solutore nativo)
+                  # Risoluzione Cloudflare Turnstile manuale (in aggiunta a solve_cloudflare integrato)
                   try:
                       cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
                       checkbox = cf_iframe.locator("input[type='checkbox']")
@@ -245,26 +254,29 @@ jobs:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
                           time.sleep(random.uniform(0.8, 1.5))
-                      # Piccola attesa finale a seconda del target
-                      if "creepjs" in url: time.sleep(15) 
-                      elif "pixelscan" in url: time.sleep(8)
-                      elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
-                      else: time.sleep(3)
                   except Exception: pass
+
+                  # Tempistiche di attesa
+                  if "creepjs" in url: time.sleep(15) 
+                  elif "pixelscan" in url: time.sleep(8)
+                  elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
+                  else: time.sleep(3)
 
               return page_action
 
-          # Avvio sessione stealth di Scrapling
+          # Avvio della sessione protetta in Scrapling
           with StealthySession(
               user_data_dir=profile_dir,
               headless=False,
+              real_chrome=True,     # Usa Google Chrome effettivo preinstallato sulla VM per aggirare i rilevamenti (es. Morningstar)
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              timezone_id=tz,       # Override fuso orario basato sulla geolocalizzazione dell'IP
-              locale=locale,        # Override lingua locale
+              timezone_id=tz,       
+              locale=locale,     
               extra_flags=extra_args,
               additional_args={"viewport": {"width": 1920, "height": 950}},
-              solve_cloudflare=True, # Bypassa i Turnstile nativamente
+              block_ads=True,       # Impedisce a ~3,500 domini pubblicitari di bloccare o rallentare il caricamento
+              solve_cloudflare=True,
               humanize=True
           ) as session:
 
@@ -276,7 +288,6 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
 
-                      # Determina la pagina iniziale da caricare con .fetch()
                       if "yelp.com" in url or "yelp.it" in url:
                           fetch_url = "https://www.yelp.com/"
                       elif "startpage.com" in url:
@@ -286,13 +297,12 @@ jobs:
                       else:
                           fetch_url = url
 
-                      action_callback = make_page_action(url, query_to_search)
+                      action = make_page_action(url, query_to_search)
 
-                      # Esegue la richiesta principale ed esegue il callback al termine del caricamento
                       response = session.fetch(
                           fetch_url,
-                          page_action=action_callback,
-                          timeout=25000
+                          page_action=action,
+                          timeout=30000, # Esteso leggermente il timeout
                       )
 
                       raw_html = response.html_content
@@ -302,7 +312,6 @@ jobs:
                       print(f"[NODO {node_id}] Errore: {e}", flush=True)
                       results += f"ERRORE GLOBALE: {str(e)}\n"
 
-          # Scrittura del file di output (avviene dopo la chiusura automatica del context manager di Scrapling)
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
