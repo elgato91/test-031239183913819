@@ -22,25 +22,33 @@ jobs:
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze Scraper
+      - name: Installazione Dipendenze
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests curl_cffi
           playwright install-deps chromium
 
-      - name: Avvio Container WARProxy (Active & Empty)
+      - name: Setup Warproxy Docker Containers (Active & Idle)
         run: |
-          # Pull dell'immagine ufficiale ottimizzata
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          # Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001)
-          docker run --name warproxy_active \
-            -p 127.0.0.1:40001:1080 \
+          # Container Attivo per lo scraping (porta 1080)
+          docker run --name warproxy-active \
+            -p 1080:1080 \
+            -e TZ=Europe/Rome \
+            -e SOCKS5_PORT=1080 \
+            -e VERBOSE=true \
             -d ghcr.io/kingcc/warproxy:latest
 
-          # Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto su porta locale 40002)
-          docker run --name warproxy_empty \
-            -p 127.0.0.1:40002:1080 \
+          # Container Idle/Inattivo (porta 1081) - lasciato completamente vuoto
+          docker run --name warproxy-idle \
+            -p 1081:1081 \
+            -e TZ=Europe/Rome \
+            -e SOCKS5_PORT=1081 \
+            -e VERBOSE=true \
             -d ghcr.io/kingcc/warproxy:latest
+
+          # Attesa tecnica per consentire ai container la registrazione e la generazione del tunnel WireGuard
+          echo "In attesa dell'avvio dei proxy WARP..."
+          sleep 15
+          docker ps -a
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
@@ -51,8 +59,11 @@ jobs:
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
+          import asyncio
+          import threading
           import random
           import requests
+          from curl_cffi import requests as curl_requests
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -89,6 +100,55 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
           results = ""
+
+          def run_async_in_thread(coro):
+              result, exception = [None], [None]
+              def worker():
+                  try:
+                      loop = asyncio.new_event_loop()
+                      asyncio.set_event_loop(loop)
+                      result[0] = loop.run_until_complete(coro)
+                      loop.close()
+                  except Exception as e:
+                      exception[0] = e
+              t = threading.Thread(target=worker)
+              t.start()
+              t.join()
+              if exception[0]:
+                  raise exception[0]
+              return result[0]
+
+          def wait_for_proxy(port, timeout=45):
+              start_time = time.time()
+              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              while time.time() - start_time < timeout:
+                  try:
+                      r = curl_requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
+                      if r.status_code == 200 and ":" in r.text:
+                          return True, "IPv6", r.text.strip()
+                  except Exception:
+                      pass
+                  try:
+                      r = curl_requests.get("https://cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
+                      if r.status_code == 200 and "warp=" in r.text:
+                          ip_line = [line for line in r.text.split('\n') if line.startswith('ip=')]
+                          if ip_line:
+                              ip = ip_line[0].split('=')[1]
+                              ip_type = "IPv6" if ":" in ip else "IPv4"
+                              return True, ip_type, ip
+                  except Exception:
+                      pass
+                  time.sleep(2)
+              return False, None, None
+
+          def check_html_success(html, url, target_name, engine_name):
+              html_str = str(html) if html else ""
+              html_lower = html_str.lower()
+              block_indicators = ["captcha", "robot", "blocked", "denied", "forbidden", "challenge-platform", "cloudflare"]
+              if any(ind in html_lower for ind in block_indicators) and not any(diag in url for diag in DIAGNOSTIC_SITES):
+                  print(f"[BLOCCO RILEVATO] Potenziale blocco su {target_name} ({url}) via {engine_name}", flush=True)
+                  return False
+              return True
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -133,62 +193,71 @@ jobs:
               except Exception:
                   pass
 
-          # Polling attivo di validazione per attendere che il tunnel SOCKS5h sia pronto a instradare l'IPv6
-          def wait_for_proxy(port, timeout=45):
-              print(f"In attesa che il tunnel SOCKS5h sulla porta {port} sia pronto...", flush=True)
-              start_time = time.time()
-              proxies = {
-                  "http": f"socks5h://127.0.0.1:{port}",
-                  "https": f"socks5h://127.0.0.1:{port}"
-              }
-              while time.time() - start_time < timeout:
-                  try:
-                      r = requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and ":" in r.text:
-                          ip_addr = r.text.strip()
-                          print(f"Proxy pronto sulla porta {port}! IPv6 rilevato: {ip_addr}", flush=True)
-                          return True, "IPv6", ip_addr
-                  except Exception:
-                      pass
-                      
-                  try:
-                      r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and "warp=" in r.text:
-                          lines = r.text.split('\n')
-                          ip_line = [line for line in lines if line.startswith('ip=')]
-                          warp_line = [line for line in lines if line.startswith('warp=')]
-                          if ip_line and warp_line:
-                              ip = ip_line[0].split('=')[1]
-                              warp_status = warp_line[0].split('=')[1]
-                              if warp_status in ["on", "plus"]:
-                                  ip_type = "IPv6" if ":" in ip else "IPv4"
-                                  print(f"Proxy pronto sulla porta {port}! IP: {ip} ({ip_type}) | WARP: {warp_status}", flush=True)
-                                  return True, ip_type, ip
-                  except Exception:
-                      pass
-                  time.sleep(2)
-              print(f"Timeout: il tunnel sulla porta {port} non si è stabilizzato in {timeout} secondi.", flush=True)
-              return False, None, None
+          # 1. Verifica ed attesa del proxy attivo su porta 1080
+          ACTIVE_PORT = 1080
+          print(f"Controllo connessione proxy SOCKS5H su porta {ACTIVE_PORT}...", flush=True)
+          success, ip_type, proxy_ip = wait_for_proxy(ACTIVE_PORT, timeout=60)
 
-          # Blocco di attesa prima del lancio del browser
-          proxy_ready, ip_type, exit_ip = wait_for_proxy(40001)
+          if not success or ip_type != "IPv6":
+              raise RuntimeError(f"Errore: il proxy sulla porta {ACTIVE_PORT} non è pronto o non esce in IPv6. (Rilevato: {ip_type}, IP: {proxy_ip})")
 
+          print(f"Allineamento completato -> Connessione proxy attiva con IPv6: {proxy_ip}", flush=True)
+
+          timezone = "UTC"
+          locale = "en-US"
+
+          # 2. Geolocalizzazione basata sull'IP IPv6 del proxy (usando le richieste proxate)
+          proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+          geo_services = [
+              (f"https://freeipapi.com/api/json/{proxy_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
+              (f"https://ipapi.co/{proxy_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
+              (f"https://ipwho.is/{proxy_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
+          ]
+          for url, parse_func in geo_services:
+              try:
+                  print(f"Geolocalizzazione IP su {url} tramite proxy...", flush=True)
+                  response = requests.get(url, proxies=proxies, timeout=5)
+                  if response.status_code == 200:
+                      data = response.json()
+                      tz, loc = parse_func(data)
+                      if tz:
+                          timezone = tz
+                          locale = loc
+                          if len(locale) == 2:
+                              country_to_locale = {
+                                  "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
+                                  "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
+                              }
+                              locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
+                          print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
+                          break
+              except Exception as e:
+                  print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
+
+          # Generazione di un seed hardware dinamico coerente per ogni run
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Caricamento del contesto collegato al Proxy 1 (warproxy_active)
           context = launch_context(
               headless=False,
               humanize=True,
-              proxy="socks5://127.0.0.1:40001",
-              geoip=True,
+              timezone=timezone,
+              locale=locale,
               viewport={"width": 1920, "height": 950},
+              # Configurazione esplicita del proxy SOCKS5H all'interno del browser
+              proxy={
+                  "server": f"socks5://127.0.0.1:{ACTIVE_PORT}"
+              },
               args=[
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
+                  f"--fingerprint-timezone={timezone}",
+                  f"--fingerprint-locale={locale}",
                   f"--fingerprint={random_seed}",
                   "--fingerprint-storage-quota=5000",   
-                  "--fingerprint-windows-font-metrics"  
+                  "--fingerprint-windows-font-metrics",
+                  # Disabilita la risoluzione DNS locale per delegarla interamente al proxy (SOCKS5H nativo)
+                  f"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
               ]
           )
 
@@ -198,7 +267,7 @@ jobs:
               try:
                   page = context.new_page()
                   
-                  # INIEZIONE ATTIVA DI POLYFILL (Per neutralizzare CreepJS "headless" e Incolumitas RTT)
+                  # INIEZIONE ATTIVA DI POLYFILL
                   page.add_init_script("""
                       if (!('ContactsManager' in window)) {
                           window.ContactsManager = class ContactsManager {
@@ -236,7 +305,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, 
+                              get: () => 100,
                               configurable: true,
                               enumerable: true
                           });
@@ -307,6 +376,10 @@ jobs:
                       time.sleep(4)
 
                   raw_html = page.content()
+                  
+                  # Verifica se la pagina caricata contiene indicazioni di blocco
+                  check_html_success(raw_html, url, urlparse(url).netloc, "CloakBrowser")
+                  
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
                   page.close()
 
