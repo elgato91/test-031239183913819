@@ -18,12 +18,12 @@ jobs:
           sudo sntp -sS pool.ntp.org || sudo ntpdate -s pool.ntp.org || true
           sudo systemctl start systemd-timesyncd.service || true
 
-      - name: Installazione Font di Sistema
+      - name: Installazione Font di Sistema e Xvfb
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          # Installiamo i font per supportare il canvas rendering su Linux
-          sudo apt-get install -y ttf-mscorefonts-installer \
+          # Installiamo i font per il rendering e xvfb per la gestione del server grafico virtuale
+          sudo apt-get install -y xvfb ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           fc-cache -f -v
@@ -61,11 +61,6 @@ jobs:
             curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
           done
           echo "=================================================="
-
-      - name: Avvio Xvfb (Virtual Display Headful)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Pre-inizializzazione Camoufox Browser
         run: |
@@ -141,12 +136,12 @@ jobs:
           profile_dir = f"./profile_node_{node_id}"
           proxy_config = {"server": f"socks5://127.0.0.1:{ACTIVE_PORT}"}
 
-          print(f"[NODO {node_id}] Avvio Camoufox Context", flush=True)
+          print(f"[NODO {node_id}] Avvio Camoufox (Porta {ACTIVE_PORT})", flush=True)
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
-          # Utilizziamo il context manager Camoufox per gestire l'istanza del browser Firefox.
-          # Viene definita un'identità Linux coerente con la macchina host per evitare discrepanze.
+          # Utilizziamo il context manager per avviare Camoufox in modalità headful (headless=False)
+          # Lo script viene eseguito sotto xvfb-run per la gestione dell'ambiente grafico virtuale.
           with Camoufox(
               user_data_dir=profile_dir,
               persistent_context=True,
@@ -185,7 +180,6 @@ jobs:
                       else:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-                      # Attendiamo in silenzio per l'elaborazione degli script anti-bot di terze parti
                       time.sleep(5)
 
                       # Specifico per Reddit: dare tempo ai challenge JS di calcolare la proof-of-work
@@ -204,8 +198,8 @@ jobs:
                               ]
                               for selector in consent_selectors:
                                   btn = page.locator(selector)
-                                  if btn.is_visible(timeout=1000):
-                                      btn.click() # Camoufox applica curve di Bézier per il mouse automaticamente con humanize=True
+                                  if btn.is_visible(): # is_visible() in Playwright non accetta parametri di timeout nelle versioni recenti
+                                      btn.click()
                                       break
                           except Exception: pass
 
@@ -213,7 +207,7 @@ jobs:
                       if "pixelscan.net" in url:
                           try:
                               btn = page.locator("text=Scan My Browser Now")
-                              if btn.is_visible(timeout=3000):
+                              if btn.is_visible():
                                   btn.click()
                           except Exception: pass
 
@@ -234,12 +228,10 @@ jobs:
                       page.close()
 
                   except Exception as e:
-                      print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                      print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
                       results += f"ERRORE GLOBALE: {str(e)}\n"
                       try: page.close()
                       except Exception: pass
-
-          # Il contesto del browser si chiude automaticamente all'uscita dal blocco 'with'
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
@@ -247,21 +239,25 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo
         run: |
-          echo "Avvio processi paralleli..."
-          python -u m2_insocket.py 1 > node1.log 2>&1 &
-          python -u m2_insocket.py 2 > node2.log 2>&1 &
-          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          echo "Avvio processi paralleli con Xvfb dedicato..."
           
-          wait
+          # Ciascun processo viene avviato con xvfb-run -a per isolare i canali grafici ed evitare race conditions
+          # L'output viene convogliato direttamente su stdout in tempo reale per monitorare l'avanzamento
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python3 -u m2_insocket.py 1 &
+          PID1=$!
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python3 -u m2_insocket.py 2 &
+          PID2=$!
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python3 -u m2_insocket.py 3 &
+          PID3=$!
 
-          echo "=== LOG NODO 1 ==="
-          cat node1.log || true
-          echo "=== LOG NODO 2 ==="
-          cat node2.log || true
-          echo "=== LOG NODO 3 ==="
-          cat node3.log || true
-          echo "=================="
+          echo "Processi attivi con PID: $PID1, $PID2, $PID3"
+          
+          # Attendiamo il completamento di ciascun nodo
+          wait $PID1
+          wait $PID2
+          wait $PID3
 
+          echo "Tutti i nodi hanno terminato l'esecuzione."
           touch output_node_1.txt output_node_2.txt output_node_3.txt
           cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
