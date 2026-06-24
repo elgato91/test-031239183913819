@@ -17,7 +17,6 @@ jobs:
           sudo apt-get update
           # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          # Installazione con "|| true" per evitare blocchi globali se i server dei font Microsoft sono offline
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
@@ -31,23 +30,18 @@ jobs:
       - name: Setup Cloudflare WARP
         run: |
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update && sudo apt-get install -y cloudflare-warp
-          
-          # Avvio e abilitazione del servizio in background
-          sudo systemctl enable --now warp-svc
-          sleep 3
-          
-          # Registrazione e connessione
-          sudo warp-cli --accept-tos registration new || true
-          sudo warp-cli --accept-tos connect
-          
-          # Attesa per stabilizzare la connessione e verifica finale dell'IP
+          warp-cli --accept-tos registration new || true
+          warp-cli --accept-tos connect
           sleep 5
-          echo "Verifica stato connessione WARP:"
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep "warp=" || echo "WARP non attivo!"
 
-      - name: Creazione script Python
+      - name: Avvio Xvfb (Virtual Display Stabile)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Creazione script Python (Macchina 2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -101,7 +95,6 @@ jobs:
               try:
                   parsed = urlparse(url)
                   queries = parse_qs(parsed.query)
-                  # Prova a cercare i parametri più comuni
                   for param in ['q', 'query', 'p']:
                       if param in queries:
                           return queries[param][0]
@@ -110,7 +103,7 @@ jobs:
               return default
 
           def handle_cookie_consent(page):
-              """Prova a cliccare i più noti cookie banner per evitare schermate bloccate (GDPR)"""
+              """Prova a cliccare i cookie banner più comuni senza bloccare l'esecuzione (timeout 1.5s)"""
               try:
                   consent_selectors = [
                       "button:has-text('Accetta tutto')",
@@ -123,19 +116,21 @@ jobs:
                       "button:has-text('OK')",
                       "button:has-text('Allow all')",
                       "button:has-text('Consenti l\\'uso dei cookie')",
-                      "#L2AGLb" # ID specifico di Google Consent
+                      "#L2AGLb"
                   ]
                   for selector in consent_selectors:
                       btn = page.locator(selector)
-                      if btn.is_visible(timeout=500):
-                          btn.click()
-                          time.sleep(1)
-                          print("Cookie banner bypassato con successo.", flush=True)
+                      # is_visible() non aspetta, restituisce subito un booleano
+                      if btn.is_visible():
+                          # Forza un timeout di sicurezza bassissimo sul click per evitare hang
+                          btn.click(timeout=1500)
+                          time.sleep(0.5)
+                          print(f"Bypass cookie banner tentato con successo: {selector}", flush=True)
                           break
               except Exception:
                   pass
 
-          # Rilevamento geografico
+          # Rilevamento parametri geografici
           print("Rilevamento parametri geografici dell'IP di rete...", flush=True)
           timezone = "UTC"
           locale = "en-US"
@@ -156,7 +151,6 @@ jobs:
                       if tz:
                           timezone = tz
                           locale = loc
-                          # Normalizza il locale a BCP-47 standard se è un semplice codice paese a 2 lettere
                           if len(locale) == 2:
                               country_to_locale = {
                                   "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
@@ -168,7 +162,7 @@ jobs:
               except Exception as e:
                   print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
 
-          # Generiamo un seed hardware casuale ma stabile SOLO per questa sessione
+          # Seed pseudo-casuale unico per questa specifica esecuzione
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
           
@@ -181,6 +175,8 @@ jobs:
               args=[
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
+                  f"--fingerprint-timezone={timezone}",
+                  f"--fingerprint-locale={locale}",
                   f"--fingerprint={random_seed}"
               ]
           )
@@ -197,7 +193,7 @@ jobs:
                       print("Esecuzione del warm-up su Yelp...", flush=True)
                       page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
                       handle_cookie_consent(page)
-                      time.sleep(3)
+                      time.sleep(2)
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
                   
                   # Navigazione simulata per Startpage
@@ -205,16 +201,25 @@ jobs:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
                       handle_cookie_consent(page)
                       time.sleep(2)
-                      # Startpage usa il selettore input[name='query'] o input#q
-                      page.type("input[name='query'], input#q", query_to_search, delay=150)
-                      page.keyboard.press("Enter")
+                      try:
+                          search_input = page.locator("input[name='query'], input#q")
+                          # Timeout esplicito di 2 secondi sulla digitazione per prevenire hang
+                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.keyboard.press("Enter")
+                      except Exception as e:
+                          print(f"Avviso: impossibile digitare su Startpage ({e}). Salto.", flush=True)
                   
                   # Navigazione simulata per DuckDuckGo HTML
                   elif "html.duckduckgo.com/html" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(2)
-                      page.type("input[name=q]", query_to_search, delay=150)
-                      page.keyboard.press("Enter")
+                      try:
+                          search_input = page.locator("input[name=q]")
+                          # Timeout esplicito di 2 secondi sulla digitazione per prevenire hang
+                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.keyboard.press("Enter")
+                      except Exception as e:
+                          print(f"Avviso: impossibile digitare su DuckDuckGo ({e}). Salto.", flush=True)
                       
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
@@ -224,20 +229,21 @@ jobs:
                   if "finance.yahoo.com" in url:
                       print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
                       try:
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=15000)
-                      except:
+                          # Abbassato il timeout a 5s per mantenere l'esecuzione rapida
+                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                      except Exception:
                           pass
-                      time.sleep(2)
+                      time.sleep(1)
 
-                  # Movimento scorrimento simulato
+                  # Scorrimento naturale simulato
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, 300)
                           time.sleep(1)
-                  except:
+                  except Exception:
                       pass
 
-                  # Tempi di attesa calibrati per i siti diagnostici
+                  # Tempi di attesa bilanciati per evitare rallentamenti generali
                   if "creepjs" in url:
                       time.sleep(20) 
                   elif "pixelscan" in url:
@@ -245,7 +251,7 @@ jobs:
                   elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
                       time.sleep(5)
                   else:
-                      time.sleep(6)
+                      time.sleep(4)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
@@ -256,7 +262,7 @@ jobs:
                   results += f"ERRORE GLOBALE: {str(e)}\n"
                   try:
                       page.close()
-                  except:
+                  except Exception:
                       pass
 
           context.close()
@@ -266,7 +272,7 @@ jobs:
           EOF
 
       - name: Esecuzione Scraping Macchina 2
-        run: xvfb-run --server-args="-screen 0 1920x1080x24" python -u m2_insocket.py
+        run: python -u m2_insocket.py
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
