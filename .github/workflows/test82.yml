@@ -27,57 +27,40 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Costruzione Immagine Usque & Avvio Container Paralleli (SOCKS5h IPv6)
+      - name: Avvio Container WARProxy (Active & Empty)
         run: |
-          # 1. Scarica il binario ufficiale di Usque
-          curl -s https://api.github.com/repos/Diniboy1123/usque/releases/latest \
-            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url' \
-            | xargs wget -qO usque.zip
-          unzip usque.zip usque
-          chmod +x usque
+          # 1. Pull dell'immagine ufficiale ottimizzata
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-          # 2. Crea un Dockerfile minimale basato su Debian-Slim per evitare parziali incompatibilità di glibc
-          cat << 'EOF' > Dockerfile
-          FROM debian:stable-slim
-          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-          COPY usque /usr/local/bin/usque
-          WORKDIR /app
-          EXPOSE 1080
-          EOF
-
-          # Costruisce l'immagine locale usque-local
-          docker build -t usque-local .
-
-          # 3. Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001)
-          docker run -d \
-            --name usque_node_1 \
+          # 2. Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001)
+          docker run --name warproxy_active \
             -p 127.0.0.1:40001:1080 \
-            usque-local sh -c "usque register -a && usque socks --bind 0.0.0.0 --port 1080"
+            -d ghcr.io/kingcc/warproxy:latest
 
-          # 4. Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto su porta locale 40002)
-          docker run -d \
-            --name usque_node_2 \
+          # 3. Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto su porta locale 40002)
+          docker run --name warproxy_empty \
             -p 127.0.0.1:40002:1080 \
-            usque-local sh -c "usque register -a && usque socks --bind 0.0.0.0 --port 1080"
+            -d ghcr.io/kingcc/warproxy:latest
 
-          # Attesa stabilizzazione dei tunnel MASQUE
-          sleep 6
+          # Attesa stabilizzazione (WARProxy deve generare le credenziali ed effettuare l'handshake di WARP)
+          sleep 12
 
-          # 5. Stampa dei log dei container (fondamentale per analizzare subito eventuali eccezioni in GHA)
-          echo "=== LOG CONTAINER 1 (PROXY ATTIVO) ==="
-          docker logs usque_node_1 || true
-          echo "=== LOG CONTAINER 2 (PROXY VUOTO) ==="
-          docker logs usque_node_2 || true
-          echo "======================================"
+          # 4. Stampa dei log di validazione dei container
+          echo "=== LOG CONTAINER 1 (ATTIVO) ==="
+          docker logs warproxy_active || true
+          echo "=== LOG CONTAINER 2 (VUOTO) ==="
+          docker logs warproxy_empty || true
+          echo "================================"
 
-          # 6. Verifica che entrambi i container stiano uscendo con due IPv6 differenti
+          # 5. Verifica che entrambi i tunnel SOCKS5h stiano rispondendo ed estraiamo l'IP di uscita
+          # Rimosso il flag "-6" sul loopback locale per evitare che curl blocchi la connessione al proxy
           echo "=================================================="
-          echo "VERIFICA INDIRIZZO IP CONTAINER 1 (Attivo):"
-          curl -6 --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Tunnel 1 Non Raggiungibile!"
+          echo "VERIFICA IP CONTAINER 1 (Attivo):"
+          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
           
           echo "=================================================="
-          echo "VERIFICA INDIRIZZO IP CONTAINER 2 (Vuoto):"
-          curl -6 --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Tunnel 2 Non Raggiungibile!"
+          echo "VERIFICA IP CONTAINER 2 (Vuoto):"
+          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Proxy 2 fallito!"
           echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
@@ -173,7 +156,7 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Collegamento al Proxy 1 (usque_node_1) sulla porta 40001
+          # Collegamento al Proxy 1 (warproxy_active) sulla porta locale 40001
           context = launch_context(
               headless=False,
               humanize=True,
