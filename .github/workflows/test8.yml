@@ -103,6 +103,7 @@ jobs:
               return default
 
           def handle_cookie_consent(page):
+              """Accetta i cookie ma solo con un timeout rigoroso di 1.5s per non bloccare mai la navigazione"""
               try:
                   consent_selectors = [
                       "button:has-text('Accetta tutto')",
@@ -127,7 +128,7 @@ jobs:
               except Exception:
                   pass
 
-          # 1. Rilevamento preventivo dell'IP esatto (evita il mismatch IPv4/IPv6 su WARP)
+          # 1. Rilevamento preventivo dell'IP esatto (previene il mismatch IPv4/IPv6 su WARP)
           print("Rilevamento IP pubblico di rete...", flush=True)
           detected_ip = None
           try:
@@ -141,9 +142,10 @@ jobs:
           timezone = "UTC"
           locale = "en-US"
 
-          # 2. Interrogazione geolocalizzazione mirata sull'IP esatto
+          # 2. Geolocalizzazione basata sull'IP rilevato (con fallback robusto a freeipapi per evitare i 429)
           if detected_ip:
               geo_services = [
+                  (f"https://freeipapi.com/api/json/{detected_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
                   (f"https://ipapi.co/{detected_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
                   (f"https://ipwho.is/{detected_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
               ]
@@ -166,8 +168,9 @@ jobs:
                               print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
                               break
                   except Exception as e:
-                      print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
+                      print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
 
+          # Generazione di un seed hardware dinamico coerente per ogni run
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
@@ -176,6 +179,7 @@ jobs:
               humanize=True,
               timezone=timezone,
               locale=locale,
+              # Impostiamo l'altezza interna a 950 per risolvere l'incongruenza innerHeight > outerHeight
               viewport={"width": 1920, "height": 950},
               args=[
                   "--no-sandbox", 
@@ -207,7 +211,7 @@ jobs:
                           });
                       }
 
-                      // 2. Mock ContentIndex
+                      // 2. Mock ContentIndex (atteso su contesti HTTPS Chrome)
                       if (!('ContentIndex' in window)) {
                           window.ContentIndex = class ContentIndex {
                               async add() {}
