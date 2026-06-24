@@ -1,0 +1,288 @@
+name: Test RAG Challenge 2026
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  machine2_cdp_insocket:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installazione Font di Sistema (Requisito CloakBrowser per Hash Canvas)
+        run: |
+          sudo apt-get update
+          # Accettazione EULA Microsoft per i font core di Windows
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          fc-cache -f -v
+
+      - name: Installazione Dipendenze
+        run: |
+          # Installiamo cloakbrowser con il modulo geoip abilitato
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
+
+      - name: Setup 3 WARProxy Docker Containers (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          for i in 1 2 3; do
+            PORT=$((40000 + i))
+            docker run --name warproxy-$i \
+              --network host \
+              -e TZ=Europe/Rome \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+          done
+
+          sleep 15
+          docker ps -a
+
+      - name: Verifica IP IPv6 di uscita
+        run: |
+          for i in 1 2 3; do
+            PORT=$((40000 + i))
+            echo "VERIFICA IP CONTAINER $i ($PORT):"
+            curl --proxy socks5h://127.0.0.1:$PORT https://api64.ipify.org?format=json || echo "Proxy $i fallito!"
+            echo "--------------------------------------------------"
+          done
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          echo "Download ufficiale del binario Chromium patchato..."
+          python -m cloakbrowser install
+
+      - name: Creazione script Python
+        run: |
+          cat << 'EOF' > m2_insocket.py
+          import time
+          import sys
+          import random
+          import requests
+          from cloakbrowser import launch_persistent_context
+          from bs4 import BeautifulSoup
+          from urllib.parse import urlparse, parse_qs
+
+          TARGETS = [
+              "https://api64.ipify.org?format=json",
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.eater.com/rome",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://guide.michelin.com/en/it/lazio/roma/restaurants",
+              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
+              "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+          MY_TARGETS = TARGETS[(node_id-1)*9 : node_id*9]
+
+          def extract_text(html_content, url):
+              soup = BeautifulSoup(html_content, 'html.parser')
+              text = soup.get_text(separator=' ', strip=True)
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return text
+              return text[:5000]
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
+          # Controlliamo solo che WARP funzioni. CloakBrowser farà il resto via geoip=True
+          def wait_for_proxy(port, timeout=45):
+              print(f"[NODO {node_id}] Attesa WARP su porta {port}...", flush=True)
+              start_time = time.time()
+              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              while time.time() - start_time < timeout:
+                  try:
+                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
+                      if r.status_code == 200 and ":" in r.json().get("ip", ""):
+                          return True
+                  except Exception:
+                      time.sleep(2)
+              return False
+
+          if not wait_for_proxy(ACTIVE_PORT):
+              print(f"[NODO {node_id}] Proxy inattivo. Esco.", flush=True)
+              sys.exit(1)
+
+          random_seed = str(random.randint(100000, 999999))
+          print(f"[NODO {node_id}] Avvio CloakBrowser (Seed: {random_seed})", flush=True)
+
+          # AVVIO DELEGATO AL 100% A CLOAKBROWSER
+          context = launch_persistent_context(
+              user_data_dir=f"./profile_node_{node_id}",
+              headless=False,
+              humanize=True, # Abilita input simil-umani nativi (Bezier curves)
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,    # Auto-rileva TZ, Locale e nasconde WebRTC IP
+              viewport={"width": 1920, "height": 950},
+              args=[
+                  "--no-sandbox", 
+                  "--disable-dev-shm-usage",
+                  f"--fingerprint={random_seed}",
+                  "--fingerprint-storage-quota=5000",   
+                  "--fingerprint-windows-font-metrics"  
+              ]
+          )
+
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          for url in MY_TARGETS:
+              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              try:
+                  page = context.new_page()
+                  query_to_search = get_query_from_url(url)
+
+                  # Navigazione specifica
+                  if "yelp.com" in url or "yelp.it" in url:
+                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(3)
+                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                  elif "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+                      try:
+                          # L'uso di locator().type() e .press() viene "umanizzato" nativamente
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.keyboard.press("Enter")
+                      except Exception: pass
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+                      try:
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.keyboard.press("Enter")
+                      except Exception: pass
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+
+                  # Gestione Pixelscan (richiede un click fisico)
+                  if "pixelscan.net" in url:
+                      try:
+                          btn = page.locator("text=Scan My Browser Now")
+                          if btn.is_visible(timeout=3000):
+                              btn.click() # Humanize applica la curva di Bezier qui
+                      except Exception: pass
+
+                  # Gestione Cloudflare Turnstile (se presente l'iframe)
+                  try:
+                      cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
+                      checkbox = cf_iframe.locator("input[type='checkbox']")
+                      if checkbox.is_visible(timeout=3000):
+                          checkbox.click() # Cliccato umanamente
+                          time.sleep(4)
+                  except Exception: pass
+
+                  # Gestione Cookie (con click umanizzato)
+                  if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                      try:
+                          consent_selectors = [
+                              "button:has-text('Accetta tutto')", "button:has-text('Accept all')",
+                              "button:has-text('Consenti')", "button:has-text('I agree')"
+                          ]
+                          for selector in consent_selectors:
+                              btn = page.locator(selector)
+                              if btn.is_visible(timeout=1000):
+                                  btn.click()
+                                  break
+                      except Exception: pass
+
+                  # Scroll per triggerare il caricamento pigro e simulare attività (umanizzato nativamente)
+                  try:
+                      for _ in range(3):
+                          page.mouse.wheel(0, random.randint(300, 600))
+                          time.sleep(random.uniform(0.8, 1.5))
+                  except Exception: pass
+
+                  # Attese necessarie per permettere ai test diagnostici di finire
+                  if "creepjs" in url: time.sleep(15) 
+                  elif "pixelscan" in url: time.sleep(8)
+                  elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
+                  else: time.sleep(3)
+
+                  raw_html = page.content()
+                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                  page.close()
+
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  results += f"ERRORE GLOBALE: {str(e)}\n"
+                  try: page.close()
+                  except Exception: pass
+
+          context.close()
+
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
+              f.write(results)
+          EOF
+
+      - name: Esecuzione Scraping Parallelo (3 Nodi indipendenti)
+        run: |
+          echo "Avvio processi paralleli in background..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          
+          wait
+
+          echo "=== LOG NODO 1 ==="
+          cat node1.log || true
+          echo "=== LOG NODO 2 ==="
+          cat node2.log || true
+          echo "=== LOG NODO 3 ==="
+          cat node3.log || true
+          echo "=================="
+
+          touch output_node_1.txt output_node_2.txt output_node_3.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
