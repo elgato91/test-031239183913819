@@ -14,58 +14,9 @@ jobs:
         run: |
           mkdir -p config1 config2 output
 
-      - name: Generazione Configurazione WARP 1 (Account A)
+      - name: Scrittura File di Progetto (Docker, Entrypoints, Python Script)
         run: |
-          docker run --rm -v $(pwd)/config1:/warp -w /warp ghcr.io/virb3/wgcf register --accept-tos
-          docker run --rm -v $(pwd)/config1:/warp -w /warp ghcr.io/virb3/wgcf generate
-          sudo chown -R $USER:$USER config1
-          mv config1/wgcf-profile.conf config1/wg.conf
-
-      - name: Generazione Configurazione WARP 2 (Account B)
-        run: |
-          docker run --rm -v $(pwd)/config2:/warp -w /warp ghcr.io/virb3/wgcf register --accept-tos
-          docker run --rm -v $(pwd)/config2:/warp -w /warp ghcr.io/virb3/wgcf generate
-          sudo chown -R $USER:$USER config2
-          mv config2/wgcf-profile.conf config2/wg.conf
-
-      - name: Modifica Configurazione per Esclusività IPv6 (AllowedIPs = ::/0)
-        shell: python
-        run: |
-          for filepath in ["config1/wg.conf", "config2/wg.conf"]:
-              with open(filepath, "r") as f:
-                  content = f.read()
-              
-              lines = content.splitlines()
-              clean_lines = []
-              for line in lines:
-                  # Esclude le righe destinate all'instradamento IPv4 generico
-                  if "AllowedIPs" in line and "0.0.0.0" in line:
-                      continue
-                  clean_lines.append(line)
-              
-              with open(filepath, "w") as f:
-                  f.write("\n".join(clean_lines) + "\n")
-              print(f"Configurazione {filepath} modificata correttamente per uscire esclusivamente in IPv6.")
-
-      - name: Creazione dei File di Configurazione Wireproxy
-        run: |
-          cat << 'EOF' > config1/wireproxy.conf
-          WGConfig = /app/config/wg.conf
-
-          [Socks5]
-          BindAddress = 127.0.0.1:1080
-          EOF
-
-          cat << 'EOF' > config2/wireproxy.conf
-          WGConfig = /app/config/wg.conf
-
-          [Socks5]
-          BindAddress = 127.0.0.1:1080
-          EOF
-
-      - name: Scrittura dei Dockerfile e Script di Avvio
-        run: |
-          # 1. Dockerfile Scraper
+          # 1. Dockerfile Scraper (Basato su Playwright/Ubuntu con wgcf e wireproxy integrati)
           cat << 'EOF' > Dockerfile.scraper
           FROM mcr.microsoft.com/playwright/python:v1.43.0-jammy
           ENV DEBIAN_FRONTEND=noninteractive
@@ -84,9 +35,12 @@ jobs:
               && rm -rf /var/lib/apt/lists/* \
               && fc-cache -f -v
           RUN pip install --no-cache-dir "cloakbrowser[geoip]" beautifulsoup4 requests
+          # Installazione di wireproxy e wgcf (stessi componenti usati da warproxy)
           RUN curl -fsSL -o /tmp/wireproxy.tar.gz https://github.com/pufferffish/wireproxy/releases/download/v1.0.8/wireproxy_linux_amd64.tar.gz && \
               tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy && \
               rm -rf /tmp/wireproxy.tar.gz
+          RUN curl -fsSL -o /usr/local/bin/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 && \
+              chmod +x /usr/local/bin/wgcf
           WORKDIR /app
           COPY m2_insocket.py /app/m2_insocket.py
           COPY entrypoint_scraper.sh /app/entrypoint_scraper.sh
@@ -94,13 +48,16 @@ jobs:
           ENTRYPOINT ["/app/entrypoint_scraper.sh"]
           EOF
 
-          # 2. Dockerfile Empty (Contenitore Vuoto / Inattivo)
+          # 2. Dockerfile Empty (Contenitore Vuoto / Idle con wgcf e wireproxy integrati)
           cat << 'EOF' > Dockerfile.empty
           FROM alpine:3.19
           RUN apk add --no-cache curl bash
+          # Installazione di wireproxy e wgcf
           RUN curl -fsSL -o /tmp/wireproxy.tar.gz https://github.com/pufferffish/wireproxy/releases/download/v1.0.8/wireproxy_linux_amd64.tar.gz && \
               tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy && \
               rm -rf /tmp/wireproxy.tar.gz
+          RUN curl -fsSL -o /usr/local/bin/wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 && \
+              chmod +x /usr/local/bin/wgcf
           WORKDIR /app
           COPY entrypoint_empty.sh /app/entrypoint_empty.sh
           RUN chmod +x /app/entrypoint_empty.sh
@@ -111,48 +68,139 @@ jobs:
           cat << 'EOF' > entrypoint_scraper.sh
           #!/bin/bash
           set -e
-          # Avvio del Virtual Framebuffer
           Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
           export DISPLAY=:99
 
-          echo "Avvio di Wireproxy (SOCKS5 locale su 127.0.0.1:1080)..."
+          # Generazione dinamica della configurazione WARP (esattamente come warproxy)
+          mkdir -p /app/config
+          if [ ! -f /app/config/wgcf-profile.conf ]; then
+              echo "Registrazione account Cloudflare WARP..."
+              wgcf register --accept-tos --config /app/config/wgcf-account.toml
+              wgcf generate --config /app/config/wgcf-account.toml --profile /app/config/wgcf-profile.conf
+              # Rimozione di IPv4 per garantire l'esclusività IPv6
+              sed -i '/AllowedIPs = 0.0.0.0\/0/d' /app/config/wgcf-profile.conf
+          fi
+
+          # Creazione della configurazione wireproxy
+          cat << 'WEOF' > /app/config/wireproxy.conf
+          WGConfig = /app/config/wgcf-profile.conf
+
+          [Socks5]
+          BindAddress = 127.0.0.1:1080
+          WEOF
+
+          echo "Avvio di Wireproxy SOCKS5 locale..."
           wireproxy -c /app/config/wireproxy.conf &
           WIREPROXY_PID=$!
-          sleep 8
 
-          echo "Verifica IP pubblico di uscita (SOCKS5H)..."
-          curl -s --socks5-hostname 127.0.0.1:1080 https://api64.ipify.org?format=json || echo "Impossibile testare la connessione"
-          
+          # Esecuzione script Python (la verifica della salute del proxy è ora delegata a Python)
           python -u m2_insocket.py
+          
           kill $WIREPROXY_PID || true
           EOF
 
-          # 4. Entrypoint Empty
+          # 4. Entrypoint Empty (Container Vuoto)
           cat << 'EOF' > entrypoint_empty.sh
           #!/bin/bash
           set -e
-          echo "Avvio di Wireproxy nel container vuoto (SOCKS5 locale su 127.0.0.1:1080)..."
+
+          mkdir -p /app/config
+          if [ ! -f /app/config/wgcf-profile.conf ]; then
+              echo "Registrazione account Cloudflare WARP (Container Vuoto)..."
+              wgcf register --accept-tos --config /app/config/wgcf-account.toml
+              wgcf generate --config /app/config/wgcf-account.toml --profile /app/config/wgcf-profile.conf
+              # Rimozione di IPv4 per garantire l'esclusività IPv6
+              sed -i '/AllowedIPs = 0.0.0.0\/0/d' /app/config/wgcf-profile.conf
+          fi
+
+          cat << 'WEOF' > /app/config/wireproxy.conf
+          WGConfig = /app/config/wgcf-profile.conf
+
+          [Socks5]
+          BindAddress = 127.0.0.1:1080
+          WEOF
+
+          echo "Avvio di Wireproxy SOCKS5 locale (Container Vuoto)..."
           wireproxy -c /app/config/wireproxy.conf &
           WIREPROXY_PID=$!
-          sleep 8
 
-          echo "Verifica IP pubblico di uscita nel container vuoto (SOCKS5H)..."
-          curl -s --socks5-hostname 127.0.0.1:1080 https://api64.ipify.org?format=json || echo "Impossibile testare la connessione"
-          
-          echo "Container 2 (Vuoto) è operativo ed è in attesa (idle)..."
+          # Verifica iniziale dell'IP IPv6 e attesa indefinita
+          sleep 5
+          curl -s --socks5-hostname 127.0.0.1:1080 https://ipv6.icanhazip.com || echo "Impossibile rilevare l'IP IPv6 del container vuoto"
+          echo "Container 2 (Vuoto) è in attesa (idle)..."
           tail -f /dev/null
           EOF
 
-      - name: Creazione Script Python Scraper
-        run: |
+          # 5. Script Python dello Scraper (Con gli spunti forniti integrati)
           cat << 'EOF' > m2_insocket.py
           import time
           import os
           import random
           import requests
+          import asyncio
+          import threading
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
+
+          # Funzione per eseguire coroutine asincrone in un thread separato (isomero a quella fornita)
+          def run_async_in_thread(coro):
+              result, exception = [None], [None]
+              def worker():
+                  try:
+                      loop = asyncio.new_event_loop()
+                      asyncio.set_event_loop(loop)
+                      result[0] = loop.run_until_complete(coro)
+                      loop.close()
+                  except Exception as e:
+                      exception[0] = e
+              t = threading.Thread(target=worker)
+              t.start()
+              t.join()
+              if exception[0]:
+                  raise exception[0]
+              return result[0]
+
+          # Funzione di attesa e validazione della salute del proxy e dell'IPv6 (allineata a quella fornita)
+          def wait_for_proxy(port, timeout=45):
+              print(f"In attesa del proxy sulla porta {port} (Verifica IPv6)...", flush=True)
+              start_time = time.time()
+              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              
+              while time.time() - start_time < timeout:
+                  try:
+                      # Verifica prioritaria su icanhazip IPv6
+                      r = requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
+                      if r.status_code == 200 and ":" in r.text:
+                          return True, "IPv6", r.text.strip()
+                  except Exception:
+                      pass
+                      
+                  try:
+                      # Verifica alternativa tramite Cloudflare CDN Trace
+                      r = requests.get("https://cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
+                      if r.status_code == 200 and "warp=" in r.text:
+                          ip_line = [line for line in r.text.split('\n') if line.startswith('ip=')]
+                          if ip_line:
+                              ip = ip_line[0].split('=')[1]
+                              ip_type = "IPv6" if ":" in ip else "IPv4"
+                              return True, ip_type, ip
+                  except Exception:
+                      pass
+                  time.sleep(2)
+              return False, None, None
+
+          # Funzione di verifica esito dello scraping (completamento della struttura fornita)
+          def check_html_success(html, url, target_name, engine_name):
+              html_str = str(html) if html else ""
+              html_lower = html_str.lower()
+              # Rilevamento di segnali comuni di blocco, captcha o errori di caricamento
+              blocked_signals = ["captcha", "robot", "cloudflare", "access denied", "blocked", "ip temporaneamente bloccato"]
+              for signal in blocked_signals:
+                  if signal in html_lower:
+                      print(f"[BLOCKED] Rilevato segnale di blocco '{signal}' su {target_name} ({engine_name})", flush=True)
+                      return False
+              return True
 
           TARGETS = [
               "https://api64.ipify.org?format=json",
@@ -187,7 +235,6 @@ jobs:
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
           results = ""
 
-          # Allineamento di requests per forzare l'instradamento tramite proxy SOCKS5H locale
           LOCAL_PROXY = "socks5h://127.0.0.1:1080"
           PROXIES_DICT = {"http": LOCAL_PROXY, "https": LOCAL_PROXY}
 
@@ -234,21 +281,17 @@ jobs:
               except Exception:
                   pass
 
-          # 1. Rilevamento preventivo dell'IP pubblico esatto (passando per il proxy SOCKS5H)
-          print("Rilevamento IP pubblico di rete...", flush=True)
-          detected_ip = None
-          try:
-              response = requests.get("https://api64.ipify.org?format=json", proxies=PROXIES_DICT, timeout=8)
-              if response.status_code == 200:
-                  detected_ip = response.json().get("ip")
-                  print(f"IP Rilevato: {detected_ip}", flush=True)
-          except Exception as e:
-              print(f"Avviso: impossibile rilevare l'IP di rete ({e})", flush=True)
+          # 1. Rilevamento IP pubblico e stato della salute del proxy
+          proxy_ready, ip_type, detected_ip = wait_for_proxy(1080, timeout=45)
+          if proxy_ready:
+              print(f"Salute proxy OK! Rete: {ip_type} | IP Rilevato: {detected_ip}", flush=True)
+          else:
+              print("Attenzione: Raggiunto timeout nell'attesa del proxy IPv6. Procedo comunque...", flush=True)
 
           timezone = "UTC"
           locale = "en-US"
 
-          # 2. Geolocalizzazione basata sull'IP IPv6 reale (con freeipapi per azzerare i 429)
+          # 2. Geolocalizzazione basata sull'IP IPv6 reale
           if detected_ip:
               geo_services = [
                   (f"https://freeipapi.com/api/json/{detected_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
@@ -280,7 +323,6 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Configurazione corretta del proxy locale SOCKS5 a livello di contesto Playwright e Chromium
           context = launch_context(
               headless=False,
               humanize=True,
@@ -407,7 +449,12 @@ jobs:
                       time.sleep(4)
 
                   raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                  text_content = extract_text(raw_html, url)
+                  
+                  # Validazione del risultato dello scraping
+                  check_html_success(raw_html, url, url, "CloakBrowser")
+
+                  results += f"TESTO ESTRATTO:\n{text_content}\n"
                   page.close()
 
               except Exception as e:
@@ -420,13 +467,13 @@ jobs:
 
           context.close()
 
-          # Scrittura dell'output sul volume montato di output
+          # Salvataggio dell'output finale nella directory montata
           os.makedirs("/app/output", exist_ok=True)
           with open("/app/output/output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-          # 6. Docker Compose
+          # 6. Scrittura del file docker-compose.yml
           cat << 'EOF' > docker-compose.yml
           version: '3.8'
 
@@ -448,11 +495,11 @@ jobs:
                 - ./config2:/app/config
           EOF
 
-      - name: Avvio Esecuzione Docker Compose
+      - name: Esecuzione Stack Docker Compose
         run: |
           docker compose up --build --exit-code-from scraper
 
-      - name: Ripristino Permessi Output per Archivio
+      - name: Ottimizzazione Permessi File di Output
         if: always()
         run: |
           sudo chown -R $USER:$USER output/ || true
