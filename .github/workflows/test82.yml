@@ -27,40 +27,58 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Avvio Container WARProxy (Active & Empty)
+      - name: Costruzione Immagine Usque & Avvio Container in Network Host (SOCKS5h IPv6)
         run: |
-          # 1. Pull dell'immagine ufficiale ottimizzata
-          docker pull ghcr.io/kingcc/warproxy:latest
+          # 1. Scarica il binario ufficiale di Usque (MASQUE client)
+          curl -s https://api.github.com/repos/Diniboy1123/usque/releases/latest \
+            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url' \
+            | xargs wget -qO usque.zip
+          unzip usque.zip usque
+          chmod +x usque
 
-          # 2. Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001)
-          docker run --name warproxy_active \
-            -p 127.0.0.1:40001:1080 \
-            -d ghcr.io/kingcc/warproxy:latest
+          # 2. Crea un Dockerfile robusto basato su Debian-Slim
+          cat << 'EOF' > Dockerfile
+          FROM debian:stable-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+          COPY usque /usr/local/bin/usque
+          WORKDIR /app
+          EXPOSE 1080
+          EOF
 
-          # 3. Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto su porta locale 40002)
-          docker run --name warproxy_empty \
-            -p 127.0.0.1:40002:1080 \
-            -d ghcr.io/kingcc/warproxy:latest
+          # Costruisce l'immagine locale usque-local
+          docker build -t usque-local .
 
-          # Attesa stabilizzazione (WARProxy deve generare le credenziali ed effettuare l'handshake di WARP)
-          sleep 12
+          # 3. Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001 in network host per sbloccare l'IPv6)
+          docker run -d \
+            --name usque_node_1 \
+            --network host \
+            usque-local sh -c "usque register -a && usque socks --bind 127.0.0.1 --port 40001"
 
-          # 4. Stampa dei log di validazione dei container
-          echo "=== LOG CONTAINER 1 (ATTIVO) ==="
-          docker logs warproxy_active || true
-          echo "=== LOG CONTAINER 2 (VUOTO) ==="
-          docker logs warproxy_empty || true
-          echo "================================"
+          # 4. Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto/Idle su porta locale 40002)
+          docker run -d \
+            --name usque_node_2 \
+            --network host \
+            usque-local sh -c "usque register -a && usque socks --bind 127.0.0.1 --port 40002"
 
-          # 5. Verifica che entrambi i tunnel SOCKS5h stiano rispondendo ed estraiamo l'IP di uscita
-          # Rimosso il flag "-6" sul loopback locale per evitare che curl blocchi la connessione al proxy
+          # Attesa stabilizzazione dei tunnel MASQUE
+          sleep 8
+
+          # 5. Stampa dei log di connessione dei container
+          echo "=== LOG CONTAINER 1 (PROXY ATTIVO) ==="
+          docker logs usque_node_1 || true
+          echo "=== LOG CONTAINER 2 (PROXY VUOTO) ==="
+          docker logs usque_node_2 || true
+          echo "======================================"
+
+          # 6. Verifica che entrambi i tunnel SOCKS5h stiano rispondendo ed estraiamo l'IPv6 di uscita
+          # Nota: Chiamata pulita socks5h senza flag -6 (la risoluzione remota della timezone/IPv6 avviene sul proxy)
           echo "=================================================="
-          echo "VERIFICA IP CONTAINER 1 (Attivo):"
-          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
+          echo "VERIFICA INDIRIZZO IP CONTAINER 1 (Attivo):"
+          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Tunnel 1 Non Raggiungibile!"
           
           echo "=================================================="
-          echo "VERIFICA IP CONTAINER 2 (Vuoto):"
-          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Proxy 2 fallito!"
+          echo "VERIFICA INDIRIZZO IP CONTAINER 2 (Vuoto):"
+          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Tunnel 2 Non Raggiungibile!"
           echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
@@ -156,7 +174,8 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Collegamento al Proxy 1 (warproxy_active) sulla porta locale 40001
+          # Passiamo il proxy a Cloakbrowser e configuriamo i flag C++ per forzare 
+          # la risoluzione dei nomi remota, inibendo i DNS Leak locali sul runner.
           context = launch_context(
               headless=False,
               humanize=True,
@@ -168,7 +187,9 @@ jobs:
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random_seed}",
                   "--fingerprint-storage-quota=5000",   
-                  "--fingerprint-windows-font-metrics"  
+                  "--fingerprint-windows-font-metrics",
+                  # FORZATURA STRUTTURALE SOCKS5H: Impedisce a Chromium di risolvere i DNS localmente sul runner
+                  "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
               ]
           )
 
