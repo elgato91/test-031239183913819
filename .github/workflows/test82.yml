@@ -27,63 +27,27 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Setup WireProxy & WGCF (SOCKS5h IPv6-Only WARP)
+      - name: Setup Usque (SOCKS5h MASQUE Client)
         run: |
-          # Scarica WGCF (Unofficial CLI per Cloudflare WARP)
-          wget -qO wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
-          chmod +x wgcf
-          sudo mv wgcf /usr/local/bin/
+          # Scarica l'ultima release stabile di Usque (MASQUE client) per Linux AMD64
+          curl -s https://api.github.com/repos/Diniboy1123/usque/releases/latest \
+            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url' \
+            | xargs wget -qO usque.zip
+          unzip usque.zip
+          chmod +x usque
+          sudo mv usque /usr/local/bin/
 
-          # Scarica WireProxy (WireGuard in userspace come proxy SOCKS5h)
-          wget -qO wireproxy.tar.gz https://github.com/octeep/wireproxy/releases/download/v1.1.2/wireproxy_linux_amd64.tar.gz
-          tar -xzf wireproxy.tar.gz
-          chmod +x wireproxy
-          sudo mv wireproxy /usr/local/bin/
+          # Registrazione automatica dell'account (crea config.json accettando i TOS di Cloudflare)
+          usque register -a
 
-          # Registrazione ed esportazione del profilo di WARP
-          wgcf register --accept-tos
-          wgcf generate
-
-          # Script in Python per isolare e configurare l'interfaccia puramente IPv6-only (risolve i crash DNS)
-          cat << 'EOF' > make_config.py
-          with open("wgcf-profile.conf", "r") as f:
-              lines = f.readlines()
-          new_lines = []
-          for line in lines:
-              # Estraiamo solo l'indirizzo IPv6 dall'interfaccia di WARP
-              if line.strip().startswith("Address"):
-                  parts = line.split("=")
-                  ips = parts[1].split(",")
-                  ipv6 = [ip.strip() for ip in ips if ":" in ip][0]
-                  line = f"Address = {ipv6}\n"
-              # Filtra i server DNS per tenere solo quelli IPv6 (altrimenti il tunnel IPv6-only fallisce)
-              elif line.strip().startswith("DNS"):
-                  parts = line.split("=")
-                  dns_servers = parts[1].split(",")
-                  ipv6_dns = [dns.strip() for dns in dns_servers if ":" in dns]
-                  line = f"DNS = {', '.join(ipv6_dns)}\n"
-              # Forza l'instradamento esclusivamente su IPv6
-              elif line.strip().startswith("AllowedIPs"):
-                  line = "AllowedIPs = ::/0\n"
-              new_lines.append(line)
-          
-          # Accodiamo la sezione Socks5 per configurare il proxy locale in ascolto sulla porta 40000
-          new_lines.append("\n[Socks5]\nBindAddress = 127.0.0.1:40000\n")
-          
-          with open("wireproxy.conf", "w") as f:
-              f.writelines(new_lines)
-          EOF
-          
-          python3 make_config.py
-
-          # Avvia wireproxy salvando i log per eventuali analisi
-          wireproxy -c wireproxy.conf > wireproxy.log 2>&1 &
+          # Avvia Usque in modalità SOCKS5 proxy sulla porta locale 40000 in background
+          usque socks --bind 127.0.0.1 --port 40000 > usque.log 2>&1 &
           sleep 5
 
-          # Stampa i log di avvio del tunnel nel pannello di Github Actions per verifica immediata
-          echo "=== LOG DI AVVIO WIREPROXY ==="
-          cat wireproxy.log
-          echo "=============================="
+          # Stampa i log di connessione MASQUE per ispezione
+          echo "=== LOG DI AVVIO USQUE ==="
+          cat usque.log
+          echo "=========================="
 
           # Verifica che il tunnel SOCKS5h IPv6 funzioni correttamente
           echo "Verifica IP IPv6 di uscita su tunnel SOCKS5h:"
@@ -182,7 +146,8 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Avvio del contesto con il SOCKS5h Proxy e geoip=True (l'allineamento della timezone è gestito nativamente dal C++ del browser)
+          # Caricamento del contesto: delegando il proxy e geoip=True a CloakBrowser,
+          # il motore allineerà nativamente timezone, locale e WebRTC IP leggendo l'IPv6 di WARP.
           context = launch_context(
               headless=False,
               humanize=True,
@@ -193,8 +158,9 @@ jobs:
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random_seed}",
-                  "--fingerprint-storage-quota=5000",   # Normalizza lo spazio di archiviazione per eludere il rilevamento incognito/private
-                  "--fingerprint-windows-font-metrics"  # Calibra le metriche dei font per allinearsi all'User-Agent Windows
+                  # Ripristiniamo il noise predefinito per coprire LLVMpipe/Mesa Linux
+                  "--fingerprint-storage-quota=5000",   
+                  "--fingerprint-windows-font-metrics"  
               ]
           )
 
