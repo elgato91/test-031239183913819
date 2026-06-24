@@ -27,14 +27,21 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Setup Cloudflare WARP
+      - name: Setup Cloudflare WARP (SOCKS5 Proxy Mode)
         run: |
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update && sudo apt-get install -y cloudflare-warp
+          
+          # Configura WARP per agire esclusivamente come SOCKS5 proxy locale (Porta 40000)
           warp-cli --accept-tos registration new || true
+          warp-cli --accept-tos mode proxy
           warp-cli --accept-tos connect
           sleep 5
+          
+          # Test rapido di validazione del tunnel SOCKS5h
+          echo "Verifica IP del tunnel SOCKS5:"
+          curl -x socks5h://127.0.0.1:40000 https://api64.ipify.org?format=json
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
@@ -46,7 +53,6 @@ jobs:
           cat << 'EOF' > m2_insocket.py
           import time
           import random
-          import requests
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -103,7 +109,6 @@ jobs:
               return default
 
           def handle_cookie_consent(page):
-              """Accetta i cookie ma solo con un timeout rigoroso di 1.5s per non bloccare mai la navigazione"""
               try:
                   consent_selectors = [
                       "button:has-text('Accetta tutto')",
@@ -128,69 +133,23 @@ jobs:
               except Exception:
                   pass
 
-          # 1. Rilevamento preventivo dell'IP esatto (previene il mismatch IPv4/IPv6 su WARP)
-          print("Rilevamento IP pubblico di rete...", flush=True)
-          detected_ip = None
-          try:
-              response = requests.get("https://api64.ipify.org?format=json", timeout=5)
-              if response.status_code == 200:
-                  detected_ip = response.json().get("ip")
-                  print(f"IP Rilevato: {detected_ip}", flush=True)
-          except Exception as e:
-              print(f"Avviso: impossibile rilevare l'IP di rete ({e})", flush=True)
-
-          timezone = "UTC"
-          locale = "en-US"
-
-          # 2. Geolocalizzazione basata sull'IP rilevato (con fallback robusto a freeipapi per evitare i 429)
-          if detected_ip:
-              geo_services = [
-                  (f"https://freeipapi.com/api/json/{detected_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
-                  (f"https://ipapi.co/{detected_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-                  (f"https://ipwho.is/{detected_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-              ]
-              for url, parse_func in geo_services:
-                  try:
-                      print(f"Geolocalizzazione IP su {url}...", flush=True)
-                      response = requests.get(url, timeout=5)
-                      if response.status_code == 200:
-                          data = response.json()
-                          tz, loc = parse_func(data)
-                          if tz:
-                              timezone = tz
-                              locale = loc
-                              if len(locale) == 2:
-                                  country_to_locale = {
-                                      "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                      "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                                  }
-                                  locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                              print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                              break
-                  except Exception as e:
-                      print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
-
-          # Generazione di un seed hardware dinamico coerente per ogni run
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
+          # Avvio del contesto con il SOCKS5h Proxy e geoip=True (l'allineamento della timezone è gestito nativamente dal C++ del browser)
           context = launch_context(
               headless=False,
               humanize=True,
-              timezone=timezone,
-              locale=locale,
+              proxy="socks5://127.0.0.1:40000",
+              geoip=True,
               viewport={"width": 1920, "height": 950},
               args=[
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",
-                  f"--fingerprint-locale={locale}",
                   f"--fingerprint={random_seed}",
-                  # APPLICAZIONE DEI FLAG OTTIMIZZATI DA DOCUMENTAZIONE:
-                  "--fingerprint-noise=false",          # Disattiva il rumore sospetto, sblocca i Font ed elimina i contrassegni "Spoofed"
-                  "--disable-http2",                     # Forza HTTP/1.1 su WAF sensibili come Turnstile/Cloudflare per aggirare i controlli dell'handshake
-                  "--fingerprint-storage-quota=5000",   # Normalizza la quota a 5GB evitando il rilevamento incognito/ephemeral
-                  "--fingerprint-windows-font-metrics"  # Allinea metriche dei Font a Windows per evitare discrepanze
+                  "--fingerprint-noise=false",          # Previene l'identificazione euristica delle impronte alterate, risolvendo anche il rilevamento dei font
+                  "--fingerprint-storage-quota=5000",   # Normalizza lo spazio di archiviazione per eludere il rilevamento incognito/private
+                  "--fingerprint-windows-font-metrics"  # Calibra le metriche dei font per allinearsi all'User-Agent Windows
               ]
           )
 
@@ -241,7 +200,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, // Latenza simulata coerente con l'instradamento VPN di WARP
+                              get: () => 100, // Allineamento con il ritardo di instradamento di WARP
                               configurable: true,
                               enumerable: true
                           });
