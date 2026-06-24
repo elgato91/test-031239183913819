@@ -1,282 +1,222 @@
-name: Test RAG Challenge 2026
+import time
+import random
+import requests
+from cloakbrowser import launch_context
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, parse_qs
 
-on:
-  workflow_dispatch:
+TARGETS = [
+    "https://api64.ipify.org?format=json",
+    "https://tls.browserleaks.com/json",
+    "https://bot.sannysoft.com/",
+    "https://abrahamjuliot.github.io/creepjs/",
+    "https://pixelscan.net/",
+    "https://bot.incolumitas.com/",
+    "https://www.deviceinfo.me/",
+    "https://www.google.com/search?q=cosa+vedere+roma",
+    "https://www.bing.com/search?q=cosa+vedere+roma",
+    "https://www.eater.com/rome",
+    "https://www.bloomberg.com/markets/stocks",
+    "https://www.morningstar.com/stocks/xnas/aapl/quote",
+    "https://finance.yahoo.com/quote/AAPL/key-statistics",
+    "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+    "https://www.passportindex.org/passport/italy/",
+    "https://guide.michelin.com/en/it/lazio/roma/restaurants",
+    "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
+    "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
+    "https://katieparla.com/budget-dining-in-rome-revised/",
+    "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+    "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+    "https://www.bing.com/search?q=migliore+carbonara+roma",
+    "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+    "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+    "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+    "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
+    "https://www.canadianinsider.com/money-is-moving"
+]
 
-jobs:
-  machine2_cdp_insocket:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+results = ""
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
-        run: |
-          sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          fc-cache -f -v
+def extract_text(html_content, url):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    text = soup.get_text(separator=' ', strip=True)
+    if any(site in url for site in DIAGNOSTIC_SITES):
+        return text
+    return text[:5000]
 
-      - name: Installazione Dipendenze
-        run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
-          playwright install-deps chromium
+def get_query_from_url(url, default="migliore carbonara roma"):
+    try:
+        parsed = urlparse(url)
+        queries = parse_qs(parsed.query)
+        for param in ['q', 'query', 'p']:
+            if param in queries:
+                return queries[param][0]
+    except Exception:
+        pass
+    return default
 
-      - name: Setup Cloudflare WARP
-        run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update && sudo apt-get install -y cloudflare-warp
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos connect
-          sleep 5
+def handle_cookie_consent(page):
+    """Accetta i cookie ma solo con un timeout rigoroso di 1.5s per non bloccare mai la navigazione"""
+    try:
+        consent_selectors = [
+            "button:has-text('Accetta tutto')",
+            "button:has-text('Accept all')",
+            "button:has-text('Consenti')",
+            "button:has-text('I agree')",
+            "button:has-text('Accetto')",
+            "button:has-text('Agree')",
+            "button:has-text('Accept')",
+            "button:has-text('OK')",
+            "button:has-text('Allow all')",
+            "button:has-text('Consenti l\\'uso dei cookie')",
+            "#L2AGLb"
+        ]
+        for selector in consent_selectors:
+            btn = page.locator(selector)
+            if btn.is_visible():
+                btn.click(timeout=1500)
+                time.sleep(0.5)
+                print(f"Cookie bypassato: {selector}", flush=True)
+                break
+    except Exception:
+        pass
 
-      - name: Avvio Xvfb (Virtual Display Stabile)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
+# Allineamento parametri geografici
+print("Rilevamento parametri geografici dell'IP di rete...", flush=True)
+timezone = "UTC"
+locale = "en-US"
 
-      - name: Creazione script Python (Macchina 2)
-        run: |
-          cat << 'EOF' > m2_insocket.py
-          import time
-          import random
-          import requests
-          from cloakbrowser import launch_context
-          from bs4 import BeautifulSoup
-          from urllib.parse import urlparse, parse_qs
+geo_services = [
+    ("http://ip-api.com/json/", lambda d: (d.get("timezone"), d.get("countryCode", "US"))),
+    ("https://ipapi.co/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
+    ("https://ipwho.is/", lambda d: (d.get("timezone"), d.get("country_code", "US")))
+]
 
-          TARGETS = [
-              "https://api64.ipify.org?format=json",
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.eater.com/rome",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://guide.michelin.com/en/it/lazio/roma/restaurants",
-              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
-              "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
-              "https://www.facebook.com/groups/expatsinparaguay/",
-              "https://www.canadianinsider.com/money-is-moving"
-           ]
+for url, parse_func in geo_services:
+    try:
+        print(f"Tentativo con {url}...", flush=True)
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            tz, loc = parse_func(data)
+            if tz:
+                timezone = tz
+                locale = loc
+                if len(locale) == 2:
+                    country_to_locale = {
+                        "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
+                        "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
+                    }
+                    locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
+                print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
+                break
+    except Exception as e:
+        print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-          results = ""
+# Generazione seed hardware casuale e coerente
+random_seed = str(random.randint(100000, 999999))
+print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          def extract_text(html_content, url):
-              soup = BeautifulSoup(html_content, 'html.parser')
-              text = soup.get_text(separator=' ', strip=True)
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  return text
-              return text[:5000]
+context = launch_context(
+    headless=False,
+    humanize=True,
+    timezone=timezone,
+    locale=locale,
+    # Impostiamo l'altezza a 950 per evitare il paradosso matematico innerHeight > outerHeight
+    viewport={"width": 1920, "height": 950},
+    args=[
+        "--no-sandbox", 
+        "--disable-dev-shm-usage",
+        f"--fingerprint-timezone={timezone}",
+        f"--fingerprint-locale={locale}",
+        f"--fingerprint={random_seed}"
+    ]
+)
 
-          def get_query_from_url(url, default="migliore carbonara roma"):
-              try:
-                  parsed = urlparse(url)
-                  queries = parse_qs(parsed.query)
-                  for param in ['q', 'query', 'p']:
-                      if param in queries:
-                          return queries[param][0]
-              except Exception:
-                  pass
-              return default
+for url in TARGETS:
+    results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+    print(f"Analizzando: {url}", flush=True)
+    try:
+        page = context.new_page()
+        query_to_search = get_query_from_url(url)
 
-          def handle_cookie_consent(page):
-              """Prova a cliccare i cookie banner più comuni senza bloccare l'esecuzione (timeout 1.5s)"""
-              try:
-                  consent_selectors = [
-                      "button:has-text('Accetta tutto')",
-                      "button:has-text('Accept all')",
-                      "button:has-text('Consenti')",
-                      "button:has-text('I agree')",
-                      "button:has-text('Accetto')",
-                      "button:has-text('Agree')",
-                      "button:has-text('Accept')",
-                      "button:has-text('OK')",
-                      "button:has-text('Allow all')",
-                      "button:has-text('Consenti l\\'uso dei cookie')",
-                      "#L2AGLb"
-                  ]
-                  for selector in consent_selectors:
-                      btn = page.locator(selector)
-                      # is_visible() non aspetta, restituisce subito un booleano
-                      if btn.is_visible():
-                          # Forza un timeout di sicurezza bassissimo sul click per evitare hang
-                          btn.click(timeout=1500)
-                          time.sleep(0.5)
-                          print(f"Bypass cookie banner tentato con successo: {selector}", flush=True)
-                          break
-              except Exception:
-                  pass
+        # GESTIONE SPECIFICA YELP (Nessuna rimozione cookie automatica per evitare blocchi sensibili)
+        if "yelp.com" in url or "yelp.it" in url:
+            print("Esecuzione del warm-up su Yelp...", flush=True)
+            page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
+            time.sleep(3)
+            page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        
+        # Navigazione simulata per Startpage
+        elif "startpage.com/sp/search" in url:
+            page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+            time.sleep(2)
+            try:
+                # Ripristinato il selettore ID pulito per evitare i campi di tracciamento nascosti
+                search_input = page.locator("input#q")
+                search_input.type(query_to_search, delay=100, timeout=2000)
+                page.keyboard.press("Enter")
+            except Exception as e:
+                print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
+        
+        # Navigazione simulata per DuckDuckGo HTML
+        elif "html.duckduckgo.com/html" in url:
+            page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+            time.sleep(2)
+            try:
+                search_input = page.locator("input[name=q]")
+                search_input.type(query_to_search, delay=100, timeout=2000)
+                page.keyboard.press("Enter")
+            except Exception as e:
+                print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
+            
+        else:
+            page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            # Gestione cookie solo su siti non-WAF (Michelin, Eater, ecc.)
+            if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                handle_cookie_consent(page)
+        
+        # GESTIONE SPECIFICA YAHOO FINANCE
+        if "finance.yahoo.com" in url:
+            print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+            try:
+                page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+            except Exception:
+                pass
+            time.sleep(1)
 
-          # Rilevamento parametri geografici
-          print("Rilevamento parametri geografici dell'IP di rete...", flush=True)
-          timezone = "UTC"
-          locale = "en-US"
-          
-          geo_services = [
-              ("http://ip-api.com/json/", lambda d: (d.get("timezone"), d.get("countryCode", "US"))),
-              ("https://ipapi.co/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-              ("https://ipwho.is/", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-          ]
-          
-          for url, parse_func in geo_services:
-              try:
-                  print(f"Tentativo con {url}...", flush=True)
-                  response = requests.get(url, timeout=5)
-                  if response.status_code == 200:
-                      data = response.json()
-                      tz, loc = parse_func(data)
-                      if tz:
-                          timezone = tz
-                          locale = loc
-                          if len(locale) == 2:
-                              country_to_locale = {
-                                  "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                  "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                              }
-                              locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                          print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                          break
-              except Exception as e:
-                  print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
+        # Scorrimento simulato
+        try:
+            for _ in range(3):
+                page.mouse.wheel(0, 300)
+                time.sleep(1)
+        except Exception:
+            pass
 
-          # Seed pseudo-casuale unico per questa specifica esecuzione
-          random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
-          
-          context = launch_context(
-              headless=False,
-              humanize=True,
-              timezone=timezone,
-              locale=locale,
-              viewport={"width": 1920, "height": 1080},
-              args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",
-                  f"--fingerprint-locale={locale}",
-                  f"--fingerprint={random_seed}"
-              ]
-          )
+        # Tempi di attesa bilanciati
+        if "creepjs" in url:
+            time.sleep(20) 
+        elif "pixelscan" in url:
+            time.sleep(10)
+        elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
+            time.sleep(5)
+        else:
+            time.sleep(4)
 
-          for url in TARGETS:
-              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
-              try:
-                  page = context.new_page()
-                  query_to_search = get_query_from_url(url)
+        raw_html = page.content()
+        results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+        page.close()
 
-                  # GESTIONE SPECIFICA YELP
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
-                      handle_cookie_consent(page)
-                      time.sleep(2)
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                      handle_cookie_consent(page)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input[name='query'], input#q")
-                          # Timeout esplicito di 2 secondi sulla digitazione per prevenire hang
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: impossibile digitare su Startpage ({e}). Salto.", flush=True)
-                  
-                  # Navigazione simulata per DuckDuckGo HTML
-                  elif "html.duckduckgo.com/html" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input[name=q]")
-                          # Timeout esplicito di 2 secondi sulla digitazione per prevenire hang
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: impossibile digitare su DuckDuckGo ({e}). Salto.", flush=True)
-                      
-                  else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                      handle_cookie_consent(page)
-                  
-                  # GESTIONE SPECIFICA YAHOO FINANCE
-                  if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
-                      try:
-                          # Abbassato il timeout a 5s per mantenere l'esecuzione rapida
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
-                      except Exception:
-                          pass
-                      time.sleep(1)
+    except Exception as e:
+        print(f"Errore critico su {url}: {e}", flush=True)
+        results += f"ERRORE GLOBALE: {str(e)}\n"
+        try:
+            page.close()
+        except Exception:
+            pass
 
-                  # Scorrimento naturale simulato
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, 300)
-                          time.sleep(1)
-                  except Exception:
-                      pass
+context.close()
 
-                  # Tempi di attesa bilanciati per evitare rallentamenti generali
-                  if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
-                  else:
-                      time.sleep(4)
-
-                  raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
-
-              except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
-                  results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except Exception:
-                      pass
-
-          context.close()
-
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              f.write(results)
-          EOF
-
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
-
-      - name: Upload Artifact Macchina 2
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
+with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+    f.write(results)
