@@ -24,35 +24,60 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          # Installiamo requests[socks] per supportare il controllo di connessione SOCKS5h in Python
+          # Installiamo requests[socks] per supportare il controllo di connettività dei proxy SOCKS5h in Python
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup Warproxy Docker Containers (Active & Idle)
+      - name: Setup 3 WARProxy Docker Containers (Active & Parallel IPv6-only)
         run: |
-          # Pull dell'immagine ufficiale
+          # Pull dell'immagine ufficiale ottimizzata
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Container Attivo in network host su porta 40001 (conserva l'IPv6 nativo del runner)
-          docker run --name warproxy-active \
+          # CONTAINER 1 - Porta locale 40001 (Forzato IPv6 DNS)
+          docker run --name warproxy-1 \
             --network host \
             -e TZ=Europe/Rome \
             -e SOCKS5_PORT=40001 \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
             -e VERBOSE=true \
             -d ghcr.io/kingcc/warproxy:latest
 
-          # Container Idle/Inattivo (lasciato vuoto) su porta 40002
-          docker run --name warproxy-idle \
+          # CONTAINER 2 - Porta locale 40002 (Forzato IPv6 DNS)
+          docker run --name warproxy-2 \
             --network host \
             -e TZ=Europe/Rome \
             -e SOCKS5_PORT=40002 \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
             -e VERBOSE=true \
             -d ghcr.io/kingcc/warproxy:latest
 
-          # Attesa tecnica iniziale per la generazione del tunnel WireGuard
-          echo "In attesa dell'avvio dei container..."
-          sleep 10
+          # CONTAINER 3 - Porta locale 40003 (Forzato IPv6 DNS)
+          docker run --name warproxy-3 \
+            --network host \
+            -e TZ=Europe/Rome \
+            -e SOCKS5_PORT=40003 \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -e VERBOSE=true \
+            -d ghcr.io/kingcc/warproxy:latest
+
+          # Attesa stabilizzazione nativa dei proxy (WireGuard handshake)
+          sleep 15
           docker ps -a
+
+      - name: Verifica IP IPv6 di uscita sui 3 Proxy
+        run: |
+          echo "=================================================="
+          echo "VERIFICA IP CONTAINER 1 (40001):"
+          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
+          
+          echo "=================================================="
+          echo "VERIFICA IP CONTAINER 2 (40002):"
+          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Proxy 2 fallito!"
+
+          echo "=================================================="
+          echo "VERIFICA IP CONTAINER 3 (40003):"
+          curl --proxy socks5h://127.0.0.1:40003 https://api64.ipify.org?format=json || echo "Proxy 3 fallito!"
+          echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
@@ -63,6 +88,7 @@ jobs:
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
+          import sys
           import random
           import requests
           from cloakbrowser import launch_context
@@ -100,32 +126,30 @@ jobs:
           ]
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-          results = ""
 
-          def wait_for_proxy(port, timeout=45):
-              """Verifica la connettività del proxy SOCKS5h attendendo l'attivazione dell'IPv6 di WARP"""
-              start_time = time.time()
-              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              while time.time() - start_time < timeout:
-                  try:
-                      r = requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and ":" in r.text:
-                          return True, "IPv6", r.text.strip()
-                  except Exception:
-                      pass
-                  try:
-                      r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and "warp=" in r.text:
-                          lines = r.text.split('\n')
-                          ip_line = [line for line in lines if line.startswith('ip=')]
-                          if ip_line:
-                              ip = ip_line[0].split('=')[1]
-                              ip_type = "IPv6" if ":" in ip else "IPv4"
-                              return True, ip_type, ip
-                  except Exception:
-                      pass
-                  time.sleep(2)
-              return False, None, None
+          # 1. Parsing dell'argomento node_id per dividere i target a un terzo ciascuno
+          if len(sys.argv) < 2:
+              print("Errore: specifica il node_id (1, 2 o 3)", flush=True)
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          if node_id == 1:
+              ACTIVE_PORT = 40001
+              MY_TARGETS = TARGETS[0:9]
+          elif node_id == 2:
+              ACTIVE_PORT = 40002
+              MY_TARGETS = TARGETS[9:18]
+          elif node_id == 3:
+              ACTIVE_PORT = 40003
+              MY_TARGETS = TARGETS[18:27]
+          else:
+              print("Errore: node_id deve essere 1, 2 o 3", flush=True)
+              sys.exit(1)
+
+          print(f"=== Nodo {node_id} avviato su porta {ACTIVE_PORT} ===")
+          print(f"Target assegnati (Totale: {len(MY_TARGETS)}):", flush=True)
+          for t in MY_TARGETS:
+              print(f" - {t}", flush=True)
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -170,24 +194,32 @@ jobs:
               except Exception:
                   pass
 
-          # 1. Sincronizzazione e attesa attiva del proxy locale (porta 40001)
-          ACTIVE_PORT = 40001
-          print(f"Controllo connessione proxy SOCKS5H su porta {ACTIVE_PORT}...", flush=True)
-          success, ip_type, proxy_ip = wait_for_proxy(ACTIVE_PORT, timeout=60)
+          # Polling attivo per attendere che il rispettivo container sia pronto a instradare l'IPv6
+          def wait_for_proxy(port, timeout=45):
+              print(f"In attesa del proxy sulla porta {port}...", flush=True)
+              start_time = time.time()
+              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              while time.time() - start_time < timeout:
+                  try:
+                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=3)
+                      if r.status_code == 200:
+                          ip = r.json().get("ip")
+                          if ip and ":" in ip: # Valida l'uscita in IPv6
+                              print(f"Tunnel pronto! IPv6 di WARP rilevato: {ip}", flush=True)
+                              return True
+                  except Exception:
+                      pass
+                  time.sleep(2)
+              return False
 
-          if not success:
-              raise RuntimeError(f"Errore: il proxy sulla porta {ACTIVE_PORT} non è pronto.")
-          
-          # BLOCCO DI SICUREZZA: Verifica che l'indirizzo ottenuto sia categoricamente un IPv6
-          if ip_type != "IPv6":
-              raise RuntimeError(f"Errore Sicurezza: Rilevato IP di tipo {ip_type} ({proxy_ip}). È richiesto esclusivamente l'uso di IPv6.")
-
-          print(f"Allineamento completato -> Connessione proxy attiva con IP {ip_type}: {proxy_ip}", flush=True)
+          if not wait_for_proxy(ACTIVE_PORT):
+              print(f"Errore: il proxy sulla porta {ACTIVE_PORT} non risponde in IPv6.", flush=True)
+              sys.exit(1)
 
           random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
+          print(f"Avviando CloakBrowser per il nodo {node_id}...", flush=True)
 
-          # Caricamento del contesto: geoip=True gestirà nativamente timezone e locale tramite il proxy
+          # GeoIP nativo abilitato su SOCKS5h: CloakBrowser imposterà autonomamente la corretta timezone dell'IP di uscita
           context = launch_context(
               headless=False,
               humanize=True,
@@ -203,9 +235,11 @@ jobs:
               ]
           )
 
-          for url in TARGETS:
+          results = f"\n=== RISULTATI SCRAPING NODO {node_id} (PORTA {ACTIVE_PORT}) ===\n"
+
+          for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
+              print(f"[Nodo {node_id}] Analizzando: {url}", flush=True)
               try:
                   page = context.new_page()
                   
@@ -247,7 +281,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100,
+                              get: () => 100, 
                               configurable: true,
                               enumerable: true
                           });
@@ -258,7 +292,6 @@ jobs:
 
                   # GESTIONE SPECIFICA YELP
                   if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
                       page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(3)
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
@@ -272,7 +305,7 @@ jobs:
                           search_input.type(query_to_search, delay=100, timeout=2000)
                           page.keyboard.press("Enter")
                       except Exception as e:
-                          print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
+                          pass
                   
                   # Navigazione simulata per DuckDuckGo HTML
                   elif "html.duckduckgo.com/html" in url:
@@ -283,7 +316,7 @@ jobs:
                           search_input.type(query_to_search, delay=100, timeout=2000)
                           page.keyboard.press("Enter")
                       except Exception as e:
-                          print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
+                          pass
                       
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
@@ -292,7 +325,6 @@ jobs:
                   
                   # GESTIONE SPECIFICA YAHOO FINANCE
                   if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
                       try:
                           page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
                       except Exception:
@@ -322,7 +354,7 @@ jobs:
                   page.close()
 
               except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
+                  print(f"[Nodo {node_id}] Errore critico su {url}: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
                   try:
                       page.close()
@@ -331,12 +363,32 @@ jobs:
 
           context.close()
 
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+          # Salvataggio del report parziale di questo nodo
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
+      - name: Esecuzione Scraping parallelo (3 Nodi indipendenti)
+        run: |
+          # Avvio dei 3 processi Python in background
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          
+          # Attende che tutti e tre i processi paralleli abbiano concluso
+          wait
+
+          # Stampa i log dei nodi per ispezione
+          echo "=== LOG NODO 1 ==="
+          cat node1.log || true
+          echo "=== LOG NODO 2 ==="
+          cat node2.log || true
+          echo "=== LOG NODO 3 ==="
+          cat node3.log || true
+          echo "=================="
+
+          # Concatenazione dei file di output in un unico report finale
+          cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
