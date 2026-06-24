@@ -29,7 +29,7 @@ jobs:
 
       - name: Costruzione Immagine Usque & Avvio Container in Network Host (SOCKS5h IPv6)
         run: |
-          # 1. Scarica il binario ufficiale di Usque (MASQUE client)
+          # 1. Scarica il binario ufficiale di Usque
           curl -s https://api.github.com/repos/Diniboy1123/usque/releases/latest \
             | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url' \
             | xargs wget -qO usque.zip
@@ -60,8 +60,8 @@ jobs:
             --network host \
             usque-local sh -c "usque register -a && usque socks --bind 127.0.0.1 --port 40002"
 
-          # Attesa stabilizzazione dei tunnel MASQUE
-          sleep 8
+          # Attesa stabilizzazione (Aumentata a 10s per permettere l'handshake MASQUE prima dell'avvio dello scraper)
+          sleep 10
 
           # 5. Stampa dei log di connessione dei container
           echo "=== LOG CONTAINER 1 (PROXY ATTIVO) ==="
@@ -71,7 +71,6 @@ jobs:
           echo "======================================"
 
           # 6. Verifica che entrambi i tunnel SOCKS5h stiano rispondendo ed estraiamo l'IPv6 di uscita
-          # Nota: Chiamata pulita socks5h senza flag -6 (la risoluzione remota della timezone/IPv6 avviene sul proxy)
           echo "=================================================="
           echo "VERIFICA INDIRIZZO IP CONTAINER 1 (Attivo):"
           curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Tunnel 1 Non Raggiungibile!"
@@ -174,8 +173,7 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Passiamo il proxy a Cloakbrowser e configuriamo i flag C++ per forzare 
-          # la risoluzione dei nomi remota, inibendo i DNS Leak locali sul runner.
+          # Passiamo il proxy a Cloakbrowser e configuriamo i flag C++ corretti
           context = launch_context(
               headless=False,
               humanize=True,
@@ -187,9 +185,7 @@ jobs:
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random_seed}",
                   "--fingerprint-storage-quota=5000",   
-                  "--fingerprint-windows-font-metrics",
-                  # FORZATURA STRUTTURALE SOCKS5H: Impedisce a Chromium di risolvere i DNS localmente sul runner
-                  "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+                  "--fingerprint-windows-font-metrics"
               ]
           )
 
