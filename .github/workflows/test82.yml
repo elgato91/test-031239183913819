@@ -28,41 +28,61 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 3 WARProxy Docker Containers (Active & Parallel IPv6-only)
+      - name: Inizializzazione Container e Generazione Config (IPv6-Only)
         run: |
-          # Pull dell'immagine ufficiale ottimizzata
+          # Pull dell'immagine ufficiale
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # CONTAINER 1 - Porta locale 40001 (Forzato IPv6 DNS)
-          docker run --name warproxy-1 \
-            --network host \
-            -e TZ=Europe/Rome \
-            -e SOCKS5_PORT=40001 \
-            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -e VERBOSE=true \
-            -d ghcr.io/kingcc/warproxy:latest
+          # 1. Crea le directory di configurazione locali sull'host
+          mkdir -p config1 config2 config3
 
-          # CONTAINER 2 - Porta locale 40002 (Forzato IPv6 DNS)
-          docker run --name warproxy-2 \
-            --network host \
-            -e TZ=Europe/Rome \
-            -e SOCKS5_PORT=40002 \
-            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -e VERBOSE=true \
-            -d ghcr.io/kingcc/warproxy:latest
+          # 2. Avvia i tre container in network host mappando i volumi per generare i profili iniziali
+          docker run --name warproxy-1 --network host -v $(pwd)/config1:/config -e SOCKS5_PORT=40001 -d ghcr.io/kingcc/warproxy:latest
+          docker run --name warproxy-2 --network host -v $(pwd)/config2:/config -e SOCKS5_PORT=40002 -d ghcr.io/kingcc/warproxy:latest
+          docker run --name warproxy-3 --network host -v $(pwd)/config3:/config -e SOCKS5_PORT=40003 -d ghcr.io/kingcc/warproxy:latest
 
-          # CONTAINER 3 - Porta locale 40003 (Forzato IPv6 DNS)
-          docker run --name warproxy-3 \
-            --network host \
-            -e TZ=Europe/Rome \
-            -e SOCKS5_PORT=40003 \
-            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -e VERBOSE=true \
-            -d ghcr.io/kingcc/warproxy:latest
+          # Attendi la generazione automatica dei file di configurazione
+          sleep 10
 
-          # Attesa stabilizzazione nativa dei proxy (WireGuard handshake)
-          sleep 15
-          docker ps -a
+          # Fermiamo temporaneamente i container per applicare la patch di esclusione IPv4
+          docker stop warproxy-1 warproxy-2 warproxy-3
+
+          # 3. Script Python sul runner per modificare le configurazioni e forzare l'IPv6-Only
+          cat << 'EOF' > make_ipv6_only.py
+          import os
+
+          for folder in ["config1", "config2", "config3"]:
+              conf_path = os.path.join(folder, "wireproxy.conf")
+              if not os.path.exists(conf_path):
+                  continue
+              with open(conf_path, "r") as f:
+                  lines = f.readlines()
+              
+              new_lines = []
+              for line in lines:
+                  if line.strip().startswith("Address"):
+                      # Rimuove l'indirizzo IPv4 locale dal tunnel, mantenendo solo l'indirizzo IPv6 di WARP
+                      parts = line.split("=")
+                      ips = parts[1].split(",")
+                      ipv6 = [ip.strip() for ip in ips if ":" in ip][0]
+                      line = f"Address = {ipv6}\n"
+                  elif line.strip().startswith("DNS"):
+                      # Forza la risoluzione DNS interna sul tunnel usando esclusivamente i server DNS IPv6 di Cloudflare
+                      line = "DNS = 2606:4700:4700::1111, 2606:4700:4700::1001\n"
+                  elif line.strip().startswith("AllowedIPs"):
+                      # Rimuove l'instradamento IPv4 (0.0.0.0/0) forzando esclusivamente l'uscita in IPv6 (::/0)
+                      line = "AllowedIPs = ::/0\n"
+                  new_lines.append(line)
+              
+              with open(conf_path, "w") as f:
+                  f.writelines(new_lines)
+              print(f"Patch IPv6-Only applicata a {conf_path}!", flush=True)
+          EOF
+          python3 make_ipv6_only.py
+
+          # 4. Riavvia i container con i profili modificati (IPv6-Only garantito al 100%)
+          docker start warproxy-1 warproxy-2 warproxy-3
+          sleep 6
 
       - name: Verifica IP IPv6 di uscita sui 3 Proxy
         run: |
@@ -127,7 +147,7 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          # 1. Parsing dell'argomento node_id per dividere i target a un terzo ciascuno
+          # 1. Suddivisione dei target ad un terzo ciascuno in base all'argomento node_id
           if len(sys.argv) < 2:
               print("Errore: specifica il node_id (1, 2 o 3)", flush=True)
               sys.exit(1)
@@ -146,7 +166,8 @@ jobs:
               print("Errore: node_id deve essere 1, 2 o 3", flush=True)
               sys.exit(1)
 
-          print(f"=== Nodo {node_id} avviato su porta {ACTIVE_PORT} ===")
+          print(f"=== Nodo {node_id} avviato ===")
+          print(f"Porta proxy attiva: {ACTIVE_PORT}", flush=True)
           print(f"Target assegnati (Totale: {len(MY_TARGETS)}):", flush=True)
           for t in MY_TARGETS:
               print(f" - {t}", flush=True)
@@ -189,23 +210,23 @@ jobs:
                       if btn.is_visible():
                           btn.click(timeout=1500)
                           time.sleep(0.5)
-                          print(f"Cookie bypassato: {selector}", flush=True)
+                          print(f"[Nodo {node_id}] Cookie bypassato: {selector}", flush=True)
                           break
               except Exception:
                   pass
 
-          # Polling attivo per attendere che il rispettivo container sia pronto a instradare l'IPv6
+          # Polling di sicurezza: attende che il proxy risponda correttamente prima di iniziare
           def wait_for_proxy(port, timeout=45):
-              print(f"In attesa del proxy sulla porta {port}...", flush=True)
+              print(f"[Nodo {node_id}] Verifica stabilità del proxy sulla porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=3)
+                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
                       if r.status_code == 200:
                           ip = r.json().get("ip")
-                          if ip and ":" in ip: # Valida l'uscita in IPv6
-                              print(f"Tunnel pronto! IPv6 di WARP rilevato: {ip}", flush=True)
+                          if ip and ":" in ip: # Valida che stia uscendo nativamente in IPv6
+                              print(f"[Nodo {node_id}] Tunnel pronto! IPv6 di WARP: {ip}", flush=True)
                               return True
                   except Exception:
                       pass
@@ -213,13 +234,13 @@ jobs:
               return False
 
           if not wait_for_proxy(ACTIVE_PORT):
-              print(f"Errore: il proxy sulla porta {ACTIVE_PORT} non risponde in IPv6.", flush=True)
+              print(f"[Nodo {node_id}] Errore: il proxy sulla porta {ACTIVE_PORT} non risponde in IPv6.", flush=True)
               sys.exit(1)
 
           random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser per il nodo {node_id}...", flush=True)
+          print(f"[Nodo {node_id}] Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # GeoIP nativo abilitato su SOCKS5h: CloakBrowser imposterà autonomamente la corretta timezone dell'IP di uscita
+          # Nessun blocco: rimuoviamo --host-resolver-rules. Playwright risolverà remotamente i DNS sul proxy
           context = launch_context(
               headless=False,
               humanize=True,
@@ -363,22 +384,22 @@ jobs:
 
           context.close()
 
-          # Salvataggio del report parziale di questo nodo
+          # Scrittura del report di questo specifico nodo
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
       - name: Esecuzione Scraping parallelo (3 Nodi indipendenti)
         run: |
-          # Avvio dei 3 processi Python in background
+          # Avvio dei 3 processi Python in parallelo in background
           python -u m2_insocket.py 1 > node1.log 2>&1 &
           python -u m2_insocket.py 2 > node2.log 2>&1 &
           python -u m2_insocket.py 3 > node3.log 2>&1 &
           
-          # Attende che tutti e tre i processi paralleli abbiano concluso
+          # Attende la conclusione di tutti i processi paralleli
           wait
 
-          # Stampa i log dei nodi per ispezione
+          # Stampa i log dei nodi per verifica e ispezione immediata
           echo "=== LOG NODO 1 ==="
           cat node1.log || true
           echo "=== LOG NODO 2 ==="
@@ -387,7 +408,7 @@ jobs:
           cat node3.log || true
           echo "=================="
 
-          # Concatenazione dei file di output in un unico report finale
+          # Concatenazione dei file in un unico report finale
           cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
