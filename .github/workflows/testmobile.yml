@@ -1,4 +1,4 @@
-name: Test RAG Challenge 2026 - Mobile Simulation
+name: Test RAG Challenge 2026 - Camoufox Mobile
 
 on:
   workflow_dispatch:
@@ -12,18 +12,20 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Font di Sistema (Profilo Mobile/Android)
+      - name: Installazione Font di Sistema (Android-like)
         run: |
           sudo apt-get update
-          # Installiamo i font della famiglia Noto e Droid, coerenti con Android
           sudo apt-get install -y fonts-noto-color-emoji fonts-droid-fallback \
             fonts-freefont-ttf fonts-unifont || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze
+      - name: Installazione Dipendenze e Camoufox
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
-          playwright install-deps chromium
+          pip install "camoufox[geoip]" beautifulsoup4 playwright requests
+          # Scarica il browser personalizzato Camoufox (~200MB)
+          python -m camoufox fetch
+          # Installa le dipendenze di sistema necessarie per Firefox/Camoufox
+          playwright install-deps firefox
 
       - name: Setup Cloudflare WARP
         run: |
@@ -34,18 +36,17 @@ jobs:
           warp-cli --accept-tos connect
           sleep 5
 
-      - name: Avvio Xvfb (Virtual Display Stabile)
+      - name: Avvio Xvfb (Virtual Display Stabile per Headful Mode)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (Mobile Simulation)
+      - name: Creazione script Python (Camoufox Mobile)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
-          import random
           import requests
-          from cloakbrowser import launch_context
+          from camoufox.sync_api import Camoufox
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
@@ -125,216 +126,100 @@ jobs:
               except Exception:
                   pass
 
-          # Rilevamento IP pubblico di rete
-          print("Rilevamento IP pubblico di rete...", flush=True)
-          detected_ip = None
-          try:
-              response = requests.get("https://api64.ipify.org?format=json", timeout=5)
-              if response.status_code == 200:
-                  detected_ip = response.json().get("ip")
-                  print(f"IP Rilevato: {detected_ip}", flush=True)
-          except Exception as e:
-              print(f"Avviso: impossibile rilevare l'IP di rete ({e})", flush=True)
-
-          timezone = "UTC"
-          locale = "en-US"
-
-          if detected_ip:
-              geo_services = [
-                  (f"https://ipapi.co/{detected_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-                  (f"https://ipwho.is/{detected_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-              ]
-              for url, parse_func in geo_services:
+          # 1. Avvio di Camoufox con profilo nativo Android
+          # headless=False è indirizzato su Xvfb (:99) per simulare un monitor reale.
+          # geoip=True permette a Camoufox di determinare fuso orario, coordinate e lingua in base all'IP di rete.
+          # humanize=True aggiunge movimenti realistici del cursore/touch ed evita clic istantanei.
+          print("Inizializzazione Camoufox (Profilo Android)...", flush=True)
+          
+          with Camoufox(
+              os="android", 
+              headless=False, 
+              geoip=True, 
+              humanize=True
+          ) as browser:
+              
+              for url in TARGETS:
+                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+                  print(f"Analizzando: {url}", flush=True)
                   try:
-                      print(f"Geolocalizzazione IP su {url}...", flush=True)
-                      response = requests.get(url, timeout=5)
-                      if response.status_code == 200:
-                          data = response.json()
-                          tz, loc = parse_func(data)
-                          if tz:
-                              timezone = tz
-                              locale = loc
-                              if len(locale) == 2:
-                                  country_to_locale = {
-                                      "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                      "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                                  }
-                                  locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                              print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                              break
-                  except Exception as e:
-                      print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
-
-          random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
-
-          # DEFINIZIONE USER AGENT E METRICHE MOBILE (Chrome su Android)
-          mobile_user_agent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36"
-          mobile_viewport = {"width": 412, "height": 915}
-
-          context = launch_context(
-              headless=False,
-              humanize=True,
-              timezone=timezone,
-              locale=locale,
-              user_agent=mobile_user_agent,
-              viewport=mobile_viewport,
-              device_scale_factor=2.625, # Rapporto di pixel tipico di schermi mobile Full HD
-              is_mobile=True,
-              has_touch=True,
-              args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",
-                  f"--fingerprint-locale={locale}",
-                  f"--fingerprint={random_seed}"
-              ]
-          )
-
-          for url in TARGETS:
-              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
-              try:
-                  page = context.new_page()
-                  
-                  # INIEZIONE ATTIVA DI POLYFILL PER AMBIENTE MOBILE
-                  page.add_init_script("""
-                      // 1. Assicuriamo la presenza di ContactsManager (nativo su Chrome Android)
-                      if (!('ContactsManager' in window)) {
-                          window.ContactsManager = class ContactsManager {
-                              async getProperties() { return ['name', 'email', 'tel', 'address', 'icon']; }
-                              async select() { return []; }
-                          };
-                          Object.defineProperty(navigator, 'contacts', {
-                              get: () => new window.ContactsManager(),
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-
-                      // 2. Assicuriamo la presenza di ContentIndex
-                      if (!('ContentIndex' in window)) {
-                          window.ContentIndex = class ContentIndex {
-                              async add() {}
-                              async delete() {}
-                              async getAll() { return []; }
-                          };
-                      }
-
-                      // 3. Impostiamo correttamente maxTouchPoints (deve essere maggiore di 0 su mobile)
-                      if (navigator.maxTouchPoints !== 5) {
-                          Object.defineProperty(navigator, 'maxTouchPoints', {
-                              get: () => 5,
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-
-                      // 4. Allineamento RTT e DownlinkMax per rete cellulare (4G/5G)
-                      if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
-                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
-                              get: () => 100, // Coerente con una connessione LTE/5G
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-                      if (navigator.connection) {
-                          if (!('downlinkMax' in navigator.connection)) {
-                              Object.defineProperty(navigator.connection, 'downlinkMax', {
-                                  get: () => 100,
-                                  configurable: true,
-                                  enumerable: true
-                              });
-                          }
-                          Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 150, // Latenza mobile realistica
-                              configurable: true,
-                              enumerable: true
-                          });
-                          Object.defineProperty(navigator.connection, 'effectiveType', {
-                              get: () => '4g',
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-                  """)
-
-                  query_to_search = get_query_from_url(url)
-
-                  # GESTIONE SPECIFICA YELP
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(3)
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input#q")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
-                  
-                  # Navigazione simulata per DuckDuckGo HTML
-                  elif "html.duckduckgo.com/html" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input[name=q]")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
+                      # Genera automaticamente una nuova pagina con l'identità mobile coerente
+                      page = browser.new_page()
                       
-                  else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
-                          handle_cookie_consent(page)
-                  
-                  # GESTIONE SPECIFICA YAHOO FINANCE
-                  if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+                      query_to_search = get_query_from_url(url)
+
+                      # GESTIONE SPECIFICA YELP
+                      if "yelp.com" in url or "yelp.it" in url:
+                          print("Esecuzione del warm-up su Yelp...", flush=True)
+                          page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
+                          time.sleep(3)
+                          page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                      
+                      # Navigazione simulata per Startpage
+                      elif "startpage.com/sp/search" in url:
+                          page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+                          time.sleep(2)
+                          try:
+                              search_input = page.locator("input#q")
+                              search_input.type(query_to_search, delay=100, timeout=2000)
+                              page.keyboard.press("Enter")
+                          except Exception as e:
+                              print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
+                      
+                      # Navigazione simulata per DuckDuckGo HTML
+                      elif "html.duckduckgo.com/html" in url:
+                          page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+                          time.sleep(2)
+                          try:
+                              search_input = page.locator("input[name=q]")
+                              search_input.type(query_to_search, delay=100, timeout=2000)
+                              page.keyboard.press("Enter")
+                          except Exception as e:
+                              print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
+                          
+                      else:
+                          page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                          if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                              handle_cookie_consent(page)
+                      
+                      # GESTIONE SPECIFICA YAHOO FINANCE
+                      if "finance.yahoo.com" in url:
+                          print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+                          try:
+                              page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                          except Exception:
+                              pass
+                          time.sleep(1)
+
+                      # Scorrimento simulato (con movimenti umanizzati integrati in Camoufox)
                       try:
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                          for _ in range(3):
+                              page.mouse.wheel(0, 300)
+                              time.sleep(1)
                       except Exception:
                           pass
-                      time.sleep(1)
 
-                  # Scorrimento simulato (Simula swipe verticali su mobile)
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, 300)
-                          time.sleep(1)
-                  except Exception:
-                      pass
+                      # Tempi di attesa bilanciati per permettere ai test di completarsi
+                      if "creepjs" in url:
+                          time.sleep(20) 
+                      elif "pixelscan" in url:
+                          time.sleep(10)
+                      elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
+                          time.sleep(5)
+                      else:
+                          time.sleep(4)
 
-                  # Tempi di attesa bilanciati
-                  if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
-                  else:
-                      time.sleep(4)
-
-                  raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
-
-              except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
-                  results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
+                      raw_html = page.content()
+                      results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
                       page.close()
-                  except Exception:
-                      pass
 
-          context.close()
+                  except Exception as e:
+                      print(f"Errore critico su {url}: {e}", flush=True)
+                      results += f"ERRORE GLOBALE: {str(e)}\n"
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
 
           with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
               f.write(results)
