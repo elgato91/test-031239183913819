@@ -103,7 +103,6 @@ jobs:
               return default
 
           def handle_cookie_consent(page):
-              """Accetta i cookie ma solo con un timeout rigoroso di 1.5s per non bloccare mai la navigazione"""
               try:
                   consent_selectors = [
                       "button:has-text('Accetta tutto')",
@@ -128,39 +127,47 @@ jobs:
               except Exception:
                   pass
 
-          # Allineamento parametri geografici
-          print("Rilevamento parametri geografici dell'IP di rete...", flush=True)
+          # 1. Rilevamento preventivo dell'IP esatto (evita il mismatch IPv4/IPv6 su WARP)
+          print("Rilevamento IP pubblico di rete...", flush=True)
+          detected_ip = None
+          try:
+              response = requests.get("https://api64.ipify.org?format=json", timeout=5)
+              if response.status_code == 200:
+                  detected_ip = response.json().get("ip")
+                  print(f"IP Rilevato: {detected_ip}", flush=True)
+          except Exception as e:
+              print(f"Avviso: impossibile rilevare l'IP di rete ({e})", flush=True)
+
           timezone = "UTC"
           locale = "en-US"
 
-          geo_services = [
-              ("http://ip-api.com/json/", lambda d: (d.get("timezone"), d.get("countryCode", "US"))),
-              ("https://ipapi.co/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-              ("https://ipwho.is/", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-          ]
+          # 2. Interrogazione geolocalizzazione mirata sull'IP esatto
+          if detected_ip:
+              geo_services = [
+                  (f"https://ipapi.co/{detected_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
+                  (f"https://ipwho.is/{detected_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
+              ]
+              for url, parse_func in geo_services:
+                  try:
+                      print(f"Geolocalizzazione IP su {url}...", flush=True)
+                      response = requests.get(url, timeout=5)
+                      if response.status_code == 200:
+                          data = response.json()
+                          tz, loc = parse_func(data)
+                          if tz:
+                              timezone = tz
+                              locale = loc
+                              if len(locale) == 2:
+                                  country_to_locale = {
+                                      "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
+                                      "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
+                                  }
+                                  locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
+                              print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
+                              break
+                  except Exception as e:
+                      print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
 
-          for url, parse_func in geo_services:
-              try:
-                  print(f"Tentativo con {url}...", flush=True)
-                  response = requests.get(url, timeout=5)
-                  if response.status_code == 200:
-                      data = response.json()
-                      tz, loc = parse_func(data)
-                      if tz:
-                          timezone = tz
-                          locale = loc
-                          if len(locale) == 2:
-                              country_to_locale = {
-                                  "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                  "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                              }
-                              locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                          print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                          break
-              except Exception as e:
-                  print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
-
-          # Generazione seed hardware casuale e coerente
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
@@ -185,7 +192,7 @@ jobs:
               try:
                   page = context.new_page()
                   
-                  # INIEZIONE ATTIVA DI POLYFILL (Per neutralizzare CreepJS "25% Like Headless" e Incolumitas RTT)
+                  # INIEZIONE ATTIVA DI POLYFILL (Per neutralizzare CreepJS "headless" e Incolumitas RTT)
                   page.add_init_script("""
                       // 1. Mock ContactsManager (atteso su Windows, nativamente assente su Linux headless)
                       if (!('ContactsManager' in window)) {
@@ -200,7 +207,7 @@ jobs:
                           });
                       }
 
-                      // 2. Mock ContentIndex (atteso su contesti HTTPS Chrome)
+                      // 2. Mock ContentIndex
                       if (!('ContentIndex' in window)) {
                           window.ContentIndex = class ContentIndex {
                               async add() {}
@@ -209,7 +216,14 @@ jobs:
                           };
                       }
 
-                      // 3. Correzione downlinkMax e allineamento RTT realistico VPN/WARP
+                      // 3. Correzione downlinkMax sul Prototipo (CreepJS) e allineamento RTT realistico
+                      if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
+                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
+                              get: () => 10,
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
                       if (navigator.connection) {
                           if (!('downlinkMax' in navigator.connection)) {
                               Object.defineProperty(navigator.connection, 'downlinkMax', {
@@ -219,7 +233,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, // Valore simulato realistico della latenza VPN
+                              get: () => 100, // Latenza simulata coerente con l'instradamento VPN di WARP
                               configurable: true,
                               enumerable: true
                           });
