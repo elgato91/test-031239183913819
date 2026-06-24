@@ -14,12 +14,11 @@ jobs:
 
       - name: Sincronizza Orologio di Sistema (NTP)
         run: |
-          # Sincronizza l'orologio interno della VM di GitHub Actions per risolvere la discrepanza temporale (Time Drift) su Pixelscan
           sudo systemctl stop systemd-timesyncd.service || true
           sudo sntp -sS pool.ntp.org || sudo ntpdate -s pool.ntp.org || true
           sudo systemctl start systemd-timesyncd.service || true
 
-      - name: Installazione Font di Sistema (Requisito per Hash Canvas)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -57,7 +56,6 @@ jobs:
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA IP CONTAINER $i ($PORT):"
-            # Utilizziamo api6 per verificare e forzare l'instradamento IPv6
             curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
           done
           echo "=================================================="
@@ -69,7 +67,6 @@ jobs:
 
       - name: Pre-inizializzazione Cache CloakBrowser
         run: |
-          echo "Download preventivo del binario Chromium di CloakBrowser..."
           python -m cloakbrowser install
 
       - name: Creazione script Python (Macchina 2)
@@ -79,19 +76,21 @@ jobs:
           import sys
           import random
           import requests
+          import os
           from cloakbrowser import launch_persistent_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
+          # Rimosse forzature "&hl=it" per evitare discrepanze (US IP + IT lang = Bot per Google)
           TARGETS = [
-              "https://api6.ipify.org?format=json", # Forza il report IPv6
+              "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma&hl=it&lr=lang_it", # Forza lingua italiana
+              "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
@@ -103,7 +102,7 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1&hl=it&lr=lang_it", # Forza lingua italiana
+              "https://www.google.com/search?q=migliore+carbonara+roma",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
@@ -140,9 +139,8 @@ jobs:
                   pass
               return default
 
-          # Controlla e valida rigorosamente la connessione IPv6 sul proxy
+          # Verifica proxy e ricava il timezone reale per allineare Ubuntu
           def wait_for_proxy_and_get_tz(port, timeout=45):
-              print(f"[NODO {node_id}] Validazione IPv6 su porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               
@@ -150,37 +148,38 @@ jobs:
               while time.time() - start_time < timeout:
                   try:
                       r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=5)
-                      if r.status_code == 200 and ":" in r.json().get("ip", ""):
-                          print(f"[NODO {node_id}] IPv6 WARP rilevato: {r.json().get('ip')}", flush=True)
+                      if r.status_code == 200:
                           ipv6_ok = True
                           break
                   except Exception:
                       time.sleep(2)
                       
               if not ipv6_ok:
-                  return False, "America/Chicago", "US"
+                  return False, "UTC"
 
-              # Risoluzione esplicita della posizione dell'indirizzo IPv6 (evita il dual-stack mismatch di WARP)
-              timezone, country = "America/Chicago", "US"
+              timezone = "UTC"
               try:
                   r = requests.get("https://ipapi.co/json/", proxies=proxies, timeout=5)
                   if r.status_code == 200:
-                      data = r.json()
-                      timezone = data.get("timezone", "America/Chicago")
-                      country = data.get("country_code", "US")
+                      timezone = r.json().get("timezone", "UTC")
               except Exception:
                   pass
-              return True, timezone, country
+              return True, timezone
 
-          success, tz, country = wait_for_proxy_and_get_tz(ACTIVE_PORT)
+          success, tz = wait_for_proxy_and_get_tz(ACTIVE_PORT)
           if not success:
-              print(f"[NODO {node_id}] Proxy o IPv6 non pronto. Termino.", flush=True)
+              print(f"[NODO {node_id}] Proxy o IPv6 non pronto.", flush=True)
               sys.exit(1)
+
+          # Sincronizza l'OS con la posizione di uscita WARP (fondamentale per Pixelscan)
+          if tz and tz != "UTC":
+              os.environ['TZ'] = tz
+              time.tzset()
 
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
-          locale = "it-IT" if country == "IT" else f"en-{country}"
 
+          # Non usiamo --disable-http2 per evitare conflitti con Yahoo e CloudFront
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -189,18 +188,15 @@ jobs:
               "--fingerprint-windows-font-metrics"  
           ]
 
-          # Forza HTTP/1.1 sul Nodo 3 per arginare i blocchi automatici di Reddit
-          if node_id == 3:
-              extra_args.append("--disable-http2")
-
+          print(f"[NODO {node_id}] Avvio Context (TZ: {tz}, Seed: {random_seed})", flush=True)
+          
+          # NOTA: Rimosse variabili "locale" e "timezone" per permettere a geoip=True di lavorare in purezza
           context = launch_persistent_context(
               user_data_dir=profile_dir,
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              timezone=tz,       # Override esplicito basato sulla geolocalizzazione dell'IPv6
-              locale=locale,     # Override esplicito
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
@@ -214,6 +210,7 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
+                  # Navigazione
                   if "yelp.com" in url or "yelp.it" in url:
                       page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(3)
@@ -233,7 +230,19 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
 
-                  # Trigger manuale Pixelscan
+                  # --- RISOLUTORE AUTOMATICO GOOGLE CAPTCHA ---
+                  if "google.com/search" in url:
+                      try:
+                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
+                              print(f"[NODO {node_id}] Google CAPTCHA intercettato. Risolvo...", flush=True)
+                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
+                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
+                              if checkbox.is_visible(timeout=3000):
+                                  checkbox.click()
+                                  time.sleep(6) # Attesa per la validazione server
+                      except Exception: pass
+
+                  # Trigger Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now")
@@ -271,7 +280,7 @@ jobs:
                           time.sleep(random.uniform(0.8, 1.5))
                   except Exception: pass
 
-                  # Tempistiche di attesa
+                  # Tempistiche
                   if "creepjs" in url: time.sleep(15) 
                   elif "pixelscan" in url: time.sleep(8)
                   elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
@@ -293,14 +302,13 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (3 Nodi indipendenti)
+      - name: Esecuzione Scraping Parallelo
         run: |
-          echo "Avvio processi paralleli in background..."
+          echo "Avvio processi paralleli..."
           python -u m2_insocket.py 1 > node1.log 2>&1 &
           python -u m2_insocket.py 2 > node2.log 2>&1 &
           python -u m2_insocket.py 3 > node3.log 2>&1 &
           
-          # Attende il completamento di tutti i processi in background
           wait
 
           echo "=== LOG NODO 1 ==="
@@ -311,10 +319,7 @@ jobs:
           cat node3.log || true
           echo "=================="
 
-          # Crea i file vuoti nel caso un nodo fosse andato in crash irreversibile
           touch output_node_1.txt output_node_2.txt output_node_3.txt
-          
-          # Assembla il report finale
           cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
