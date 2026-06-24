@@ -1,4 +1,4 @@
-name: Test RAG Challenge 2026 - Camoufox Mobile
+name: Test RAG Challenge 2026
 
 on:
   workflow_dispatch:
@@ -12,41 +12,50 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Font di Sistema (Android-like)
+      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-noto-color-emoji fonts-droid-fallback \
-            fonts-freefont-ttf fonts-unifont || true
+          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze e Camoufox
+      - name: Installazione Dipendenze Scraper
         run: |
-          pip install "camoufox[geoip]" beautifulsoup4 playwright requests
-          # Scarica il browser personalizzato Camoufox (~200MB)
-          python -m camoufox fetch
-          # Installa le dipendenze di sistema necessarie per Firefox/Camoufox
-          playwright install-deps firefox
+          # Installiamo requests[socks] per permettere a Python di testare i proxy SOCKS5h prima di avviare il browser
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
 
-      - name: Setup Cloudflare WARP
+      - name: Avvio Container WARProxy (Active & Empty)
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update && sudo apt-get install -y cloudflare-warp
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos connect
-          sleep 5
+          # Pull dell'immagine ufficiale ottimizzata
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-      - name: Avvio Xvfb (Virtual Display Stabile per Headful Mode)
+          # Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001)
+          docker run --name warproxy_active \
+            -p 127.0.0.1:40001:1080 \
+            -d ghcr.io/kingcc/warproxy:latest
+
+          # Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto su porta locale 40002)
+          docker run --name warproxy_empty \
+            -p 127.0.0.1:40002:1080 \
+            -d ghcr.io/kingcc/warproxy:latest
+
+      - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (Camoufox Mobile)
+      - name: Creazione script Python (Macchina 2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
+          import sys
+          import random
           import requests
-          from camoufox.sync_api import Camoufox
+          from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
@@ -126,100 +135,197 @@ jobs:
               except Exception:
                   pass
 
-          # 1. Avvio di Camoufox con profilo nativo Android
-          # headless=False è indirizzato su Xvfb (:99) per simulare un monitor reale.
-          # geoip=True permette a Camoufox di determinare fuso orario, coordinate e lingua in base all'IP di rete.
-          # humanize=True aggiunge movimenti realistici del cursore/touch ed evita clic istantanei.
-          print("Inizializzazione Camoufox (Profilo Android)...", flush=True)
-          
-          with Camoufox(
-              os="android", 
-              headless=False, 
-              geoip=True, 
-              humanize=True
-          ) as browser:
-              
-              for url in TARGETS:
-                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-                  print(f"Analizzando: {url}", flush=True)
+          # Funzione di polling per validare che il tunnel SOCKS5h sia pronto ad accettare traffico
+          def wait_for_proxy(port, timeout=45):
+              print(f"In attesa che il proxy SOCKS5h sulla porta {port} sia pronto...", flush=True)
+              start_time = time.time()
+              proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              while time.time() - start_time < timeout:
+                  # Prova a rilevare l'IPv6 tramite icanhazip
                   try:
-                      # Genera automaticamente una nuova pagina con l'identità mobile coerente
-                      page = browser.new_page()
-                      
-                      query_to_search = get_query_from_url(url)
+                      r = requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
+                      if r.status_code == 200 and ":" in r.text:
+                          ip = r.text.strip()
+                          print(f"Proxy pronto sulla porta {port}! IPv6 rilevato: {ip}", flush=True)
+                          return True, "IPv6", ip
+                  except Exception:
+                      pass
 
-                      # GESTIONE SPECIFICA YELP
-                      if "yelp.com" in url or "yelp.it" in url:
-                          print("Esecuzione del warm-up su Yelp...", flush=True)
-                          page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
-                          time.sleep(3)
-                          page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                  # Fallback su cloudflare trace per catturare dettagli warp e IP
+                  try:
+                      r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
+                      if r.status_code == 200 and "warp=" in r.text:
+                          lines = r.text.split('\n')
+                          ip_line = [line for line in lines if line.startswith('ip=')]
+                          warp_line = [line for line in lines if line.startswith('warp=')]
+                          if ip_line and warp_line:
+                              ip = ip_line[0].split('=')[1]
+                              warp_status = warp_line[0].split('=')[1]
+                              if warp_status in ["on", "plus"]:
+                                  ip_type = "IPv6" if ":" in ip else "IPv4"
+                                  print(f"Proxy pronto sulla porta {port}! IP rilevato: {ip} ({ip_type}) | WARP: {warp_status}", flush=True)
+                                  return True, ip_type, ip
+                  except Exception:
+                      pass
+                  time.sleep(2)
+              print(f"Timeout: il proxy sulla porta {port} non si è stabilizzato entro {timeout} secondi.", flush=True)
+              return False, None, None
+
+          # Blocco di sincronizzazione: blocca l'esecuzione finché il container non ha completato l'handshake
+          proxy_ready, ip_type, exit_ip = wait_for_proxy(40001)
+          if not proxy_ready:
+              print("Errore critico: il proxy di WARProxy non è pronto. Esco.", flush=True)
+              sys.exit(1)
+
+          random_seed = str(random.randint(100000, 999999))
+          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
+
+          # Caricamento del contesto collegato al Proxy 1 (warproxy_active)
+          context = launch_context(
+              headless=False,
+              humanize=True,
+              proxy="socks5://127.0.0.1:40001",
+              geoip=True,
+              viewport={"width": 1920, "height": 950},
+              args=[
+                  "--no-sandbox", 
+                  "--disable-dev-shm-usage",
+                  f"--fingerprint={random_seed}",
+                  "--fingerprint-storage-quota=5000",   
+                  "--fingerprint-windows-font-metrics"  
+              ]
+          )
+
+          for url in TARGETS:
+              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"Analizzando: {url}", flush=True)
+              try:
+                  page = context.new_page()
+                  
+                  # INIEZIONE ATTIVA DI POLYFILL (Per neutralizzare CreepJS "headless" e Incolumitas RTT)
+                  page.add_init_script("""
+                      if (!('ContactsManager' in window)) {
+                          window.ContactsManager = class ContactsManager {
+                              async getProperties() { return ['name', 'email', 'tel', 'address', 'icon']; }
+                              async select() { return []; }
+                          };
+                          Object.defineProperty(navigator, 'contacts', {
+                              get: () => new window.ContactsManager(),
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
+
+                      if (!('ContentIndex' in window)) {
+                          window.ContentIndex = class ContentIndex {
+                              async add() {}
+                              async delete() {}
+                              async getAll() { return []; }
+                          };
+                      }
+
+                      if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
+                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
+                              get: () => 10,
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
+                      if (navigator.connection) {
+                          if (!('downlinkMax' in navigator.connection)) {
+                              Object.defineProperty(navigator.connection, 'downlinkMax', {
+                                  get: () => 10,
+                                  configurable: true,
+                                  enumerable: true
+                              });
+                          }
+                          Object.defineProperty(navigator.connection, 'rtt', {
+                              get: () => 100, 
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
+                  """)
+
+                  query_to_search = get_query_from_url(url)
+
+                  # GESTIONE SPECIFICA YELP
+                  if "yelp.com" in url or "yelp.it" in url:
+                      print("Esecuzione del warm-up su Yelp...", flush=True)
+                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(3)
+                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                  
+                  # Navigazione simulata per Startpage
+                  elif "startpage.com/sp/search" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(2)
+                      try:
+                          search_input = page.locator("input#q")
+                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.keyboard.press("Enter")
+                      except Exception as e:
+                          print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
+                  
+                  # Navigazione simulata per DuckDuckGo HTML
+                  elif "html.duckduckgo.com/html" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(2)
+                      try:
+                          search_input = page.locator("input[name=q]")
+                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.keyboard.press("Enter")
+                      except Exception as e:
+                          print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
                       
-                      # Navigazione simulata per Startpage
-                      elif "startpage.com/sp/search" in url:
-                          page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                          time.sleep(2)
-                          try:
-                              search_input = page.locator("input#q")
-                              search_input.type(query_to_search, delay=100, timeout=2000)
-                              page.keyboard.press("Enter")
-                          except Exception as e:
-                              print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
-                      
-                      # Navigazione simulata per DuckDuckGo HTML
-                      elif "html.duckduckgo.com/html" in url:
-                          page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                          time.sleep(2)
-                          try:
-                              search_input = page.locator("input[name=q]")
-                              search_input.type(query_to_search, delay=100, timeout=2000)
-                              page.keyboard.press("Enter")
-                          except Exception as e:
-                              print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
-                          
-                      else:
-                          page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                          if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
-                              handle_cookie_consent(page)
-                      
-                      # GESTIONE SPECIFICA YAHOO FINANCE
-                      if "finance.yahoo.com" in url:
-                          print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
-                          try:
-                              page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
-                          except Exception:
-                              pass
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                          handle_cookie_consent(page)
+                  
+                  # GESTIONE SPECIFICA YAHOO FINANCE
+                  if "finance.yahoo.com" in url:
+                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+                      try:
+                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                      except Exception:
+                          pass
+                      time.sleep(1)
+
+                  # Scorrimento simulato
+                  try:
+                      for _ in range(3):
+                          page.mouse.wheel(0, 300)
                           time.sleep(1)
+                  except Exception:
+                      pass
 
-                      # Scorrimento simulato (con movimenti umanizzati integrati in Camoufox)
-                      try:
-                          for _ in range(3):
-                              page.mouse.wheel(0, 300)
-                              time.sleep(1)
-                      except Exception:
-                          pass
+                  # Tempi di attesa bilanciati
+                  if "creepjs" in url:
+                      time.sleep(20) 
+                  elif "pixelscan" in url:
+                      time.sleep(10)
+                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
+                      time.sleep(5)
+                  else:
+                      time.sleep(4)
 
-                      # Tempi di attesa bilanciati per permettere ai test di completarsi
-                      if "creepjs" in url:
-                          time.sleep(20) 
-                      elif "pixelscan" in url:
-                          time.sleep(10)
-                      elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                          time.sleep(5)
-                      else:
-                          time.sleep(4)
+                  raw_html = page.content()
+                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                  page.close()
 
-                      raw_html = page.content()
-                      results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+              except Exception as e:
+                  print(f"Errore critico su {url}: {e}", flush=True)
+                  results += f"ERRORE GLOBALE: {str(e)}\n"
+                  try:
                       page.close()
+                  except Exception:
+                      pass
 
-                  except Exception as e:
-                      print(f"Errore critico su {url}: {e}", flush=True)
-                      results += f"ERRORE GLOBALE: {str(e)}\n"
-                      try:
-                          page.close()
-                      except Exception:
-                          pass
+          context.close()
 
           with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
               f.write(results)
