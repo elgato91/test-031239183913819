@@ -1,4 +1,4 @@
-name: Test RAG Challenge 2026
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
 on: 
   workflow_dispatch:
@@ -18,10 +18,11 @@ jobs:
           sudo sntp -sS pool.ntp.org || sudo ntpdate -s pool.ntp.org || true
           sudo systemctl start systemd-timesyncd.service || true
 
-      - name: Installazione Font di Sistema (Requisito per Hash Canvas)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          # Installiamo i font per supportare il canvas rendering su Linux
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
@@ -29,7 +30,8 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "camoufox[geoip]" beautifulsoup4 requests "requests[socks]"
+          # Utilizziamo [geoip] per permettere a Camoufox di risolvere autonomamente locale/timezone/webrtc
+          pip install -U "camoufox[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps firefox
 
       - name: Setup 3 WARProxy Docker Containers (IPv6)
@@ -38,7 +40,6 @@ jobs:
 
           for i in 1 2 3; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i su porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
               -e TZ=Europe/Rome \
@@ -46,12 +47,9 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
-            # Scagliona gli avvii per evitare il rate-limiting su Cloudflare WARP
-            sleep 15
           done
 
-          echo "Container attivi:"
+          sleep 15
           docker ps -a
 
       - name: Verifica IP IPv6 di uscita sui 3 Proxy
@@ -60,18 +58,18 @@ jobs:
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA IP CONTAINER $i ($PORT):"
-            for attempt in 1 2 3; do
-              curl -s --connect-timeout 8 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json && break || {
-                echo "Tentativo $attempt fallito per porta $PORT, attesa..."
-                sleep 5
-              }
-            done
+            curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
           done
           echo "=================================================="
 
-      - name: Download Binario Camoufox (Firefox Custom)
+      - name: Avvio Xvfb (Virtual Display Headful)
         run: |
-          python -m camoufox fetch
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Camoufox Browser
+        run: |
+          python3 -m camoufox fetch
 
       - name: Creazione script Python (Macchina 2)
         run: |
@@ -79,20 +77,19 @@ jobs:
           import time
           import sys
           import random
-          import requests
           from camoufox.sync_api import Camoufox
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
-              "https://api6.ipify.org?format=json", 
+              "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma&hl=it&lr=lang_it", 
+              "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
@@ -104,7 +101,7 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1&hl=it&lr=lang_it", 
+              "https://www.google.com/search?q=migliore+carbonara+roma",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
@@ -141,48 +138,34 @@ jobs:
                   pass
               return default
 
-          # Verifica che il container proxy locale risponda
-          def wait_for_proxy(port, timeout=45):
-              print(f"[NODO {node_id}] Verifica connettività proxy locale su porta {port}...", flush=True)
-              start_time = time.time()
-              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              while time.time() - start_time < timeout:
-                  try:
-                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=5)
-                      if r.status_code == 200:
-                          print(f"[NODO {node_id}] SOCKS5 Proxy pronto: {r.json().get('ip')}", flush=True)
-                          return True
-                  except Exception:
-                      time.sleep(2)
-              return False
-
-          if not wait_for_proxy(ACTIVE_PORT):
-              print(f"[NODO {node_id}] Proxy o IPv6 non pronto. Termino.", flush=True)
-              sys.exit(1)
-
           profile_dir = f"./profile_node_{node_id}"
+          proxy_config = {"server": f"socks5://127.0.0.1:{ACTIVE_PORT}"}
 
-          # Avvio del browser stealth Firefox Camoufox in headless nativo
+          print(f"[NODO {node_id}] Avvio Camoufox Context", flush=True)
+
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          # Utilizziamo il context manager Camoufox per gestire l'istanza del browser Firefox.
+          # Viene definita un'identità Linux coerente con la macchina host per evitare discrepanze.
           with Camoufox(
-              headless=True,                             # Stealth integrato nel motore di rendering C++
-              proxy={"server": f"socks5://127.0.0.1:{ACTIVE_PORT}"},
-              geoip=True,                                # Calcola e spoofa fuso orario, coordinate e lingua dall'IP
-              humanize=True,                             # Movimenti del cursore e digitazione simulati
-              persistent_context=True,                   # Riutilizza la stessa sessione persistente (cookie e localStorage)
-              user_data_dir=profile_dir,                 # Directory persistente dei dati del browser
-          ) as browser:
-
-              # Riutilizziamo lo stesso tab aperto all'avvio per non sprecare RAM ed evitare conflitti di focus
-              page = browser.pages[0] if browser.pages else browser.new_page()
-
-              results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+              user_data_dir=profile_dir,
+              persistent_context=True,
+              headless=False,
+              humanize=True,
+              os="linux",
+              proxy=proxy_config,
+              geoip=True,
+              viewport={"width": 1920, "height": 950}
+          ) as context:
 
               for url in MY_TARGETS:
                   results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
                   print(f"[NODO {node_id}] -> {url}", flush=True)
                   try:
+                      page = context.new_page()
                       query_to_search = get_query_from_url(url)
 
+                      # Navigazione iniziale
                       if "yelp.com" in url or "yelp.it" in url:
                           page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=30000)
                           time.sleep(3)
@@ -192,36 +175,27 @@ jobs:
                           try:
                               page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                               page.keyboard.press("Enter")
-                              page.wait_for_load_state("domcontentloaded", timeout=30000)
                           except Exception: pass
                       elif "html.duckduckgo.com" in url:
                           page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                           try:
                               page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                               page.keyboard.press("Enter")
-                              page.wait_for_load_state("domcontentloaded", timeout=30000)
                           except Exception: pass
                       else:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-                      # Trigger manuale Pixelscan
-                      if "pixelscan.net" in url:
+                      # Attendiamo in silenzio per l'elaborazione degli script anti-bot di terze parti
+                      time.sleep(5)
+
+                      # Specifico per Reddit: dare tempo ai challenge JS di calcolare la proof-of-work
+                      if "reddit.com" in url:
                           try:
-                              btn = page.locator("text=Scan My Browser Now")
-                              if btn.is_visible(timeout=3000):
-                                  btn.click()
+                              page.wait_for_load_state("networkidle", timeout=15000)
                           except Exception: pass
+                          time.sleep(6)
 
-                      # Risoluzione Cloudflare Turnstile
-                      try:
-                          cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
-                          checkbox = cf_iframe.locator("input[type='checkbox']")
-                          if checkbox.is_visible(timeout=3000):
-                              checkbox.click()
-                              time.sleep(4)
-                      except Exception: pass
-
-                      # Cookie consent bypass
+                      # Gestione del consenso cookie standard
                       if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
                           try:
                               consent_selectors = [
@@ -231,42 +205,53 @@ jobs:
                               for selector in consent_selectors:
                                   btn = page.locator(selector)
                                   if btn.is_visible(timeout=1000):
-                                      btn.click()
+                                      btn.click() # Camoufox applica curve di Bézier per il mouse automaticamente con humanize=True
                                       break
                           except Exception: pass
 
-                      # Scroll simulato
+                      # Trigger esplicito per Pixelscan (legittimo)
+                      if "pixelscan.net" in url:
+                          try:
+                              btn = page.locator("text=Scan My Browser Now")
+                              if btn.is_visible(timeout=3000):
+                                  btn.click()
+                          except Exception: pass
+
+                      # Scroll umano simulato per eludere il tracking comportamentale
                       try:
                           for _ in range(3):
                               page.mouse.wheel(0, random.randint(300, 600))
                               time.sleep(random.uniform(0.8, 1.5))
                       except Exception: pass
 
-                      # Attese mirate post-caricamento
+                      # Tempistiche di rendering
                       if "creepjs" in url: time.sleep(15) 
-                      elif "pixelscan" in url: time.sleep(8)
-                      elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
+                      elif "pixelscan" in url: time.sleep(10)
                       else: time.sleep(3)
 
                       raw_html = page.content()
                       results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                      page.close()
 
                   except Exception as e:
-                      print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
+                      print(f"[NODO {node_id}] Errore: {e}", flush=True)
                       results += f"ERRORE GLOBALE: {str(e)}\n"
+                      try: page.close()
+                      except Exception: pass
+
+          # Il contesto del browser si chiude automaticamente all'uscita dal blocco 'with'
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (3 Nodi indipendenti)
+      - name: Esecuzione Scraping Parallelo
         run: |
-          echo "Avvio processi paralleli in background..."
+          echo "Avvio processi paralleli..."
           python -u m2_insocket.py 1 > node1.log 2>&1 &
           python -u m2_insocket.py 2 > node2.log 2>&1 &
           python -u m2_insocket.py 3 > node3.log 2>&1 &
           
-          # Attende il completamento di tutti i processi in background
           wait
 
           echo "=== LOG NODO 1 ==="
@@ -277,10 +262,7 @@ jobs:
           cat node3.log || true
           echo "=================="
 
-          # Crea i file vuoti nel caso un nodo fosse andato in crash irreversibile
           touch output_node_1.txt output_node_2.txt output_node_3.txt
-          
-          # Assembla il report finale
           cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
