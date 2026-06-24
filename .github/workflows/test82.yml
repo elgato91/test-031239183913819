@@ -12,9 +12,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Font di Sistema
+      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
         run: |
           sudo apt-get update
+          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
@@ -23,51 +24,75 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          # pysocks è fondamentale per far funzionare proxy="socks5h://..." con la libreria requests
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests pysocks
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 3 WARProxy Docker Containers (Strict IPv6-Only)
+      - name: Setup 3 WARProxy Docker Containers (Active & Parallel IPv6-only)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          echo "Avvio dei 3 nodi proxy..."
-          docker run --name wp1 -p 127.0.0.1:40001:1080 -e TZ=Europe/Rome -d ghcr.io/kingcc/warproxy:latest
-          docker run --name wp2 -p 127.0.0.1:40002:1080 -e TZ=Europe/Rome -d ghcr.io/kingcc/warproxy:latest
-          docker run --name wp3 -p 127.0.0.1:40003:1080 -e TZ=Europe/Rome -d ghcr.io/kingcc/warproxy:latest
+          # CONTAINER 1 
+          docker run --name warproxy-1 \
+            --network host \
+            -e TZ=Europe/Rome \
+            -e SOCKS5_PORT=40001 \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -e VERBOSE=true \
+            -d ghcr.io/kingcc/warproxy:latest
 
-          echo "Attesa 15 secondi per la generazione degli account WARP..."
+          # CONTAINER 2
+          docker run --name warproxy-2 \
+            --network host \
+            -e TZ=Europe/Rome \
+            -e SOCKS5_PORT=40002 \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -e VERBOSE=true \
+            -d ghcr.io/kingcc/warproxy:latest
+
+          # CONTAINER 3
+          docker run --name warproxy-3 \
+            --network host \
+            -e TZ=Europe/Rome \
+            -e SOCKS5_PORT=40003 \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -e VERBOSE=true \
+            -d ghcr.io/kingcc/warproxy:latest
+
           sleep 15
+          docker ps -a
 
-          echo "Applicazione patch IPv6-Only all'interno dei container..."
-          for i in 1 2 3; do
-            # Forza l'instradamento esclusivo su IPv6 (rimuove l'IPv4 dal tunnel)
-            docker exec wp$i sed -i 's/AllowedIPs = .*/AllowedIPs = ::\/0/' /config/wireproxy.conf
-            # Forza l'utilizzo esclusivo dei DNS IPv6 di Cloudflare
-            docker exec wp$i sed -i 's/DNS = .*/DNS = 2606:4700:4700::1111, 2606:4700:4700::1001/' /config/wireproxy.conf
-          done
-
-          echo "Riavvio dei container per applicare la configurazione IPv6-Only..."
-          docker restart wp1 wp2 wp3
-          sleep 8
-
-      - name: Verifica IP e Connettività IPv6 sui Proxy
+      - name: Verifica IP IPv6 di uscita sui 3 Proxy
         run: |
           echo "=================================================="
-          echo "IP CONTAINER 1 (40001):"
-          curl -s --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Fallito"
-          echo -e "\nIP CONTAINER 2 (40002):"
-          curl -s --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Fallito"
-          echo -e "\nIP CONTAINER 3 (40003):"
-          curl -s --proxy socks5h://127.0.0.1:40003 https://api64.ipify.org?format=json || echo "Fallito"
-          echo -e "\n=================================================="
+          echo "VERIFICA IP CONTAINER 1 (40001):"
+          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
+          echo "=================================================="
+          echo "VERIFICA IP CONTAINER 2 (40002):"
+          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Proxy 2 fallito!"
+          echo "=================================================="
+          echo "VERIFICA IP CONTAINER 3 (40003):"
+          curl --proxy socks5h://127.0.0.1:40003 https://api64.ipify.org?format=json || echo "Proxy 3 fallito!"
+          echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python Parallelo
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          echo "Esecuzione download sincrono di CloakBrowser per evitare Race Condition..."
+          python -c "
+          from cloakbrowser import launch_context
+          try:
+              ctx = launch_context(headless=True)
+              ctx.close()
+              print('Cache CloakBrowser pronta e scaricata con successo.')
+          except Exception as e:
+              print(f'Errore in pre-init: {e}')
+          "
+
+      - name: Creazione script Python (Macchina 2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -182,7 +207,6 @@ jobs:
               if not ip_ready:
                   return False, "UTC", "US"
 
-              # Geolocalizziamo l'IPv6 per evitare il timeout di CloakBrowser
               timezone, country = "UTC", "US"
               try:
                   r = requests.get("https://freeipapi.com/api/json", proxies=proxies, timeout=5)
@@ -205,7 +229,6 @@ jobs:
           
           print(f"[NODO {node_id}] Avvio browser (TZ: {tz}, Locale: {locale}, Seed: {random_seed})", flush=True)
 
-          # Nessun "--host-resolver-rules" per evitare freeze. CloakBrowser delega il DNS a SOCKS5h.
           context = launch_context(
               headless=False,
               humanize=True,
@@ -314,7 +337,7 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo
+      - name: Esecuzione Scraping Parallelo (3 Nodi indipendenti)
         run: |
           echo "Avvio processi paralleli in background..."
           python -u m2_insocket.py 1 > node1.log 2>&1 &
@@ -332,6 +355,9 @@ jobs:
           cat node3.log || true
           echo "=================="
 
+          # Crea i file vuoti nel caso un nodo fosse andato in crash irreversibile, evitando l'errore cat
+          touch output_node_1.txt output_node_2.txt output_node_3.txt
+          
           # Assembla il report finale
           cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
