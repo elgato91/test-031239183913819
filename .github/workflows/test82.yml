@@ -22,26 +22,61 @@ jobs:
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze
+      - name: Installazione Dipendenze Scraper
         run: |
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Setup Cloudflare WARP (SOCKS5 Proxy Mode)
+      - name: Setup WireProxy & WGCF (IPv6-Only SOCKS5h WARP)
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update && sudo apt-get install -y cloudflare-warp
+          # Scarica WGCF (Unofficial CLI per Cloudflare WARP)
+          wget -qO wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/
+
+          # Scarica WireProxy (WireGuard in userspace come proxy SOCKS5h)
+          wget -qO wireproxy.tar.gz https://github.com/octeep/wireproxy/releases/download/v1.1.2/wireproxy_linux_amd64.tar.gz
+          tar -xzf wireproxy.tar.gz
+          chmod +x wireproxy
+          sudo mv wireproxy /usr/local/bin/
+
+          # Registrazione ed esportazione del profilo di WARP
+          wgcf register --accept-tos
+          wgcf generate
+
+          # Generazione dinamica della configurazione WireProxy filtrando solo l'IPv6
+          cat << 'EOF' > make_config.py
+          with open("wgcf-profile.conf", "r") as f:
+              lines = f.readlines()
+          new_lines = []
+          for line in lines:
+              # Estraiamo solo l'indirizzo IPv6 dall'interfaccia di WARP
+              if line.strip().startswith("Address"):
+                  parts = line.split("=")
+                  ips = parts[1].split(",")
+                  ipv6 = [ip.strip() for ip in ips if ":" in ip][0]
+                  line = f"Address = {ipv6}\n"
+              # Forziamo l'instradamento esclusivamente su IPv6
+              elif line.strip().startswith("AllowedIPs"):
+                  line = "AllowedIPs = ::/0\n"
+              new_lines.append(line)
           
-          # Configura WARP per agire esclusivamente come SOCKS5 proxy locale (Porta 40000)
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos mode proxy
-          warp-cli --accept-tos connect
+          # Accodiamo la sezione Socks5 per configurare il proxy locale in ascolto sulla porta 40000
+          new_lines.append("\n[Socks5]\nBindAddress = 127.0.0.1:40000\n")
+          
+          with open("wireproxy.conf", "w") as f:
+              f.writelines(new_lines)
+          EOF
+          
+          python3 make_config.py
+
+          # Avvia wireproxy in background
+          wireproxy -c wireproxy.conf -d
           sleep 5
-          
-          # Test rapido di validazione del tunnel SOCKS5h
-          echo "Verifica IP del tunnel SOCKS5:"
-          curl -x socks5h://127.0.0.1:40000 https://api64.ipify.org?format=json
+
+          # Verifica che il tunnel SOCKS5h IPv6 funzioni correttamente
+          echo "Verifica IP IPv6 di uscita su tunnel SOCKS5h:"
+          curl -6 --proxy socks5h://127.0.0.1:40000 https://api64.ipify.org?format=json
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
@@ -133,10 +168,12 @@ jobs:
               except Exception:
                   pass
 
+          # Generazione seed hardware casuale e coerente
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Avvio del contesto con il SOCKS5h Proxy e geoip=True (l'allineamento della timezone è gestito nativamente dal C++ del browser)
+          # Caricamento del contesto: delegando il proxy e geoip=True a CloakBrowser,
+          # il motore allineerà nativamente timezone, locale e WebRTC IP leggendo l'IPv6 di WARP.
           context = launch_context(
               headless=False,
               humanize=True,
@@ -147,9 +184,8 @@ jobs:
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random_seed}",
-                  "--fingerprint-noise=false",          # Previene l'identificazione euristica delle impronte alterate, risolvendo anche il rilevamento dei font
-                  "--fingerprint-storage-quota=5000",   # Normalizza lo spazio di archiviazione per eludere il rilevamento incognito/private
-                  "--fingerprint-windows-font-metrics"  # Calibra le metriche dei font per allinearsi all'User-Agent Windows
+                  "--fingerprint-storage-quota=5000",   
+                  "--fingerprint-windows-font-metrics"  
               ]
           )
 
@@ -200,7 +236,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, // Allineamento con il ritardo di instradamento di WARP
+                              get: () => 100, // Latenza simulata coerente con l'instradamento VPN di WARP
                               configurable: true,
                               enumerable: true
                           });
