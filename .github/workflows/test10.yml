@@ -142,7 +142,6 @@ jobs:
           profile_dir = f"./profile_node_{node_id}"
 
           # Argomenti ripuliti: disattiviamo il noise di fingerprinting per evitare i flag ML di Pixelscan
-          # Non inseriamo --fingerprint-windows-font-metrics poiché siamo su Ubuntu
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -173,39 +172,76 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Navigazione iniziale
-                  if "yelp.com" in url or "yelp.it" in url:
+                  # ==========================================
+                  # NAVIGAZIONE COMPORTAMENTALE (BYPASS IP WARP)
+                  # ==========================================
+                  
+                  if "google.com/search" in url:
+                      # 1. Vai alla homepage per accumulare Trust
+                      page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=30000)
+                      time.sleep(2)
+                      
+                      # 2. Gestione Cookie Google (Critico per il bypass)
+                      try:
+                          btn_cookie = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')")
+                          if btn_cookie.is_visible(timeout=3000):
+                              btn_cookie.click()
+                              time.sleep(1.5)
+                      except Exception: pass
+                      
+                      # 3. Digita la ricerca come un umano
+                      try:
+                          search_box = page.locator("textarea[name='q'], input[name='q']").first
+                          search_box.type(query_to_search, delay=random.randint(50, 150), timeout=5000)
+                          page.keyboard.press("Enter")
+                          page.wait_for_load_state("domcontentloaded", timeout=10000)
+                      except Exception: 
+                          # Fallback di emergenza se cambia il DOM
+                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+                  elif "yelp.com" in url or "yelp.it" in url:
                       page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=30000)
-                      time.sleep(3)
+                      time.sleep(2)
                       page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                      
                   elif "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
                           page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                       except Exception: pass
+                      
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
                           page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                       except Exception: pass
+                      
                   else:
+                      # Tutti gli altri siti
                       page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-                  # Attendiamo in silenzio. Se c'è Cloudflare o reCAPTCHA, CloakBrowser agisce passivamente.
-                  # NESSUN CLICK MANUALE SUGLI IFRAME DI SICUREZZA.
-                  time.sleep(5)
+                  # ==========================================
+                  # GESTIONE POST-CARICAMENTO & BYPASS REDDIT
+                  # ==========================================
+                  
+                  time.sleep(3)
 
-                  # Specifico per Reddit: dare tempo ai challenge JS di calcolare la proof-of-work
                   if "reddit.com" in url:
+                      # Reddit ha bisogno di telemetria del mouse per sbloccare gli IP WARP
                       try:
+                          for _ in range(5):
+                              x = random.randint(100, 1000)
+                              y = random.randint(100, 800)
+                              page.mouse.move(x, y, steps=10) # Muove il mouse in modo fluido
+                              time.sleep(0.5)
                           page.wait_for_load_state("networkidle", timeout=15000)
                       except Exception: pass
-                      time.sleep(6)
+                      time.sleep(5)
 
-                  # Gestione del consenso cookie standard
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                  # Gestione consenso cookie generico per gli altri siti
+                  if not any(x in url for x in ["facebook.com", "reddit.com", "yelp", "google"]):
                       try:
                           consent_selectors = [
                               "button:has-text('Accetta tutto')", "button:has-text('Accept all')",
@@ -214,11 +250,11 @@ jobs:
                           for selector in consent_selectors:
                               btn = page.locator(selector)
                               if btn.is_visible(timeout=1000):
-                                  btn.click() # CloakBrowser applica curve di Bézier per il mouse automaticamente
+                                  btn.click() 
                                   break
                       except Exception: pass
 
-                  # Trigger esplicito per Pixelscan (legittimo)
+                  # Trigger esplicito per Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now")
@@ -226,7 +262,7 @@ jobs:
                               btn.click()
                       except Exception: pass
 
-                  # Scroll umano simulato per eludere il tracking comportamentale
+                  # Scroll umano simulato
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
@@ -234,8 +270,8 @@ jobs:
                   except Exception: pass
 
                   # Tempistiche di rendering
-                  if "creepjs" in url: time.sleep(15) 
-                  elif "pixelscan" in url: time.sleep(10)
+                  if "creepjs" in url: time.sleep(12) 
+                  elif "pixelscan" in url: time.sleep(8)
                   else: time.sleep(3)
 
                   raw_html = page.content()
