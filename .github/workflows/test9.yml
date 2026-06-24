@@ -96,7 +96,8 @@ jobs:
         shell: python
         run: |
           import textwrap
-          code = '''
+          # L'uso del prefisso raw 'r' impedisce a Python di convertire \n in veri ritorni a capo in memoria
+          code = r'''
           import time
           import sys
           import random
