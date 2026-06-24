@@ -14,7 +14,6 @@ jobs:
 
       - name: Sincronizza Orologio di Sistema (NTP)
         run: |
-          # Sincronizza l'orologio interno della VM di GitHub Actions per risolvere la discrepanza temporale (Time Drift) su Pixelscan
           sudo systemctl stop systemd-timesyncd.service || true
           sudo sntp -sS pool.ntp.org || sudo ntpdate -s pool.ntp.org || true
           sudo systemctl start systemd-timesyncd.service || true
@@ -30,7 +29,9 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "scrapling[fetchers]" beautifulsoup4 requests "requests[socks]"
+          pip install "camoufox[geoip]" beautifulsoup4 requests "requests[socks]"
+          # Installazione delle librerie di sistema richieste da Firefox per funzionare senza problemi
+          playwright install-deps firefox
 
       - name: Setup 3 WARProxy Docker Containers (IPv6)
         run: |
@@ -47,8 +48,7 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            # Attesa di sicurezza per non saturare la registrazione simultanea su Cloudflare
-            echo "Attesa stabilizzazione container $i..."
+            # Scagliona gli avvii per non incorrere nel rate-limit di Cloudflare WARP
             sleep 15
           done
 
@@ -61,24 +61,18 @@ jobs:
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA IP CONTAINER $i ($PORT):"
-            # Utilizziamo api6 per verificare e forzare l'instradamento IPv6 con logica di retry
             for attempt in 1 2 3; do
               curl -s --connect-timeout 8 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json && break || {
-                echo "Tentativo $attempt per porta $PORT fallito, attesa..."
+                echo "Tentativo $attempt fallito per porta $PORT, attesa..."
                 sleep 5
               }
             done
           done
           echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Download Binario Camoufox (Firefox Custom)
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Installazione Browser di Scrapling
-        run: |
-          scrapling install
+          python -m camoufox fetch
 
       - name: Creazione script Python (Macchina 2)
         run: |
@@ -87,19 +81,19 @@ jobs:
           import sys
           import random
           import requests
-          from scrapling.fetchers import StealthySession
+          from camoufox.sync_api import Camoufox
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
-              "https://api6.ipify.org?format=json", # Forza il report IPv6
+              "https://api6.ipify.org?format=json", 
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma&hl=it&lr=lang_it", # Forza lingua italiana
+              "https://www.google.com/search?q=cosa+vedere+roma&hl=it&lr=lang_it", 
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
@@ -111,7 +105,7 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1&hl=it&lr=lang_it", # Forza lingua italiana
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1&hl=it&lr=lang_it", 
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
@@ -148,137 +142,38 @@ jobs:
                   pass
               return default
 
-          # Controlla e valida la connessione IPv6 sul proxy con logica estesa
-          def wait_for_proxy_and_get_tz(port, timeout=60):
-              print(f"[NODO {node_id}] Validazione IPv6 su porta {port}...", flush=True)
+          # Verifica semplicemente che il container proxy locale risponda
+          def wait_for_proxy(port, timeout=45):
+              print(f"[NODO {node_id}] Verifica connettività proxy locale su porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              
-              ipv6_ok = False
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=8)
-                      if r.status_code == 200 and ":" in r.json().get("ip", ""):
-                          print(f"[NODO {node_id}] IPv6 WARP rilevato: {r.json().get('ip')}", flush=True)
-                          ipv6_ok = True
-                          break
+                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=5)
+                      if r.status_code == 200:
+                          print(f"[NODO {node_id}] SOCKS5 Proxy pronto: {r.json().get('ip')}", flush=True)
+                          return True
                   except Exception:
-                      time.sleep(3)
-                      
-              if not ipv6_ok:
-                  return False, "America/Chicago", "US"
+                      time.sleep(2)
+              return False
 
-              # Risoluzione della posizione geografica del tunnel
-              timezone, country = "America/Chicago", "US"
-              try:
-                  r = requests.get("https://ipapi.co/json/", proxies=proxies, timeout=8)
-                  if r.status_code == 200:
-                      data = r.json()
-                      timezone = data.get("timezone", "America/Chicago")
-                      country = data.get("country_code", "US")
-              except Exception:
-                  pass
-              return True, timezone, country
-
-          success, tz, country = wait_for_proxy_and_get_tz(ACTIVE_PORT)
-          if not success:
+          if not wait_for_proxy(ACTIVE_PORT):
               print(f"[NODO {node_id}] Proxy o IPv6 non pronto. Termino.", flush=True)
               sys.exit(1)
 
           profile_dir = f"./profile_node_{node_id}"
-          locale = "it-IT" if country == "IT" else f"en-{country}"
 
-          extra_args = [
-              "--no-sandbox", 
-              "--disable-dev-shm-usage"
-          ]
-
-          # Forza HTTP/1.1 sul Nodo 3 per arginare i blocchi automatici di Reddit
-          if node_id == 3:
-              extra_args.append("--disable-http2")
-
-          def make_page_action(url, query_to_search):
-              def page_action(page):
-                  # Gestione dei passaggi per Yelp
-                  if "yelp.com" in url or "yelp.it" in url:
-                      time.sleep(3)
-                      page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                  # Gestione dei passaggi per Startpage
-                  elif "startpage.com" in url:
-                      try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
-                          page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=30000)
-                      except Exception: pass
-                  # Gestione dei passaggi per DuckDuckGo
-                  elif "html.duckduckgo.com" in url:
-                      try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
-                          page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=30000)
-                      except Exception: pass
-
-                  # Trigger manuale Pixelscan
-                  if "pixelscan.net" in url:
-                      try:
-                          btn = page.locator("text=Scan My Browser Now")
-                          if btn.is_visible(timeout=3000):
-                              btn.click()
-                      except Exception: pass
-
-                  # Risoluzione Cloudflare Turnstile manuale (in aggiunta a solve_cloudflare integrato)
-                  try:
-                      cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
-                      checkbox = cf_iframe.locator("input[type='checkbox']")
-                      if checkbox.is_visible(timeout=3000):
-                          checkbox.click()
-                          time.sleep(4)
-                  except Exception: pass
-
-                  # Gestione consenso cookie
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
-                      try:
-                          consent_selectors = [
-                              "button:has-text('Accetta tutto')", "button:has-text('Accept all')",
-                              "button:has-text('Consenti')", "button:has-text('I agree')"
-                          ]
-                          for selector in consent_selectors:
-                              btn = page.locator(selector)
-                              if btn.is_visible(timeout=1000):
-                                  btn.click()
-                                  break
-                      except Exception: pass
-
-                  # Scroll umano simulato
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, random.randint(300, 600))
-                          time.sleep(random.uniform(0.8, 1.5))
-                  except Exception: pass
-
-                  # Tempistiche di attesa
-                  if "creepjs" in url: time.sleep(15) 
-                  elif "pixelscan" in url: time.sleep(8)
-                  elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
-                  else: time.sleep(3)
-
-              return page_action
-
-          # Avvio della sessione protetta in Scrapling
-          with StealthySession(
+          # Avvio del browser stealth Firefox Camoufox in headless nativo
+          with Camoufox(
+              headless=True,                             # Nessun bisogno di Xvfb! 100% invisibile.
+              proxy={"server": f"socks5://127.0.0.1:{ACTIVE_PORT}"},
+              geoip=True,                                # Allinea fuso orario, coordinate e lingua in base all'IP
+              fingerprint_preset=True,                   # Fingerprint reali salvati per aggirare Morningstar e CF
+              humanize=True,                             # Movimenti del cursore e digitazione simulati
+              persistent_context=True,                   # Mantiene sessione e cookie tra i caricamenti
               user_data_dir=profile_dir,
-              headless=False,
-              real_chrome=True,     # Usa Google Chrome effettivo preinstallato sulla VM per aggirare i rilevamenti (es. Morningstar)
-              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True,
-              timezone_id=tz,       
-              locale=locale,     
-              extra_flags=extra_args,
-              additional_args={"viewport": {"width": 1920, "height": 950}},
-              block_ads=True,       # Impedisce a ~3,500 domini pubblicitari di bloccare o rallentare il caricamento
-              solve_cloudflare=True,
-              humanize=True
-          ) as session:
+              block_images=True,                         # Disabilita le immagini per risparmiare traffico e velocizzare i nodi
+          ) as browser:
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
@@ -286,31 +181,83 @@ jobs:
                   results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
                   print(f"[NODO {node_id}] -> {url}", flush=True)
                   try:
+                      page = browser.new_page()
                       query_to_search = get_query_from_url(url)
 
                       if "yelp.com" in url or "yelp.it" in url:
-                          fetch_url = "https://www.yelp.com/"
+                          page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=30000)
+                          time.sleep(3)
+                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
                       elif "startpage.com" in url:
-                          fetch_url = "https://www.startpage.com/"
+                          page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
+                          try:
+                              page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                              page.keyboard.press("Enter")
+                              page.wait_for_load_state("domcontentloaded", timeout=30000)
+                          except Exception: pass
                       elif "html.duckduckgo.com" in url:
-                          fetch_url = "https://html.duckduckgo.com/"
+                          page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
+                          try:
+                              page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                              page.keyboard.press("Enter")
+                              page.wait_for_load_state("domcontentloaded", timeout=30000)
+                          except Exception: pass
                       else:
-                          fetch_url = url
+                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-                      action = make_page_action(url, query_to_search)
+                      # Trigger manuale Pixelscan
+                      if "pixelscan.net" in url:
+                          try:
+                              btn = page.locator("text=Scan My Browser Now")
+                              if btn.is_visible(timeout=3000):
+                                  btn.click()
+                          except Exception: pass
 
-                      response = session.fetch(
-                          fetch_url,
-                          page_action=action,
-                          timeout=30000, # Esteso leggermente il timeout
-                      )
+                      # Risoluzione Cloudflare Turnstile
+                      try:
+                          cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
+                          checkbox = cf_iframe.locator("input[type='checkbox']")
+                          if checkbox.is_visible(timeout=3000):
+                              checkbox.click()
+                              time.sleep(4)
+                      except Exception: pass
 
-                      raw_html = response.html_content
+                      # Cookie consent bypass
+                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                          try:
+                              consent_selectors = [
+                                  "button:has-text('Accetta tutto')", "button:has-text('Accept all')",
+                                  "button:has-text('Consenti')", "button:has-text('I agree')"
+                              ]
+                              for selector in consent_selectors:
+                                  btn = page.locator(selector)
+                                  if btn.is_visible(timeout=1000):
+                                      btn.click()
+                                      break
+                          except Exception: pass
+
+                      # Scroll simulato
+                      try:
+                          for _ in range(3):
+                              page.mouse.wheel(0, random.randint(300, 600))
+                              time.sleep(random.uniform(0.8, 1.5))
+                      except Exception: pass
+
+                      # Attese mirate post-caricamento
+                      if "creepjs" in url: time.sleep(15) 
+                      elif "pixelscan" in url: time.sleep(8)
+                      elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
+                      else: time.sleep(3)
+
+                      raw_html = page.content()
                       results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                      page.close()
 
                   except Exception as e:
-                      print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                      print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
                       results += f"ERRORE GLOBALE: {str(e)}\n"
+                      try: page.close()
+                      except Exception: pass
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
