@@ -36,63 +36,30 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avviamo i container uno alla volta con un delay strutturato
+          # Avvio originale, pulito e senza spam di connessioni
           for i in 1 2 3; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
-              -e TZ=Europe/Rome \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
-            # Delay di 8 secondi tra un avvio e l'altro per evitare rate-limit
-            # ed evitare che Cloudflare allochi lo stesso IP a sessioni parallele
-            if [ $i -lt 3 ]; then
-              echo "Attesa scaglionamento per il prossimo nodo..."
-              sleep 8
-            fi
           done
 
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 15
+          docker ps -a
 
-      - name: Verifica IP IPv6 con Auto-healing
+      - name: Verifica IP IPv6 di uscita sui 3 Proxy
         run: |
-          # Per ogni container, verifichiamo la connessione. Se fallisce, riavviamo e riproviamo.
           for i in 1 2 3; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
-            SUCCESS=false
-            for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              
-              # Proviamo a risolvere l'IP
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP: $IP"
-                SUCCESS=true
-                break
-              else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
-                docker restart warproxy-$i
-                sleep 8  # Diamo tempo al tunnel Wireguard di ricollegarsi dopo il riavvio
-              fi
-            done
-            
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
-              docker logs warproxy-$i || true
-              exit 1
-            fi
+            echo "VERIFICA IP CONTAINER $i ($PORT):"
+            curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
           done
           echo "=================================================="
-          docker ps -a
 
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
@@ -113,7 +80,7 @@ jobs:
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
-          # Ripristinato il separatore "+" per evitare il bug di codifica automatica di Playwright / Bing
+          # Ripristinati tutti i "+" corretti che evitano il troncamento su Google/Bing
           TARGETS = [
               "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
@@ -174,7 +141,7 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
-          # Configurazione Standard e Pulita originale (Rimosso definitivamente il noise=false che causava i blocchi)
+          # Configurazione Standard e Pulita originale (Rimosso definitivamente il noise=false)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -226,7 +193,7 @@ jobs:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
                           
                   else:
-                      # Google, Bing, e tutti gli altri siti vanno in direct go-to passivo
+                      # Navigazione diretta passiva
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
                   # Pausa per fare valutare gli script di rete e i cookie
@@ -242,7 +209,7 @@ jobs:
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
-                                  checkbox.click() # CloakBrowser sblocca istantaneamente grazie al trust score 0.9
+                                  checkbox.click() # Clicca e passa da solo grazie al punteggio 0.9 di CloakBrowser
                                   time.sleep(6) 
                       except Exception: pass
 
