@@ -113,6 +113,7 @@ jobs:
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
+          # Ripristinato il separatore "+" per evitare il bug di codifica automatica di Playwright / Bing
           TARGETS = [
               "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
@@ -121,8 +122,8 @@ jobs:
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa%20vedere%20roma",
-              "https://www.bing.com/search?q=cosa%20vedere%20roma",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
@@ -133,11 +134,11 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore%20carbonara%20roma",
-              "https://html.duckduckgo.com/html/?q=migliore%20carbonara%20roma",
-              "https://www.bing.com/search?q=migliore%20carbonara%20roma",
-              "https://www.startpage.com/sp/search?query=migliore%20carbonara%20roma",
-              "https://search.yahoo.com/search?p=migliore%20carbonara%20roma",
+              "https://www.google.com/search?q=migliore+carbonara+roma",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
               "https://www.canadianinsider.com/money-is-moving"
@@ -173,7 +174,7 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
-          # Ripristinate le tue impostazioni originali ed equilibrate (rimosso fingerprint-noise=false)
+          # Ripristinate le ottime impostazioni originali (rimosso fingerprint-noise=false per Google/Pixelscan)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -225,7 +226,7 @@ jobs:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
                           
                   else:
-                      # Navigazione diretta passiva
+                      # Google, Bing, e tutti gli altri siti vanno in direct go-to passivo
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
                   # Pausa per fare valutare gli script di rete e i cookie
@@ -237,11 +238,11 @@ jobs:
                   if "google.com/search" in url:
                       try:
                           if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA intercettato. Risolvo...", flush=True)
+                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
-                                  checkbox.click() # CloakBrowser simulerà un click perfetto con punteggio 0.9
+                                  checkbox.click() # Sblocco istantaneo grazie al trust score 0.9
                                   time.sleep(6) 
                       except Exception: pass
 
@@ -273,7 +274,7 @@ jobs:
                               btn.click()
                       except Exception: pass
                       
-                  # Scroll umano simulato (FONDAMENTALE per lazy loading degli articoli)
+                  # Scroll umano simulato (Lazy Loading)
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
