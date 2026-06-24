@@ -65,13 +65,13 @@ jobs:
         run: |
           echo "=================================================="
           echo "VERIFICA IP CONTAINER 1 (40001):"
-          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
+          curl -6 --proxy socks5h://127.0.0.1:40001 https://api6.ipify.org?format=json || echo "Proxy 1 fallito o non instradato in IPv6!"
           echo "=================================================="
           echo "VERIFICA IP CONTAINER 2 (40002):"
-          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Proxy 2 fallito!"
+          curl -6 --proxy socks5h://127.0.0.1:40002 https://api6.ipify.org?format=json || echo "Proxy 2 fallito o non instradato in IPv6!"
           echo "=================================================="
           echo "VERIFICA IP CONTAINER 3 (40003):"
-          curl --proxy socks5h://127.0.0.1:40003 https://api64.ipify.org?format=json || echo "Proxy 3 fallito!"
+          curl -6 --proxy socks5h://127.0.0.1:40003 https://api6.ipify.org?format=json || echo "Proxy 3 fallito o non instradato in IPv6!"
           echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
@@ -106,7 +106,7 @@ jobs:
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
-              "https://api64.ipify.org?format=json",
+              "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
@@ -196,7 +196,7 @@ jobs:
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
+                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=5)
                       if r.status_code == 200:
                           print(f"[NODO {node_id}] Connessione proxy stabilita. IP: {r.json().get('ip')}", flush=True)
                           return True
