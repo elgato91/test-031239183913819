@@ -173,14 +173,13 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
-          # Configurazione HTTP/2 nativa e stealth
+          # Ripristinate le tue impostazioni originali ed equilibrate (rimosso fingerprint-noise=false)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
               "--fingerprint-storage-quota=5000",
-              "--fingerprint-windows-font-metrics",
-              "--fingerprint-noise=false"
+              "--fingerprint-windows-font-metrics"
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
@@ -226,19 +225,33 @@ jobs:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
                           
                   else:
-                      # Google, Bing, e tutti gli altri siti vanno in direct go-to passivo
+                      # Navigazione diretta passiva
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
-                  # Pausa per dare tempo ai Cloudflare/Turnstile di validare il browser
+                  # Pausa per fare valutare gli script di rete e i cookie
                   time.sleep(6)
 
                   # ==========================================
-                  # RIMOZIONE MURI DI COOKIE (CRITICO PER CN TRAVELER)
+                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
+                  # ==========================================
+                  if "google.com/search" in url:
+                      try:
+                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
+                              print(f"[NODO {node_id}] Google CAPTCHA intercettato. Risolvo...", flush=True)
+                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
+                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
+                              if checkbox.is_visible(timeout=3000):
+                                  checkbox.click() # CloakBrowser simulerà un click perfetto con punteggio 0.9
+                                  time.sleep(6) 
+                      except Exception: pass
+
+                  # ==========================================
+                  # RIMOZIONE MURI DI COOKIE (CN TRAVELER)
                   # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
-                              "button#onetrust-accept-btn-handler", # Specifico per CN Traveler e siti OneTrust
+                              "button#onetrust-accept-btn-handler", # Specifico OneTrust
                               "button:has-text('Accetta tutto')", 
                               "button:has-text('Accept all')",
                               "button:has-text('Accept All')",
@@ -260,14 +273,14 @@ jobs:
                               btn.click()
                       except Exception: pass
                       
-                  # Scroll umano simulato: FONDAMENTALE affinché siti come CN Traveler carichino le foto e il testo (Lazy Loading)
+                  # Scroll umano simulato (FONDAMENTALE per lazy loading degli articoli)
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
                           time.sleep(random.uniform(0.8, 1.5))
                   except Exception: pass
 
-                  # Tempistiche finali prolungate per i tool diagnostici lenti
+                  # Tempistiche finali di calcolo per i siti più pesanti
                   if "creepjs" in url: time.sleep(12) 
                   elif "pixelscan" in url: time.sleep(8)
                   elif "reddit" in url: time.sleep(5)
