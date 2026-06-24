@@ -27,18 +27,51 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Installazione di Usque (MASQUE client)
+      - name: Costruzione Immagine Usque & Avvio Container Paralleli
         run: |
-          # Scarica l'ultima release stabile di Usque (MASQUE client) per Linux AMD64
+          # 1. Scarica il binario ufficiale di Usque
           curl -s https://api.github.com/repos/Diniboy1123/usque/releases/latest \
             | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url' \
             | xargs wget -qO usque.zip
-          unzip usque.zip
+          unzip usque.zip usque
           chmod +x usque
-          sudo mv usque /usr/local/bin/
 
-          # Registrazione iniziale dell'account (crea il file config.json accettando i TOS)
-          usque register -a
+          # 2. Crea un Dockerfile minimale basato su Alpine per massimizzare velocità e isolamento
+          cat << 'EOF' > Dockerfile
+          FROM alpine:latest
+          RUN apk add --no-cache libc6-compat ca-certificates
+          COPY usque /usr/local/bin/usque
+          WORKDIR /app
+          EXPOSE 1080
+          EOF
+
+          # Costruisce l'immagine locale
+          docker build -t usque-local .
+
+          # 3. Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001)
+          docker run -d \
+            --name usque_node_1 \
+            -p 127.0.0.1:40001:1080 \
+            usque-local sh -c "usque register -a && usque socks --bind 0.0.0.0 --port 1080"
+
+          # 4. Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto su porta locale 40002)
+          docker run -d \
+            --name usque_node_2 \
+            -p 127.0.0.1:40002:1080 \
+            usque-local sh -c "usque register -a && usque socks --bind 0.0.0.0 --port 1080"
+
+          # Attesa stabilizzazione dei tunnel MASQUE
+          sleep 6
+
+          # 5. Verifica che entrambi i container stiano uscendo con due IPv6 differenti
+          echo "=================================================="
+          echo "VERIFICA INDIRIZZO IP CONTAINER 1 (Attivo):"
+          curl -6 --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Tunnel 1 Non Raggiungibile!"
+          
+          echo "=================================================="
+          echo "VERIFICA INDIRIZZO IP CONTAINER 2 (Vuoto):"
+          curl -6 --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Tunnel 2 Non Raggiungibile!"
+          echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
@@ -133,11 +166,11 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Avvio del contesto con il SOCKS5h Proxy e geoip=True (l'allineamento della timezone è gestito nativamente dal C++ del browser)
+          # Collegamento al Proxy 1 (usque_node_1) sulla porta 40001
           context = launch_context(
               headless=False,
               humanize=True,
-              proxy="socks5://127.0.0.1:40000",
+              proxy="socks5://127.0.0.1:40001",
               geoip=True,
               viewport={"width": 1920, "height": 950},
               args=[
@@ -157,7 +190,6 @@ jobs:
                   
                   # INIEZIONE ATTIVA DI POLYFILL (Per neutralizzare CreepJS "headless" e Incolumitas RTT)
                   page.add_init_script("""
-                      // 1. Mock ContactsManager (atteso su Windows, nativamente assente su Linux headless)
                       if (!('ContactsManager' in window)) {
                           window.ContactsManager = class ContactsManager {
                               async getProperties() { return ['name', 'email', 'tel', 'address', 'icon']; }
@@ -170,7 +202,6 @@ jobs:
                           });
                       }
 
-                      // 2. Mock ContentIndex (atteso su contesti HTTPS Chrome)
                       if (!('ContentIndex' in window)) {
                           window.ContentIndex = class ContentIndex {
                               async add() {}
@@ -179,7 +210,6 @@ jobs:
                           };
                       }
 
-                      // 3. Correzione downlinkMax sul Prototipo (CreepJS) e allineamento RTT realistico
                       if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
                           Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
                               get: () => 10,
@@ -196,7 +226,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, // Allineamento con il ritardo di instradamento di WARP
+                              get: () => 100, 
                               configurable: true,
                               enumerable: true
                           });
@@ -284,23 +314,8 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Macchina 2 (Usque SOCKS5h + Python nello stesso step)
-        run: |
-          # Avvia Usque in modalità SOCKS5 proxy sulla porta locale 40000 in background
-          usque socks --bind 127.0.0.1 --port 40000 > usque.log 2>&1 &
-          sleep 5
-
-          # Stampa i log di avvio per validazione nel pannello di GitHub
-          echo "=== LOG DI AVVIO USQUE ==="
-          cat usque.log
-          echo "=========================="
-
-          # Verifica preliminare del tunnel SOCKS5h IPv6
-          echo "Verifica IP IPv6 di uscita su tunnel SOCKS5h:"
-          curl -6 --proxy socks5h://127.0.0.1:40000 https://api64.ipify.org?format=json || echo "Errore nel test del proxy!"
-
-          # Esecuzione effettiva dello script Python
-          python -u m2_insocket.py
+      - name: Esecuzione Scraping Macchina 2
+        run: python -u m2_insocket.py
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
