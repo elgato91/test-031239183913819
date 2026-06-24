@@ -57,7 +57,8 @@ jobs:
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA IP CONTAINER $i ($PORT):"
-            curl --proxy socks5h://127.0.0.1:$PORT https://api64.ipify.org?format=json || echo "Proxy $i fallito!"
+            # Utilizziamo api6 per verificare e forzare l'instradamento IPv6
+            curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
           done
           echo "=================================================="
 
@@ -83,14 +84,14 @@ jobs:
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
-              "https://api64.ipify.org?format=json",
+              "https://api6.ipify.org?format=json", # Forza il report IPv6
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma&hl=it&lr=lang_it",
+              "https://www.google.com/search?q=cosa+vedere+roma&hl=it&lr=lang_it", # Forza lingua italiana
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
@@ -102,7 +103,7 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1&hl=it&lr=lang_it",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1&hl=it&lr=lang_it", # Forza lingua italiana
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
@@ -139,25 +140,46 @@ jobs:
                   pass
               return default
 
-          def wait_for_proxy(port, timeout=45):
-              print(f"[NODO {node_id}] Attesa avvio WARP sulla porta {port}...", flush=True)
+          # Controlla e valida rigorosamente la connessione IPv6 sul proxy
+          def wait_for_proxy_and_get_tz(port, timeout=45):
+              print(f"[NODO {node_id}] Validazione IPv6 su porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              
+              ipv6_ok = False
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
+                      r = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=5)
                       if r.status_code == 200 and ":" in r.json().get("ip", ""):
-                          print(f"[NODO {node_id}] IPv6 WARP confermato: {r.json().get('ip')}", flush=True)
-                          return True
+                          print(f"[NODO {node_id}] IPv6 WARP rilevato: {r.json().get('ip')}", flush=True)
+                          ipv6_ok = True
+                          break
                   except Exception:
                       time.sleep(2)
-              return False
+                      
+              if not ipv6_ok:
+                  return False, "America/Chicago", "US"
 
-          if not wait_for_proxy(ACTIVE_PORT):
+              # Risoluzione esplicita della posizione dell'indirizzo IPv6 (evita il dual-stack mismatch di WARP)
+              timezone, country = "America/Chicago", "US"
+              try:
+                  r = requests.get("https://ipapi.co/json/", proxies=proxies, timeout=5)
+                  if r.status_code == 200:
+                      data = r.json()
+                      timezone = data.get("timezone", "America/Chicago")
+                      country = data.get("country_code", "US")
+              except Exception:
+                  pass
+              return True, timezone, country
+
+          success, tz, country = wait_for_proxy_and_get_tz(ACTIVE_PORT)
+          if not success:
+              print(f"[NODO {node_id}] Proxy o IPv6 non pronto. Termino.", flush=True)
               sys.exit(1)
 
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
+          locale = "it-IT" if country == "IT" else f"en-{country}"
 
           extra_args = [
               "--no-sandbox", 
@@ -167,7 +189,7 @@ jobs:
               "--fingerprint-windows-font-metrics"  
           ]
 
-          # Forza l'uso di HTTP/1.1 sul Nodo 3 per gestire i controlli di sicurezza di Reddit
+          # Forza HTTP/1.1 sul Nodo 3 per arginare i blocchi automatici di Reddit
           if node_id == 3:
               extra_args.append("--disable-http2")
 
@@ -177,6 +199,8 @@ jobs:
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
+              timezone=tz,       # Override esplicito basato sulla geolocalizzazione dell'IPv6
+              locale=locale,     # Override esplicito
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
@@ -209,7 +233,7 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
 
-                  # Avvia scansione Pixelscan
+                  # Trigger manuale Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now")
@@ -217,7 +241,7 @@ jobs:
                               btn.click()
                       except Exception: pass
 
-                  # Gestione di Cloudflare Turnstile
+                  # Risoluzione Cloudflare Turnstile
                   try:
                       cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
                       checkbox = cf_iframe.locator("input[type='checkbox']")
@@ -247,7 +271,7 @@ jobs:
                           time.sleep(random.uniform(0.8, 1.5))
                   except Exception: pass
 
-                  # Tempistiche di caricamento specifiche
+                  # Tempistiche di attesa
                   if "creepjs" in url: time.sleep(15) 
                   elif "pixelscan" in url: time.sleep(8)
                   elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo", "finance.yahoo"]): time.sleep(5)
