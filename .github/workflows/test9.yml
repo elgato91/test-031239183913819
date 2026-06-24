@@ -94,7 +94,9 @@ jobs:
 
       - name: Creazione script Python (Macchina 2)
         run: |
-          python3 -c "import sys, textwrap; print(textwrap.dedent(sys.stdin.read()))" << 'EOF' > m2_insocket.py
+          python3 -c "
+          import textwrap
+          code = '''\
           import time
           import sys
           import random
@@ -104,36 +106,36 @@ jobs:
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
-              "https://api64.ipify.org?format=json",
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.eater.com/rome",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://guide.michelin.com/en/it/lazio/roma/restaurants",
-              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
-              "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
-              "https://www.canadianinsider.com/money-is-moving"
+              \"https://api64.ipify.org?format=json\",
+              \"https://tls.browserleaks.com/json\",
+              \"https://bot.sannysoft.com/\",
+              \"https://abrahamjuliot.github.io/creepjs/\",
+              \"https://pixelscan.net/\",
+              \"https://bot.incolumitas.com/\",
+              \"https://www.deviceinfo.me/\",
+              \"https://www.google.com/search?q=cosa+vedere+roma\",
+              \"https://www.bing.com/search?q=cosa+vedere+roma\",
+              \"https://www.eater.com/rome\",
+              \"https://www.bloomberg.com/markets/stocks\",
+              \"https://www.morningstar.com/stocks/xnas/aapl/quote\",
+              \"https://finance.yahoo.com/quote/AAPL/key-statistics\",
+              \"https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA\",
+              \"https://www.passportindex.org/passport/italy/\",
+              \"https://guide.michelin.com/en/it/lazio/roma/restaurants\",
+              \"https://www.cntraveler.com/gallery/best-restaurants-in-rome\",
+              \"https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/\",
+              \"https://katieparla.com/budget-dining-in-rome-revised/\",
+              \"https://www.google.com/search?q=migliore+carbonara+roma&gbv=1\",
+              \"https://html.duckduckgo.com/html/?q=migliore+carbonara+roma\",
+              \"https://www.bing.com/search?q=migliore+carbonara+roma\",
+              \"https://www.startpage.com/sp/search?query=migliore+carbonara+roma\",
+              \"https://search.yahoo.com/search?p=migliore+carbonara+roma\",
+              \"https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/\",
+              \"https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best\",
+              \"https://www.canadianinsider.com/money-is-moving\"
           ]
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+          DIAGNOSTIC_SITES = [\"ipify\", \"browserleaks\", \"sannysoft\", \"creepjs\", \"pixelscan\", \"incolumitas\", \"deviceinfo\"]
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -158,7 +160,7 @@ jobs:
                   return text
               return text[:5000]
 
-          def get_query_from_url(url, default="migliore carbonara roma"):
+          def get_query_from_url(url, default=\"migliore carbonara roma\"):
               try:
                   parsed = urlparse(url)
                   queries = parse_qs(parsed.query)
@@ -172,12 +174,12 @@ jobs:
           def handle_cookie_consent(page):
               try:
                   consent_selectors = [
-                      "button:has-text('Accetta tutto')",
-                      "button:has-text('Accept all')",
-                      "button:has-text('Consenti')",
-                      "button:has-text('I agree')",
-                      "button:has-text('Accetto')",
-                      "button:has-text('Agree')"
+                      \"button:has-text('Accetta tutto')\",
+                      \"button:has-text('Accept all')\",
+                      \"button:has-text('Consenti')\",
+                      \"button:has-text('I agree')\",
+                      \"button:has-text('Accetto')\",
+                      \"button:has-text('Agree')\"
                   ]
                   for selector in consent_selectors:
                       btn = page.locator(selector)
@@ -189,14 +191,14 @@ jobs:
                   pass
 
           def wait_for_proxy(port, timeout=45):
-              print(f"[NODO {node_id}] Attesa attivazione proxy su porta {port}...", flush=True)
+              print(f\"[NODO {node_id}] Attesa attivazione proxy su porta {port}...\", flush=True)
               start_time = time.time()
-              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              proxies = {\"http\": f\"socks5h://127.0.0.1:{port}\", \"https\": f\"socks5h://127.0.0.1:{port}\"}
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
+                      r = requests.get(\"https://api64.ipify.org?format=json\", proxies=proxies, timeout=5)
                       if r.status_code == 200:
-                          print(f"[NODO {node_id}] Connessione proxy stabilita. IP: {r.json().get('ip')}", flush=True)
+                          print(f\"[NODO {node_id}] Connessione proxy stabilita. IP: {r.json().get('ip')}\", flush=True)
                           return True
                   except Exception:
                       pass
@@ -204,78 +206,78 @@ jobs:
               return False
 
           if not wait_for_proxy(ACTIVE_PORT):
-              print(f"[NODO {node_id}] Errore: Proxy non disponibile o inattivo. Interruzione.", flush=True)
+              print(f\"[NODO {node_id}] Errore: Proxy non disponibile o inattivo. Interruzione.\", flush=True)
               sys.exit(1)
 
           random_seed = str(random.randint(100000, 999999))
-          print(f"[NODO {node_id}] Avvio CloakBrowser (Seed: {random_seed})", flush=True)
+          print(f\"[NODO {node_id}] Avvio CloakBrowser (Seed: {random_seed})\", flush=True)
 
-          # Configurazione basata sulle specifiche ufficiali del motore C++
+          # Configurazione nativa ottimizzata basata sulle specifiche ufficiali di CloakBrowser
           context = launch_context(
               headless=False,
               humanize=True,
-              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True, # Gestisce nativamente Timezone, Locale e WebRTC IP Spoofing basandosi sul proxy di uscita
-              viewport={"width": 1920, "height": 1080},
+              proxy=f\"socks5://127.0.0.1:{ACTIVE_PORT}\",
+              geoip=True,
+              viewport={\"width\": 1920, \"height\": 1080},
               args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint={random_seed}",
-                  "--fingerprint-storage-quota=5000"
+                  \"--no-sandbox\", 
+                  \"--disable-dev-shm-usage\",
+                  f\"--fingerprint={random_seed}\",
+                  \"--fingerprint-storage-quota=5000\"
               ]
           )
 
-          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+          results = f\"\\n{'#'*60}\\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\\n{'#'*60}\\n\"
 
           for url in MY_TARGETS:
-              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[NODO {node_id}] -> {url}", flush=True)
+              results += f\"\\n{'='*50}\\nTARGET: {url}\\n{'='*50}\\n\"
+              print(f\"[NODO {node_id}] -> {url}\", flush=True)
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Pausa casuale prima di interrogare Google per evitare il blocco temporaneo di rete
-                  if "google.com" in url:
+                  # Pausa casuale prima di interrogare Google per attenuare i controlli dinamici
+                  if \"google.com\" in url:
                       time.sleep(random.uniform(4, 8))
 
-                  if "yelp.com" in url or "yelp.it" in url:
-                      page.goto("https://www.yelp.com/", wait_until="commit", timeout=25000)
+                  if \"yelp.com\" in url or \"yelp.it\" in url:
+                      page.goto(\"https://www.yelp.com/\", wait_until=\"commit\", timeout=25000)
                       time.sleep(random.uniform(2, 4))
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  elif "startpage.com" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+                      page.goto(url, wait_until=\"domcontentloaded\", timeout=25000)
+                  elif \"startpage.com\" in url:
+                      page.goto(\"https://www.startpage.com/\", wait_until=\"domcontentloaded\", timeout=25000)
                       time.sleep(2)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=120, timeout=2000)
-                          page.keyboard.press("Enter")
+                          page.locator(\"input#q\").type(query_to_search, delay=120, timeout=2000)
+                          page.keyboard.press(\"Enter\")
                       except Exception: pass
-                  elif "html.duckduckgo.com" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+                  elif \"html.duckduckgo.com\" in url:
+                      page.goto(\"https://html.duckduckgo.com/\", wait_until=\"domcontentloaded\", timeout=25000)
                       time.sleep(2)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=120, timeout=2000)
-                          page.keyboard.press("Enter")
+                          page.locator(\"input[name=q]\").type(query_to_search, delay=120, timeout=2000)
+                          page.keyboard.press(\"Enter\")
                       except Exception: pass
                   else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
+                      page.goto(url, wait_until=\"domcontentloaded\", timeout=30000)
+                      if not any(x in url for x in [\"facebook.com\", \"reddit.com\", \"yelp\"]):
                           handle_cookie_consent(page)
                   
-                  if "canadianinsider.com" in url or "reddit.com" in url:
-                      print(f"[NODO {node_id}] Rilevato potenziale WAF. Avvio polling di risoluzione...", flush=True)
+                  if \"canadianinsider.com\" in url or \"reddit.com\" in url:
+                      print(f\"[NODO {node_id}] Rilevato potenziale WAF. Avvio polling di risoluzione...\", flush=True)
                       for _ in range(15):
                           try:
                               title = page.title().lower()
                               content = page.content().lower()
                           except Exception:
-                              title, content = "", ""
-                          if "just a moment" not in title and "checking your browser" not in content and "cf-challenge" not in content:
-                              print(f"[NODO {node_id}] Sfida superata con successo.", flush=True)
+                              title, content = \"\", \"\"
+                          if \"just a moment\" not in title and \"checking your browser\" not in content and \"cf-challenge\" not in content:
+                              print(f\"[NODO {node_id}] Sfida superata con successo.\", flush=True)
                               break
                           time.sleep(1)
 
-                  if "finance.yahoo.com" in url:
-                      try: page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                  if \"finance.yahoo.com\" in url:
+                      try: page.wait_for_selector('section[data-testid=\"qsp-statistics\"]', timeout=5000)
                       except Exception: pass
                       time.sleep(1)
 
@@ -287,23 +289,72 @@ jobs:
                   except Exception:
                       pass
 
-                  if "creepjs" in url: time.sleep(15) 
-                  elif "pixelscan" in url: time.sleep(8)
-                  elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]): time.sleep(5)
+                  if \"creepjs\" in url: time.sleep(15) 
+                  elif \"pixelscan\" in url: time.sleep(8)
+                  elif any(t in url for t in [\"sannysoft\", \"browserleaks\", \"incolumitas\", \"deviceinfo\"]): time.sleep(5)
                   else: time.sleep(random.uniform(2, 4))
 
                   raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                  results += f\"TESTO ESTRATTO:\\n{extract_text(raw_html, url)}\\n\"
                   page.close()
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
-                  results += f"ERRORE GLOBALE: {str(e)}\n"
+                  print(f\"[NODO {node_id}] Errore su {url}: {e}\", flush=True)
+                  results += f\"ERRORE GLOBALE: {str(e)}\\n\"
                   try: page.close()
                   except Exception: pass
 
           context.close()
 
-          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
+          with open(f\"output_node_{node_id}.txt\", \"w\", encoding=\"utf-8\") as f:
               f.write(results)
-          EOF
+          '''
+          with open('m2_insocket.py', 'w', encoding='utf-8') as f:
+              f.write(textwrap.dedent(code))
+          "
+
+      - name: Esecuzione Scraping Parallelo (3 Nodi indipendenti)
+        run: |
+          echo "Avvio processi paralleli con staggering temporale..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          
+          # Ritardo di 5 secondi per far respirare l'allocazione Xvfb e differenziare le temporizzazioni dei nodi
+          sleep 5
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          
+          # Ulteriore ritardo prima del terzo nodo
+          sleep 5
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          
+          # Attende il completamento di tutti i processi in background
+          wait
+
+          echo "=== LOG NODO 1 ==="
+          cat node1.log || true
+          echo "=== LOG NODO 2 ==="
+          cat node2.log || true
+          echo "=== LOG NODO 3 ==="
+          cat node3.log || true
+          echo "=================="
+
+          # Crea i file vuoti nel caso un nodo fosse andato in crash irreversibile, evitando l'errore cat
+          touch output_node_1.txt output_node_2.txt output_node_3.txt
+          
+          # Assembla il report finale
+          cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
+
+      - name: Verifica integrità ed esistenza dei dati
+        run: |
+          if [ ! -s output_macchina2_cdp.txt ]; then
+            echo "ERRORE CRITICO: Il report finale 'output_macchina2_cdp.txt' è vuoto!"
+            echo "Verifica i log dei nodi sovrastanti per comprendere quale eccezione Python ha causato il crash."
+            exit 1
+          else
+            echo "Il file contiene dati validi ed è pronto per essere inviato all'uploader."
+          fi
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
