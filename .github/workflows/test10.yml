@@ -174,7 +174,7 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
-          # Ripristinate le ottime impostazioni originali (rimosso fingerprint-noise=false per Google/Pixelscan)
+          # Configurazione Standard e Pulita originale (Rimosso definitivamente il noise=false che causava i blocchi)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -242,7 +242,7 @@ jobs:
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
-                                  checkbox.click() # Sblocco istantaneo grazie al trust score 0.9
+                                  checkbox.click() # CloakBrowser sblocca istantaneamente grazie al trust score 0.9
                                   time.sleep(6) 
                       except Exception: pass
 
