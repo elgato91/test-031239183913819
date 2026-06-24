@@ -4,92 +4,152 @@ on:
   workflow_dispatch:
 
 jobs:
-  machine2_cdp_insocket:
+  docker_cdp_socks:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
+      - name: Creazione Directory di Configurazione e Output
         run: |
-          sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          fc-cache -f -v
+          mkdir -p config1 config2 output
 
-      - name: Installazione Dipendenze Scraper
+      - name: Generazione Configurazione WARP 1 (Account A)
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
-          playwright install-deps chromium
+          docker run --rm -v $(pwd)/config1:/warp -w /warp ghcr.io/virb3/wgcf register --accept-tos
+          docker run --rm -v $(pwd)/config1:/warp -w /warp ghcr.io/virb3/wgcf generate
+          sudo chown -R $USER:$USER config1
+          mv config1/wgcf-profile.conf config1/wg.conf
 
-      - name: Costruzione Immagine Usque & Avvio Container in Network Host (SOCKS5h IPv6)
+      - name: Generazione Configurazione WARP 2 (Account B)
         run: |
-          # 1. Scarica il binario ufficiale di Usque
-          curl -s https://api.github.com/repos/Diniboy1123/usque/releases/latest \
-            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url' \
-            | xargs wget -qO usque.zip
-          unzip usque.zip usque
-          chmod +x usque
+          docker run --rm -v $(pwd)/config2:/warp -w /warp ghcr.io/virb3/wgcf register --accept-tos
+          docker run --rm -v $(pwd)/config2:/warp -w /warp ghcr.io/virb3/wgcf generate
+          sudo chown -R $USER:$USER config2
+          mv config2/wgcf-profile.conf config2/wg.conf
 
-          # 2. Crea un Dockerfile robusto basato su Debian-Slim
-          cat << 'EOF' > Dockerfile
-          FROM debian:stable-slim
-          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-          COPY usque /usr/local/bin/usque
-          WORKDIR /app
-          EXPOSE 1080
+      - name: Modifica Configurazione per Esclusività IPv6 (AllowedIPs = ::/0)
+        shell: python
+        run: |
+          for filepath in ["config1/wg.conf", "config2/wg.conf"]:
+              with open(filepath, "r") as f:
+                  content = f.read()
+              
+              lines = content.splitlines()
+              clean_lines = []
+              for line in lines:
+                  # Esclude le righe destinate all'instradamento IPv4 generico
+                  if "AllowedIPs" in line and "0.0.0.0" in line:
+                      continue
+                  clean_lines.append(line)
+              
+              with open(filepath, "w") as f:
+                  f.write("\n".join(clean_lines) + "\n")
+              print(f"Configurazione {filepath} modificata correttamente per uscire esclusivamente in IPv6.")
+
+      - name: Creazione dei File di Configurazione Wireproxy
+        run: |
+          cat << 'EOF' > config1/wireproxy.conf
+          WGConfig = /app/config/wg.conf
+
+          [Socks5]
+          BindAddress = 127.0.0.1:1080
           EOF
 
-          # Costruisce l'immagine locale usque-local
-          docker build -t usque-local .
+          cat << 'EOF' > config2/wireproxy.conf
+          WGConfig = /app/config/wg.conf
 
-          # 3. Avvio CONTAINER 1 (Proxy SOCKS5h Attivo su porta locale 40001 in network host per sbloccare l'IPv6)
-          docker run -d \
-            --name usque_node_1 \
-            --network host \
-            usque-local sh -c "usque register -a && usque socks --bind 127.0.0.1 --port 40001"
+          [Socks5]
+          BindAddress = 127.0.0.1:1080
+          EOF
 
-          # 4. Avvio CONTAINER 2 (Proxy SOCKS5h Lasciato Vuoto/Idle su porta locale 40002)
-          docker run -d \
-            --name usque_node_2 \
-            --network host \
-            usque-local sh -c "usque register -a && usque socks --bind 127.0.0.1 --port 40002"
-
-          # Attesa stabilizzazione (Aumentata a 10s per permettere l'handshake MASQUE prima dell'avvio dello scraper)
-          sleep 10
-
-          # 5. Stampa dei log di connessione dei container
-          echo "=== LOG CONTAINER 1 (PROXY ATTIVO) ==="
-          docker logs usque_node_1 || true
-          echo "=== LOG CONTAINER 2 (PROXY VUOTO) ==="
-          docker logs usque_node_2 || true
-          echo "======================================"
-
-          # 6. Verifica che entrambi i tunnel SOCKS5h stiano rispondendo ed estraiamo l'IPv6 di uscita
-          echo "=================================================="
-          echo "VERIFICA INDIRIZZO IP CONTAINER 1 (Attivo):"
-          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Tunnel 1 Non Raggiungibile!"
-          
-          echo "=================================================="
-          echo "VERIFICA INDIRIZZO IP CONTAINER 2 (Vuoto):"
-          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Tunnel 2 Non Raggiungibile!"
-          echo "=================================================="
-
-      - name: Avvio Xvfb (Virtual Display Stabile)
+      - name: Scrittura dei Dockerfile e Script di Avvio
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
+          # 1. Dockerfile Scraper
+          cat << 'EOF' > Dockerfile.scraper
+          FROM mcr.microsoft.com/playwright/python:v1.43.0-jammy
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update && \
+              echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections && \
+              apt-get install -y --no-install-recommends \
+              curl \
+              xvfb \
+              ttf-mscorefonts-installer \
+              fonts-noto-color-emoji \
+              fonts-freefont-ttf \
+              fonts-unifont \
+              fonts-ipafont-gothic \
+              fonts-wqy-zenhei \
+              fonts-tlwg-loma-otf \
+              && rm -rf /var/lib/apt/lists/* \
+              && fc-cache -f -v
+          RUN pip install --no-cache-dir "cloakbrowser[geoip]" beautifulsoup4 requests
+          RUN curl -fsSL -o /tmp/wireproxy.tar.gz https://github.com/pufferffish/wireproxy/releases/download/v1.0.8/wireproxy_linux_amd64.tar.gz && \
+              tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy && \
+              rm -rf /tmp/wireproxy.tar.gz
+          WORKDIR /app
+          COPY m2_insocket.py /app/m2_insocket.py
+          COPY entrypoint_scraper.sh /app/entrypoint_scraper.sh
+          RUN chmod +x /app/entrypoint_scraper.sh
+          ENTRYPOINT ["/app/entrypoint_scraper.sh"]
+          EOF
 
-      - name: Creazione script Python (Macchina 2)
+          # 2. Dockerfile Empty (Contenitore Vuoto / Inattivo)
+          cat << 'EOF' > Dockerfile.empty
+          FROM alpine:3.19
+          RUN apk add --no-cache curl bash
+          RUN curl -fsSL -o /tmp/wireproxy.tar.gz https://github.com/pufferffish/wireproxy/releases/download/v1.0.8/wireproxy_linux_amd64.tar.gz && \
+              tar -xzf /tmp/wireproxy.tar.gz -C /usr/local/bin/ wireproxy && \
+              rm -rf /tmp/wireproxy.tar.gz
+          WORKDIR /app
+          COPY entrypoint_empty.sh /app/entrypoint_empty.sh
+          RUN chmod +x /app/entrypoint_empty.sh
+          ENTRYPOINT ["/app/entrypoint_empty.sh"]
+          EOF
+
+          # 3. Entrypoint Scraper
+          cat << 'EOF' > entrypoint_scraper.sh
+          #!/bin/bash
+          set -e
+          # Avvio del Virtual Framebuffer
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          export DISPLAY=:99
+
+          echo "Avvio di Wireproxy (SOCKS5 locale su 127.0.0.1:1080)..."
+          wireproxy -c /app/config/wireproxy.conf &
+          WIREPROXY_PID=$!
+          sleep 8
+
+          echo "Verifica IP pubblico di uscita (SOCKS5H)..."
+          curl -s --socks5-hostname 127.0.0.1:1080 https://api64.ipify.org?format=json || echo "Impossibile testare la connessione"
+          
+          python -u m2_insocket.py
+          kill $WIREPROXY_PID || true
+          EOF
+
+          # 4. Entrypoint Empty
+          cat << 'EOF' > entrypoint_empty.sh
+          #!/bin/bash
+          set -e
+          echo "Avvio di Wireproxy nel container vuoto (SOCKS5 locale su 127.0.0.1:1080)..."
+          wireproxy -c /app/config/wireproxy.conf &
+          WIREPROXY_PID=$!
+          sleep 8
+
+          echo "Verifica IP pubblico di uscita nel container vuoto (SOCKS5H)..."
+          curl -s --socks5-hostname 127.0.0.1:1080 https://api64.ipify.org?format=json || echo "Impossibile testare la connessione"
+          
+          echo "Container 2 (Vuoto) è operativo ed è in attesa (idle)..."
+          tail -f /dev/null
+          EOF
+
+      - name: Creazione Script Python Scraper
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
+          import os
           import random
+          import requests
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -126,6 +186,10 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
           results = ""
+
+          # Allineamento di requests per forzare l'instradamento tramite proxy SOCKS5H locale
+          LOCAL_PROXY = "socks5h://127.0.0.1:1080"
+          PROXIES_DICT = {"http": LOCAL_PROXY, "https": LOCAL_PROXY}
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -170,22 +234,69 @@ jobs:
               except Exception:
                   pass
 
+          # 1. Rilevamento preventivo dell'IP pubblico esatto (passando per il proxy SOCKS5H)
+          print("Rilevamento IP pubblico di rete...", flush=True)
+          detected_ip = None
+          try:
+              response = requests.get("https://api64.ipify.org?format=json", proxies=PROXIES_DICT, timeout=8)
+              if response.status_code == 200:
+                  detected_ip = response.json().get("ip")
+                  print(f"IP Rilevato: {detected_ip}", flush=True)
+          except Exception as e:
+              print(f"Avviso: impossibile rilevare l'IP di rete ({e})", flush=True)
+
+          timezone = "UTC"
+          locale = "en-US"
+
+          # 2. Geolocalizzazione basata sull'IP IPv6 reale (con freeipapi per azzerare i 429)
+          if detected_ip:
+              geo_services = [
+                  (f"https://freeipapi.com/api/json/{detected_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
+                  (f"https://ipapi.co/{detected_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
+                  (f"https://ipwho.is/{detected_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
+              ]
+              for url, parse_func in geo_services:
+                  try:
+                      print(f"Geolocalizzazione IP su {url}...", flush=True)
+                      response = requests.get(url, proxies=PROXIES_DICT, timeout=5)
+                      if response.status_code == 200:
+                          data = response.json()
+                          tz, loc = parse_func(data)
+                          if tz:
+                              timezone = tz
+                              locale = loc
+                              if len(locale) == 2:
+                                  country_to_locale = {
+                                      "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
+                                      "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
+                                  }
+                                  locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
+                              print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
+                              break
+                  except Exception as e:
+                      print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
+
+          # Generazione di un seed hardware dinamico coerente per ogni run
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Passiamo il proxy a Cloakbrowser e configuriamo i flag C++ corretti
+          # Configurazione corretta del proxy locale SOCKS5 a livello di contesto Playwright e Chromium
           context = launch_context(
               headless=False,
               humanize=True,
-              proxy="socks5://127.0.0.1:40001",
-              geoip=True,
+              timezone=timezone,
+              locale=locale,
               viewport={"width": 1920, "height": 950},
+              proxy={"server": "socks5://127.0.0.1:1080"},
               args=[
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
+                  "--proxy-server=socks5://127.0.0.1:1080",
+                  f"--fingerprint-timezone={timezone}",
+                  f"--fingerprint-locale={locale}",
                   f"--fingerprint={random_seed}",
                   "--fingerprint-storage-quota=5000",   
-                  "--fingerprint-windows-font-metrics"
+                  "--fingerprint-windows-font-metrics"  
               ]
           )
 
@@ -208,7 +319,6 @@ jobs:
                               enumerable: true
                           });
                       }
-
                       if (!('ContentIndex' in window)) {
                           window.ContentIndex = class ContentIndex {
                               async add() {}
@@ -216,7 +326,6 @@ jobs:
                               async getAll() { return []; }
                           };
                       }
-
                       if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
                           Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
                               get: () => 10,
@@ -233,7 +342,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, 
+                              get: () => 100,
                               configurable: true,
                               enumerable: true
                           });
@@ -242,14 +351,12 @@ jobs:
 
                   query_to_search = get_query_from_url(url)
 
-                  # GESTIONE SPECIFICA YELP
                   if "yelp.com" in url or "yelp.it" in url:
                       print("Esecuzione del warm-up su Yelp...", flush=True)
                       page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(3)
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
                   
-                  # Navigazione simulata per Startpage
                   elif "startpage.com/sp/search" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(2)
@@ -260,7 +367,6 @@ jobs:
                       except Exception as e:
                           print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
                   
-                  # Navigazione simulata per DuckDuckGo HTML
                   elif "html.duckduckgo.com/html" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(2)
@@ -276,7 +382,6 @@ jobs:
                       if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
                           handle_cookie_consent(page)
                   
-                  # GESTIONE SPECIFICA YAHOO FINANCE
                   if "finance.yahoo.com" in url:
                       print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
                       try:
@@ -285,7 +390,6 @@ jobs:
                           pass
                       time.sleep(1)
 
-                  # Scorrimento simulato
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, 300)
@@ -293,7 +397,6 @@ jobs:
                   except Exception:
                       pass
 
-                  # Tempi di attesa bilanciati
                   if "creepjs" in url:
                       time.sleep(20) 
                   elif "pixelscan" in url:
@@ -317,15 +420,45 @@ jobs:
 
           context.close()
 
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+          # Scrittura dell'output sul volume montato di output
+          os.makedirs("/app/output", exist_ok=True)
+          with open("/app/output/output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
+          # 6. Docker Compose
+          cat << 'EOF' > docker-compose.yml
+          version: '3.8'
+
+          services:
+            scraper:
+              build:
+                context: .
+                dockerfile: Dockerfile.scraper
+              volumes:
+                - ./config1:/app/config
+                - ./output:/app/output
+              shm_size: '2gb'
+
+            empty:
+              build:
+                context: .
+                dockerfile: Dockerfile.empty
+              volumes:
+                - ./config2:/app/config
+          EOF
+
+      - name: Avvio Esecuzione Docker Compose
+        run: |
+          docker compose up --build --exit-code-from scraper
+
+      - name: Ripristino Permessi Output per Archivio
+        if: always()
+        run: |
+          sudo chown -R $USER:$USER output/ || true
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
+          path: output/output_macchina2_cdp.txt
