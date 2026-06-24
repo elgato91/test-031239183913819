@@ -12,10 +12,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
@@ -24,87 +23,51 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          # Installiamo requests[socks] per supportare il controllo di connettività dei proxy SOCKS5h in Python
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          # pysocks è fondamentale per far funzionare proxy="socks5h://..." con la libreria requests
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests pysocks
           playwright install-deps chromium
 
-      - name: Inizializzazione Container e Generazione Config (IPv6-Only)
+      - name: Setup 3 WARProxy Docker Containers (Strict IPv6-Only)
         run: |
-          # Pull dell'immagine ufficiale
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # 1. Crea le directory di configurazione locali sull'host
-          mkdir -p config1 config2 config3
+          echo "Avvio dei 3 nodi proxy..."
+          docker run --name wp1 -p 127.0.0.1:40001:1080 -e TZ=Europe/Rome -d ghcr.io/kingcc/warproxy:latest
+          docker run --name wp2 -p 127.0.0.1:40002:1080 -e TZ=Europe/Rome -d ghcr.io/kingcc/warproxy:latest
+          docker run --name wp3 -p 127.0.0.1:40003:1080 -e TZ=Europe/Rome -d ghcr.io/kingcc/warproxy:latest
 
-          # 2. Avvia i tre container in network host mappando i volumi per generare i profili iniziali
-          docker run --name warproxy-1 --network host -v $(pwd)/config1:/config -e SOCKS5_PORT=40001 -d ghcr.io/kingcc/warproxy:latest
-          docker run --name warproxy-2 --network host -v $(pwd)/config2:/config -e SOCKS5_PORT=40002 -d ghcr.io/kingcc/warproxy:latest
-          docker run --name warproxy-3 --network host -v $(pwd)/config3:/config -e SOCKS5_PORT=40003 -d ghcr.io/kingcc/warproxy:latest
+          echo "Attesa 15 secondi per la generazione degli account WARP..."
+          sleep 15
 
-          # Attendi la generazione automatica dei file di configurazione
-          sleep 10
+          echo "Applicazione patch IPv6-Only all'interno dei container..."
+          for i in 1 2 3; do
+            # Forza l'instradamento esclusivo su IPv6 (rimuove l'IPv4 dal tunnel)
+            docker exec wp$i sed -i 's/AllowedIPs = .*/AllowedIPs = ::\/0/' /config/wireproxy.conf
+            # Forza l'utilizzo esclusivo dei DNS IPv6 di Cloudflare
+            docker exec wp$i sed -i 's/DNS = .*/DNS = 2606:4700:4700::1111, 2606:4700:4700::1001/' /config/wireproxy.conf
+          done
 
-          # Fermiamo temporaneamente i container per applicare la patch di esclusione IPv4
-          docker stop warproxy-1 warproxy-2 warproxy-3
+          echo "Riavvio dei container per applicare la configurazione IPv6-Only..."
+          docker restart wp1 wp2 wp3
+          sleep 8
 
-          # 3. Script Python sul runner per modificare le configurazioni e forzare l'IPv6-Only
-          cat << 'EOF' > make_ipv6_only.py
-          import os
-
-          for folder in ["config1", "config2", "config3"]:
-              conf_path = os.path.join(folder, "wireproxy.conf")
-              if not os.path.exists(conf_path):
-                  continue
-              with open(conf_path, "r") as f:
-                  lines = f.readlines()
-              
-              new_lines = []
-              for line in lines:
-                  if line.strip().startswith("Address"):
-                      # Rimuove l'indirizzo IPv4 locale dal tunnel, mantenendo solo l'indirizzo IPv6 di WARP
-                      parts = line.split("=")
-                      ips = parts[1].split(",")
-                      ipv6 = [ip.strip() for ip in ips if ":" in ip][0]
-                      line = f"Address = {ipv6}\n"
-                  elif line.strip().startswith("DNS"):
-                      # Forza la risoluzione DNS interna sul tunnel usando esclusivamente i server DNS IPv6 di Cloudflare
-                      line = "DNS = 2606:4700:4700::1111, 2606:4700:4700::1001\n"
-                  elif line.strip().startswith("AllowedIPs"):
-                      # Rimuove l'instradamento IPv4 (0.0.0.0/0) forzando esclusivamente l'uscita in IPv6 (::/0)
-                      line = "AllowedIPs = ::/0\n"
-                  new_lines.append(line)
-              
-              with open(conf_path, "w") as f:
-                  f.writelines(new_lines)
-              print(f"Patch IPv6-Only applicata a {conf_path}!", flush=True)
-          EOF
-          python3 make_ipv6_only.py
-
-          # 4. Riavvia i container con i profili modificati (IPv6-Only garantito al 100%)
-          docker start warproxy-1 warproxy-2 warproxy-3
-          sleep 6
-
-      - name: Verifica IP IPv6 di uscita sui 3 Proxy
+      - name: Verifica IP e Connettività IPv6 sui Proxy
         run: |
           echo "=================================================="
-          echo "VERIFICA IP CONTAINER 1 (40001):"
-          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
-          
-          echo "=================================================="
-          echo "VERIFICA IP CONTAINER 2 (40002):"
-          curl --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Proxy 2 fallito!"
-
-          echo "=================================================="
-          echo "VERIFICA IP CONTAINER 3 (40003):"
-          curl --proxy socks5h://127.0.0.1:40003 https://api64.ipify.org?format=json || echo "Proxy 3 fallito!"
-          echo "=================================================="
+          echo "IP CONTAINER 1 (40001):"
+          curl -s --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Fallito"
+          echo -e "\nIP CONTAINER 2 (40002):"
+          curl -s --proxy socks5h://127.0.0.1:40002 https://api64.ipify.org?format=json || echo "Fallito"
+          echo -e "\nIP CONTAINER 3 (40003):"
+          curl -s --proxy socks5h://127.0.0.1:40003 https://api64.ipify.org?format=json || echo "Fallito"
+          echo -e "\n=================================================="
 
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (Macchina 2)
+      - name: Creazione script Python Parallelo
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -147,9 +110,7 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          # 1. Suddivisione dei target ad un terzo ciascuno in base all'argomento node_id
           if len(sys.argv) < 2:
-              print("Errore: specifica il node_id (1, 2 o 3)", flush=True)
               sys.exit(1)
 
           node_id = int(sys.argv[1])
@@ -163,14 +124,7 @@ jobs:
               ACTIVE_PORT = 40003
               MY_TARGETS = TARGETS[18:27]
           else:
-              print("Errore: node_id deve essere 1, 2 o 3", flush=True)
               sys.exit(1)
-
-          print(f"=== Nodo {node_id} avviato ===")
-          print(f"Porta proxy attiva: {ACTIVE_PORT}", flush=True)
-          print(f"Target assegnati (Totale: {len(MY_TARGETS)}):", flush=True)
-          for t in MY_TARGETS:
-              print(f" - {t}", flush=True)
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -198,54 +152,66 @@ jobs:
                       "button:has-text('Consenti')",
                       "button:has-text('I agree')",
                       "button:has-text('Accetto')",
-                      "button:has-text('Agree')",
-                      "button:has-text('Accept')",
-                      "button:has-text('OK')",
-                      "button:has-text('Allow all')",
-                      "button:has-text('Consenti l\\'uso dei cookie')",
-                      "#L2AGLb"
+                      "button:has-text('Agree')"
                   ]
                   for selector in consent_selectors:
                       btn = page.locator(selector)
                       if btn.is_visible():
-                          btn.click(timeout=1500)
+                          btn.click(timeout=1000)
                           time.sleep(0.5)
-                          print(f"[Nodo {node_id}] Cookie bypassato: {selector}", flush=True)
                           break
               except Exception:
                   pass
 
-          # Polling di sicurezza: attende che il proxy risponda correttamente prima di iniziare
-          def wait_for_proxy(port, timeout=45):
-              print(f"[Nodo {node_id}] Verifica stabilità del proxy sulla porta {port}...", flush=True)
+          def wait_and_geolocate(port, timeout=45):
+              print(f"[NODO {node_id}] Validazione proxy su porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              
+              ip_ready = False
               while time.time() - start_time < timeout:
                   try:
                       r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
-                      if r.status_code == 200:
-                          ip = r.json().get("ip")
-                          if ip and ":" in ip: # Valida che stia uscendo nativamente in IPv6
-                              print(f"[Nodo {node_id}] Tunnel pronto! IPv6 di WARP: {ip}", flush=True)
-                              return True
+                      if r.status_code == 200 and ":" in r.json().get("ip", ""):
+                          print(f"[NODO {node_id}] IPv6 confermato: {r.json().get('ip')}", flush=True)
+                          ip_ready = True
+                          break
                   except Exception:
-                      pass
-                  time.sleep(2)
-              return False
+                      time.sleep(2)
+                      
+              if not ip_ready:
+                  return False, "UTC", "US"
 
-          if not wait_for_proxy(ACTIVE_PORT):
-              print(f"[Nodo {node_id}] Errore: il proxy sulla porta {ACTIVE_PORT} non risponde in IPv6.", flush=True)
+              # Geolocalizziamo l'IPv6 per evitare il timeout di CloakBrowser
+              timezone, country = "UTC", "US"
+              try:
+                  r = requests.get("https://freeipapi.com/api/json", proxies=proxies, timeout=5)
+                  if r.status_code == 200:
+                      data = r.json()
+                      timezone = data.get("timeZone", "UTC")
+                      country = data.get("countryCode", "US")
+              except Exception:
+                  pass
+              
+              return True, timezone, country
+
+          success, tz, country = wait_and_geolocate(ACTIVE_PORT)
+          if not success:
+              print(f"[NODO {node_id}] Proxy inattivo o non IPv6. Esco.", flush=True)
               sys.exit(1)
 
+          locale = "it-IT" if country == "IT" else f"en-{country}"
           random_seed = str(random.randint(100000, 999999))
-          print(f"[Nodo {node_id}] Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
+          
+          print(f"[NODO {node_id}] Avvio browser (TZ: {tz}, Locale: {locale}, Seed: {random_seed})", flush=True)
 
-          # Nessun blocco: rimuoviamo --host-resolver-rules. Playwright risolverà remotamente i DNS sul proxy
+          # Nessun "--host-resolver-rules" per evitare freeze. CloakBrowser delega il DNS a SOCKS5h.
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True,
+              timezone=tz,
+              locale=locale,
               viewport={"width": 1920, "height": 950},
               args=[
                   "--no-sandbox", 
@@ -256,15 +222,14 @@ jobs:
               ]
           )
 
-          results = f"\n=== RISULTATI SCRAPING NODO {node_id} (PORTA {ACTIVE_PORT}) ===\n"
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[Nodo {node_id}] Analizzando: {url}", flush=True)
+              print(f"[NODO {node_id}] -> {url}", flush=True)
               try:
                   page = context.new_page()
                   
-                  # INIEZIONE ATTIVA DI POLYFILL
                   page.add_init_script("""
                       if (!('ContactsManager' in window)) {
                           window.ContactsManager = class ContactsManager {
@@ -272,87 +237,55 @@ jobs:
                               async select() { return []; }
                           };
                           Object.defineProperty(navigator, 'contacts', {
-                              get: () => new window.ContactsManager(),
-                              configurable: true,
-                              enumerable: true
+                              get: () => new window.ContactsManager(), configurable: true, enumerable: true
                           });
                       }
-
                       if (!('ContentIndex' in window)) {
                           window.ContentIndex = class ContentIndex {
-                              async add() {}
-                              async delete() {}
-                              async getAll() { return []; }
+                              async add() {} async delete() {} async getAll() { return []; }
                           };
                       }
-
                       if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
-                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
-                              get: () => 10,
-                              configurable: true,
-                              enumerable: true
-                          });
+                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', { get: () => 10, configurable: true, enumerable: true });
                       }
                       if (navigator.connection) {
                           if (!('downlinkMax' in navigator.connection)) {
-                              Object.defineProperty(navigator.connection, 'downlinkMax', {
-                                  get: () => 10,
-                                  configurable: true,
-                                  enumerable: true
-                              });
+                              Object.defineProperty(navigator.connection, 'downlinkMax', { get: () => 10, configurable: true, enumerable: true });
                           }
-                          Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, 
-                              configurable: true,
-                              enumerable: true
-                          });
+                          Object.defineProperty(navigator.connection, 'rtt', { get: () => 100, configurable: true, enumerable: true });
                       }
                   """)
 
                   query_to_search = get_query_from_url(url)
 
-                  # GESTIONE SPECIFICA YELP
                   if "yelp.com" in url or "yelp.it" in url:
                       page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(3)
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
+                  elif "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(2)
                       try:
-                          search_input = page.locator("input#q")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.locator("input#q").type(query_to_search, delay=100, timeout=2000)
                           page.keyboard.press("Enter")
-                      except Exception as e:
-                          pass
-                  
-                  # Navigazione simulata per DuckDuckGo HTML
-                  elif "html.duckduckgo.com/html" in url:
+                      except Exception: pass
+                  elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
                       time.sleep(2)
                       try:
-                          search_input = page.locator("input[name=q]")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.locator("input[name=q]").type(query_to_search, delay=100, timeout=2000)
                           page.keyboard.press("Enter")
-                      except Exception as e:
-                          pass
-                      
+                      except Exception: pass
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=25000)
                       if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
                           handle_cookie_consent(page)
                   
-                  # GESTIONE SPECIFICA YAHOO FINANCE
                   if "finance.yahoo.com" in url:
-                      try:
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
-                      except Exception:
-                          pass
+                      try: page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                      except Exception: pass
                       time.sleep(1)
 
-                  # Scorrimento simulato
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, 300)
@@ -360,46 +293,37 @@ jobs:
                   except Exception:
                       pass
 
-                  # Tempi di attesa bilanciati
-                  if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
-                  else:
-                      time.sleep(4)
+                  if "creepjs" in url: time.sleep(15) 
+                  elif "pixelscan" in url: time.sleep(8)
+                  elif any(t in url for t in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]): time.sleep(5)
+                  else: time.sleep(3)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
                   page.close()
 
               except Exception as e:
-                  print(f"[Nodo {node_id}] Errore critico su {url}: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except Exception:
-                      pass
+                  try: page.close()
+                  except Exception: pass
 
           context.close()
 
-          # Scrittura del report di questo specifico nodo
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping parallelo (3 Nodi indipendenti)
+      - name: Esecuzione Scraping Parallelo
         run: |
-          # Avvio dei 3 processi Python in parallelo in background
+          echo "Avvio processi paralleli in background..."
           python -u m2_insocket.py 1 > node1.log 2>&1 &
           python -u m2_insocket.py 2 > node2.log 2>&1 &
           python -u m2_insocket.py 3 > node3.log 2>&1 &
           
-          # Attende la conclusione di tutti i processi paralleli
+          # Attende il completamento di tutti i processi in background
           wait
 
-          # Stampa i log dei nodi per verifica e ispezione immediata
           echo "=== LOG NODO 1 ==="
           cat node1.log || true
           echo "=== LOG NODO 2 ==="
@@ -408,7 +332,7 @@ jobs:
           cat node3.log || true
           echo "=================="
 
-          # Concatenazione dei file in un unico report finale
+          # Assembla il report finale
           cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
