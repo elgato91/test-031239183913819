@@ -27,7 +27,7 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
           playwright install-deps chromium
 
-      - name: Setup WireProxy & WGCF (IPv6-Only SOCKS5h WARP)
+      - name: Setup WireProxy & WGCF (SOCKS5h IPv6-Only WARP)
         run: |
           # Scarica WGCF (Unofficial CLI per Cloudflare WARP)
           wget -qO wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.31/wgcf_2.2.31_linux_amd64
@@ -44,7 +44,7 @@ jobs:
           wgcf register --accept-tos
           wgcf generate
 
-          # Generazione dinamica della configurazione WireProxy filtrando solo l'IPv6
+          # Script in Python per isolare e configurare l'interfaccia puramente IPv6-only (risolve i crash DNS)
           cat << 'EOF' > make_config.py
           with open("wgcf-profile.conf", "r") as f:
               lines = f.readlines()
@@ -56,7 +56,13 @@ jobs:
                   ips = parts[1].split(",")
                   ipv6 = [ip.strip() for ip in ips if ":" in ip][0]
                   line = f"Address = {ipv6}\n"
-              # Forziamo l'instradamento esclusivamente su IPv6
+              # Filtra i server DNS per tenere solo quelli IPv6 (altrimenti il tunnel IPv6-only fallisce)
+              elif line.strip().startswith("DNS"):
+                  parts = line.split("=")
+                  dns_servers = parts[1].split(",")
+                  ipv6_dns = [dns.strip() for dns in dns_servers if ":" in dns]
+                  line = f"DNS = {', '.join(ipv6_dns)}\n"
+              # Forza l'instradamento esclusivamente su IPv6
               elif line.strip().startswith("AllowedIPs"):
                   line = "AllowedIPs = ::/0\n"
               new_lines.append(line)
@@ -70,9 +76,14 @@ jobs:
           
           python3 make_config.py
 
-          # Avvia wireproxy in background
-          wireproxy -c wireproxy.conf -d
+          # Avvia wireproxy salvando i log per eventuali analisi
+          wireproxy -c wireproxy.conf > wireproxy.log 2>&1 &
           sleep 5
+
+          # Stampa i log di avvio del tunnel nel pannello di Github Actions per verifica immediata
+          echo "=== LOG DI AVVIO WIREPROXY ==="
+          cat wireproxy.log
+          echo "=============================="
 
           # Verifica che il tunnel SOCKS5h IPv6 funzioni correttamente
           echo "Verifica IP IPv6 di uscita su tunnel SOCKS5h:"
@@ -168,12 +179,10 @@ jobs:
               except Exception:
                   pass
 
-          # Generazione seed hardware casuale e coerente
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Caricamento del contesto: delegando il proxy e geoip=True a CloakBrowser,
-          # il motore allineerà nativamente timezone, locale e WebRTC IP leggendo l'IPv6 di WARP.
+          # Avvio del contesto con il SOCKS5h Proxy e geoip=True (l'allineamento della timezone è gestito nativamente dal C++ del browser)
           context = launch_context(
               headless=False,
               humanize=True,
@@ -184,8 +193,8 @@ jobs:
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random_seed}",
-                  "--fingerprint-storage-quota=5000",   
-                  "--fingerprint-windows-font-metrics"  
+                  "--fingerprint-storage-quota=5000",   # Normalizza lo spazio di archiviazione per eludere il rilevamento incognito/private
+                  "--fingerprint-windows-font-metrics"  # Calibra le metriche dei font per allinearsi all'User-Agent Windows
               ]
           )
 
@@ -236,7 +245,7 @@ jobs:
                               });
                           }
                           Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, // Latenza simulata coerente con l'instradamento VPN di WARP
+                              get: () => 100, // Allineamento con il ritardo di instradamento di WARP
                               configurable: true,
                               enumerable: true
                           });
