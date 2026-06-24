@@ -190,59 +190,46 @@ jobs:
               except Exception:
                   pass
 
-          def wait_and_geolocate(port, timeout=45):
+          def wait_for_proxy_and_get_ipv4(port, timeout=45):
               print(f"[NODO {node_id}] Attesa attivazione proxy su porta {port}...", flush=True)
               start_time = time.time()
               proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               
-              ip_ready = False
+              ipv4_ip = ""
               while time.time() - start_time < timeout:
                   try:
-                      r = requests.get("https://api64.ipify.org?format=json", proxies=proxies, timeout=5)
+                      # Interroghiamo l'endpoint IPv4 per mappare la rotta TCP principale di Chromium
+                      r = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=5)
                       if r.status_code == 200:
-                          print(f"[NODO {node_id}] Connessione proxy stabilita. IP: {r.json().get('ip')}", flush=True)
-                          ip_ready = True
-                          break
+                          ipv4_ip = r.json().get("ip", "")
+                          print(f"[NODO {node_id}] Connessione proxy stabilita. IP TCP d'uscita (IPv4): {ipv4_ip}", flush=True)
+                          return True, ipv4_ip
                   except Exception:
                       pass
                   time.sleep(2)
-                  
-              if not ip_ready:
-                  return False, "Europe/Rome", "it-IT"
+              return False, ""
 
-              timezone, country = "Europe/Rome", "IT"
-              try:
-                  r = requests.get("https://freeipapi.com/api/json", proxies=proxies, timeout=5)
-                  if r.status_code == 200:
-                      data = r.json()
-                      timezone = data.get("timeZone", "Europe/Rome")
-                      country = data.get("countryCode", "IT")
-              except Exception:
-                  pass
-              
-              locale = "it-IT" if country == "IT" else f"en-{country}"
-              return True, timezone, locale
-
-          success, tz, locale = wait_and_geolocate(ACTIVE_PORT)
+          success, resolved_ipv4 = wait_for_proxy_and_get_ipv4(ACTIVE_PORT)
           if not success:
               print(f"[NODO {node_id}] Errore: Proxy non disponibile o inattivo. Interruzione.", flush=True)
               sys.exit(1)
 
           random_seed = str(random.randint(100000, 999999))
-          print(f"[NODO {node_id}] Avvio CloakBrowser (TZ: {tz}, Locale: {locale}, Seed: {random_seed})", flush=True)
+          print(f"[NODO {node_id}] Avvio CloakBrowser con GeoIP attivo e WebRTC allineato a {resolved_ipv4} (Seed: {random_seed})", flush=True)
 
+          # Configurazione nativa secondo la documentazione ufficiale
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              timezone=tz,
-              locale=locale,
+              geoip=True, # Calcola nativamente Timezone e Locale in base alla geolocalizzazione dell'IP
               viewport={"width": 1920, "height": 1080},
               args=[
                   "--no-sandbox", 
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random_seed}",
-                  "--fingerprint-storage-quota=5000"
+                  "--fingerprint-storage-quota=5000",
+                  f"--fingerprint-webrtc-ip={resolved_ipv4}" # Sovrascrive l'auto-rilevamento WebRTC di geoip=True per eliminare il mismatch di rete
               ]
           )
 
