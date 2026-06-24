@@ -78,7 +78,6 @@ jobs:
           from cloakbrowser import launch_persistent_context
           from bs4 import BeautifulSoup
 
-          # URL corretti sostituendo il + con %20 per evitare bug di troncamento query su Bing/Google
           TARGETS = [
               "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
@@ -128,18 +127,18 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
-          # Ripristinate flag originali per Google + aggiunta --disable-http2 per sbloccare Reddit
+          # Configurazione Standard e Pulita (HTTP/2 abilitato nativamente)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
               "--fingerprint-storage-quota=5000",
-              "--fingerprint-windows-font-metrics",
-              "--disable-http2" 
+              "--fingerprint-windows-font-metrics"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context (Seed: {random_seed})", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
 
+          # Demandiamo il lavoro pesante a CloakBrowser (humanize, geoip, stealth)
           context = launch_persistent_context(
               user_data_dir=profile_dir,
               headless=False,
@@ -158,13 +157,13 @@ jobs:
               try:
                   page = context.new_page()
                   
-                  # Navigazione DIRETTA, passiva. Ci pensa CloakBrowser.
-                  page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                  # Navigazione diretta passiva
+                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
-                  # Pausa essenziale per far caricare Javascript e aggirare in backgorund Captcha invisibili
+                  # Pausa per dare tempo agli script antibot e ai framework front-end (React/Vue) di idratare il DOM
                   time.sleep(6)
 
-                  # Chiusura banale dei cookie (non bypassa anti-bot, serve solo ad avere l'HTML più pulito)
+                  # Chiusura banale di eventuali popup GDPR per avere un output testuale più pulito (ignora i siti in cui non serve)
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
@@ -178,24 +177,18 @@ jobs:
                                   break
                       except Exception: pass
 
-                  # Necessario esclusivamente per far scattare il report di Pixelscan HTML
+                  # Trigger essenziale affinché Pixelscan completi effettivamente l'analisi
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now")
                           if btn.is_visible(timeout=3000):
                               btn.click()
                       except Exception: pass
-
-                  # Per reddit attendiamo che la rete si stabilizzi dai redirect iniziali
-                  if "reddit.com" in url:
-                      try:
-                          page.wait_for_load_state("networkidle", timeout=15000)
-                      except Exception: pass
-                      time.sleep(8)
                       
-                  # Tempistiche finali di calcolo per i siti più pesanti
+                  # Tempistiche finali prolungate per i tool diagnostici lenti
                   if "creepjs" in url: time.sleep(12) 
                   elif "pixelscan" in url: time.sleep(8)
+                  elif "reddit" in url: time.sleep(5)  # Reddit a volte carica in async
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
