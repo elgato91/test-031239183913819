@@ -24,7 +24,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          # Installiamo requests[socks] per permettere a Python di testare i proxy SOCKS5h prima di avviare il browser
+          # Installiamo requests[socks] (PySocks) per consentire a CloakBrowser di effettuare la geolocalizzazione nativa su SOCKS5
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
@@ -43,6 +43,22 @@ jobs:
             -p 127.0.0.1:40002:1080 \
             -d ghcr.io/kingcc/warproxy:latest
 
+          # Attesa stabilizzazione nativa (WARProxy completa la registrazione WGCF e l'handshake di WireGuard)
+          sleep 15
+
+          # Stampa dei log di validazione dei container
+          echo "=== LOG CONTAINER 1 (ATTIVO) ==="
+          docker logs warproxy_active || true
+          echo "=== LOG CONTAINER 2 (VUOTO) ==="
+          docker logs warproxy_empty || true
+          echo "================================"
+
+          # Verifica preliminare che il proxy risponda correttamente sul tunnel prima di avviare Python
+          echo "=================================================="
+          echo "VERIFICA IP CONTAINER 1 (Attivo):"
+          curl --proxy socks5h://127.0.0.1:40001 https://api64.ipify.org?format=json || echo "Proxy 1 fallito!"
+          echo "=================================================="
+
       - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
@@ -52,9 +68,7 @@ jobs:
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
-          import sys
           import random
-          import requests
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -135,55 +149,12 @@ jobs:
               except Exception:
                   pass
 
-          # Funzione di polling per validare che il tunnel SOCKS5h sia pronto ad accettare traffico
-          def wait_for_proxy(port, timeout=45):
-              print(f"In attesa che il proxy SOCKS5h sulla porta {port} sia pronto...", flush=True)
-              start_time = time.time()
-              proxies = {
-                  "http": f"socks5h://127.0.0.1:{port}",
-                  "https": f"socks5h://127.0.0.1:{port}"
-              }
-              while time.time() - start_time < timeout:
-                  # Prova a rilevare l'IPv6 tramite icanhazip
-                  try:
-                      r = requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and ":" in r.text:
-                          ip = r.text.strip()
-                          print(f"Proxy pronto sulla porta {port}! IPv6 rilevato: {ip}", flush=True)
-                          return True, "IPv6", ip
-                  except Exception:
-                      pass
-
-                  # Fallback su cloudflare trace per catturare dettagli warp e IP
-                  try:
-                      r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and "warp=" in r.text:
-                          lines = r.text.split('\n')
-                          ip_line = [line for line in lines if line.startswith('ip=')]
-                          warp_line = [line for line in lines if line.startswith('warp=')]
-                          if ip_line and warp_line:
-                              ip = ip_line[0].split('=')[1]
-                              warp_status = warp_line[0].split('=')[1]
-                              if warp_status in ["on", "plus"]:
-                                  ip_type = "IPv6" if ":" in ip else "IPv4"
-                                  print(f"Proxy pronto sulla porta {port}! IP rilevato: {ip} ({ip_type}) | WARP: {warp_status}", flush=True)
-                                  return True, ip_type, ip
-                  except Exception:
-                      pass
-                  time.sleep(2)
-              print(f"Timeout: il proxy sulla porta {port} non si è stabilizzato entro {timeout} secondi.", flush=True)
-              return False, None, None
-
-          # Blocco di sincronizzazione: blocca l'esecuzione finché il container non ha completato l'handshake
-          proxy_ready, ip_type, exit_ip = wait_for_proxy(40001)
-          if not proxy_ready:
-              print("Errore critico: il proxy di WARProxy non è pronto. Esco.", flush=True)
-              sys.exit(1)
-
           random_seed = str(random.randint(100000, 999999))
           print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
 
-          # Caricamento del contesto collegato al Proxy 1 (warproxy_active)
+          # Caricamento del contesto delegando proxy e geoip=True nativamente a CloakBrowser.
+          # Avendo installatorequests[socks] (PySocks) ed inserito lo sleep sul workflow, 
+          # CloakBrowser rileverà nativamente i dettagli dell'IP applicando la corretta configurazione.
           context = launch_context(
               headless=False,
               humanize=True,
