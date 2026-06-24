@@ -22,7 +22,6 @@ jobs:
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          # Installiamo i font per il rendering e xvfb per la gestione del server grafico virtuale
           sudo apt-get install -y xvfb ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
@@ -30,9 +29,27 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          # Utilizziamo [geoip] per permettere a Camoufox di risolvere autonomamente locale/timezone/webrtc
           pip install -U "camoufox[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps firefox
+
+      - name: Patch del Bug di Playwright (Firefox pageError crash)
+        run: |
+          # Applichiamo una patch al driver di Playwright per evitare il crash irreversibile 
+          # causato dagli errori JS privi di sorgente ('location' undefined) su Firefox.
+          python3 -c "
+          import playwright
+          from pathlib import Path
+          bundle_path = Path(playwright.__file__).resolve().parent / 'driver' / 'package' / 'lib' / 'coreBundle.js'
+          if bundle_path.exists():
+              text = bundle_path.read_text(encoding='utf-8')
+              text = text.replace('url: pageError.location.url,', 'url: pageError.location?.url || \"\",')
+              text = text.replace('line: pageError.location.lineNumber,', 'line: pageError.location?.lineNumber || 0,')
+              text = text.replace('column: pageError.location.columnNumber', 'column: pageError.location?.columnNumber || 0')
+              bundle_path.write_text(text, encoding='utf-8')
+              print('Patch Playwright Firefox applicata con successo.')
+          else:
+              print('AVVISO: coreBundle.js non trovato, patch saltata.')
+          "
 
       - name: Setup 3 WARProxy Docker Containers (IPv6)
         run: |
@@ -72,6 +89,7 @@ jobs:
           import time
           import sys
           import random
+          import requests
           from camoufox.sync_api import Camoufox
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -136,12 +154,36 @@ jobs:
           profile_dir = f"./profile_node_{node_id}"
           proxy_config = {"server": f"socks5://127.0.0.1:{ACTIVE_PORT}"}
 
+          # --- RILEVAMENTO IP DEL PROXY ---
+          # Eseguiamo una chiamata preventiva per determinare l'IP di uscita reale (IPv6 o IPv4)
+          # aggirando la funzione nativa di Camoufox che fallisce sulle reti locali/IPv6 proxy.
+          ip_di_uscita = None
+          proxies_test = {
+              "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
+              "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
+          }
+          
+          for service_url in ["https://api6.ipify.org?format=text", "https://api.ipify.org?format=text"]:
+              try:
+                  r = requests.get(service_url, proxies=proxies_test, timeout=12)
+                  if r.status_code == 200:
+                      ip_di_uscita = r.text.strip()
+                      print(f"[NODO {node_id}] IP di uscita rilevato: {ip_di_uscita}", flush=True)
+                      break
+              except Exception as e:
+                  print(f"[NODO {node_id}] Servizio IP {service_url} non raggiungibile tramite proxy: {e}", flush=True)
+
+          # Fallback su un IP italiano valido se la risoluzione fallisce temporaneamente
+          if not ip_di_uscita:
+              ip_di_uscita = "2.224.0.0"
+              print(f"[NODO {node_id}] Utilizzo IP di fallback italiano: {ip_di_uscita}", flush=True)
+
           print(f"[NODO {node_id}] Avvio Camoufox (Porta {ACTIVE_PORT})", flush=True)
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
-          # Utilizziamo il context manager per avviare Camoufox in modalità headful (headless=False)
-          # Lo script viene eseguito sotto xvfb-run per la gestione dell'ambiente grafico virtuale.
+          # Passiamo l'IP di uscita direttamente sotto forma di stringa al parametro 'geoip' 
+          # per consentire a Camoufox di applicare la geolocalizzazione senza rieseguire il controllo IP interno.
           with Camoufox(
               user_data_dir=profile_dir,
               persistent_context=True,
@@ -149,7 +191,7 @@ jobs:
               humanize=True,
               os="linux",
               proxy=proxy_config,
-              geoip=True,
+              geoip=ip_di_uscita,
               viewport={"width": 1920, "height": 950}
           ) as context:
 
@@ -168,13 +210,13 @@ jobs:
                       elif "startpage.com" in url:
                           page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                           try:
-                              page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                              page.locator("input#q").press_sequentially(query_to_search, delay=random.randint(50, 150))
                               page.keyboard.press("Enter")
                           except Exception: pass
                       elif "html.duckduckgo.com" in url:
                           page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                           try:
-                              page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                              page.locator("input[name=q]").press_sequentially(query_to_search, delay=random.randint(50, 150))
                               page.keyboard.press("Enter")
                           except Exception: pass
                       else:
@@ -182,7 +224,7 @@ jobs:
 
                       time.sleep(5)
 
-                      # Specifico per Reddit: dare tempo ai challenge JS di calcolare la proof-of-work
+                      # Specifico per Reddit
                       if "reddit.com" in url:
                           try:
                               page.wait_for_load_state("networkidle", timeout=15000)
@@ -198,7 +240,7 @@ jobs:
                               ]
                               for selector in consent_selectors:
                                   btn = page.locator(selector)
-                                  if btn.is_visible(): # is_visible() in Playwright non accetta parametri di timeout nelle versioni recenti
+                                  if btn.is_visible():
                                       btn.click()
                                       break
                           except Exception: pass
@@ -241,8 +283,8 @@ jobs:
         run: |
           echo "Avvio processi paralleli con Xvfb dedicato..."
           
-          # Ciascun processo viene avviato con xvfb-run -a per isolare i canali grafici ed evitare race conditions
-          # L'output viene convogliato direttamente su stdout in tempo reale per monitorare l'avanzamento
+          # Ciascun processo viene avviato con xvfb-run -a per isolare i canali grafici ed evitare race conditions.
+          # L'output viene inviato direttamente a video in tempo reale per monitorare l'avanzamento.
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python3 -u m2_insocket.py 1 &
           PID1=$!
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python3 -u m2_insocket.py 2 &
@@ -252,7 +294,6 @@ jobs:
 
           echo "Processi attivi con PID: $PID1, $PID2, $PID3"
           
-          # Attendiamo il completamento di ciascun nodo
           wait $PID1
           wait $PID2
           wait $PID3
