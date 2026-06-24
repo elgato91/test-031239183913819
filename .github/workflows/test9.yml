@@ -30,7 +30,6 @@ jobs:
       - name: Installazione Dipendenze Scraper
         run: |
           pip install "camoufox[geoip]" beautifulsoup4 requests "requests[socks]"
-          # Installazione delle librerie di sistema richieste da Firefox per funzionare senza problemi
           playwright install-deps firefox
 
       - name: Setup 3 WARProxy Docker Containers (IPv6)
@@ -48,7 +47,7 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            # Scagliona gli avvii per non incorrere nel rate-limit di Cloudflare WARP
+            # Scagliona gli avvii per evitare il rate-limiting su Cloudflare WARP
             sleep 15
           done
 
@@ -142,7 +141,7 @@ jobs:
                   pass
               return default
 
-          # Verifica semplicemente che il container proxy locale risponda
+          # Verifica che il container proxy locale risponda
           def wait_for_proxy(port, timeout=45):
               print(f"[NODO {node_id}] Verifica connettività proxy locale su porta {port}...", flush=True)
               start_time = time.time()
@@ -165,15 +164,16 @@ jobs:
 
           # Avvio del browser stealth Firefox Camoufox in headless nativo
           with Camoufox(
-              headless=True,                             # Nessun bisogno di Xvfb! 100% invisibile.
+              headless=True,                             # Stealth integrato nel motore di rendering C++
               proxy={"server": f"socks5://127.0.0.1:{ACTIVE_PORT}"},
-              geoip=True,                                # Allinea fuso orario, coordinate e lingua in base all'IP
-              fingerprint_preset=True,                   # Fingerprint reali salvati per aggirare Morningstar e CF
+              geoip=True,                                # Calcola e spoofa fuso orario, coordinate e lingua dall'IP
               humanize=True,                             # Movimenti del cursore e digitazione simulati
-              persistent_context=True,                   # Mantiene sessione e cookie tra i caricamenti
-              user_data_dir=profile_dir,
-              block_images=True,                         # Disabilita le immagini per risparmiare traffico e velocizzare i nodi
+              persistent_context=True,                   # Riutilizza la stessa sessione persistente (cookie e localStorage)
+              user_data_dir=profile_dir,                 # Directory persistente dei dati del browser
           ) as browser:
+
+              # Riutilizziamo lo stesso tab aperto all'avvio per non sprecare RAM ed evitare conflitti di focus
+              page = browser.pages[0] if browser.pages else browser.new_page()
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
@@ -181,7 +181,6 @@ jobs:
                   results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
                   print(f"[NODO {node_id}] -> {url}", flush=True)
                   try:
-                      page = browser.new_page()
                       query_to_search = get_query_from_url(url)
 
                       if "yelp.com" in url or "yelp.it" in url:
@@ -251,13 +250,10 @@ jobs:
 
                       raw_html = page.content()
                       results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                      page.close()
 
                   except Exception as e:
                       print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
                       results += f"ERRORE GLOBALE: {str(e)}\n"
-                      try: page.close()
-                      except Exception: pass
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
