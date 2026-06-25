@@ -183,60 +183,6 @@ jobs:
                   # Tempo di permanenza vostro originale
                   time.sleep(6)
 
-                  # ==========================================
-                  # CLOUDFLARE TURNSTILE REDIRECT (Canadian Insider)
-                  # Se rileva la schermata di verifica di Cloudflare, attende passivamente l'auto-redirect nativo del C++
-                  # ==========================================
-                  content_preview = page.content()
-                  if "Just a moment" in content_preview or "security verification" in content_preview:
-                      print(f"[NODO {node_id}] Turnstile/WAF rilevato. Attesa passiva del redirect...", flush=True)
-                      time.sleep(12) # Tempo ottimale per completare l'handshake automatico di CloakBrowser
-
-                  # ==========================================
-                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
-                  # ==========================================
-                  if "google.com/search" in url:
-                      try:
-                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
-                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
-                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
-                              if checkbox.is_visible(timeout=3000):
-                                  checkbox.click()
-                                  time.sleep(6) 
-                      except Exception:
-                          pass
-
-                  # ==========================================
-                  # RIMOZIONE MURI DI COOKIE GENERICI
-                  # ==========================================
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
-                      try:
-                          consent_selectors = [
-                              "button#onetrust-accept-btn-handler",
-                              "button:has-text('Accetta tutto')", 
-                              "button:has-text('Accept all')",
-                              "button:has-text('Consenti')", 
-                              "button:has-text('I agree')"
-                          ]
-                          for selector in consent_selectors:
-                              btn = page.locator(selector).first
-                              if btn.is_visible(timeout=1000):
-                                  btn.click() 
-                                  break
-                      except Exception:
-                          pass
-                      
-                  # ==========================================
-                  # SCROLL UMANO SIMULATO (Vostro originale)
-                  # ==========================================
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, random.randint(300, 600))
-                          time.sleep(random.uniform(0.8, 1.5))
-                  except Exception:
-                      pass
-
                   # Tempistiche diagnostiche vostre originali
                   if "creepjs" in url:
                       time.sleep(12) 
