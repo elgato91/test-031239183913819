@@ -60,7 +60,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((2 + RANDOM % 2))
+            DELAY=$((3 + RANDOM % 2))
             echo "Attesa preventiva di $DELAY secondi prima di richiedere l'IP..."
             sleep $DELAY
 
