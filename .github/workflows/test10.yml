@@ -169,19 +169,19 @@ jobs:
 
           random_seed = str(random.randint(100000, 999999))
 
-          # Parametri ottimizzati seguendo i suggerimenti anti-rilevamento e limitazione incognito
+          # Parametri ottimizzati secondo le specifiche di CloakBrowser
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--fingerprint-storage-quota=5000",   # Alzato a 5000 per mitigare i controlli incognito
-              "--fingerprint-noise=false",          # Previene l'identificazione euristica basata sul rumore
-              "--fingerprint-windows-font-metrics"  # Allinea i parametri dei font su ambienti Linux
+              "--fingerprint-storage-quota=5000",   # Impostato a 5000 per mitigare i controlli incognito
+              "--fingerprint-noise=false",          # Disabilitato per prevenire il blocco euristico anti-tampering
+              "--fingerprint-windows-font-metrics"  # Corregge i parametri dei font su ambienti Linux
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
 
-          # Passaggio a launch_context per evitare la necessità di Widevine CDM in modalità persistente
+          # launch_context evita i requisiti Widevine della modalità persistente
           context = launch_context(
               headless=False,
               humanize=True,
@@ -276,8 +276,8 @@ jobs:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
                           time.sleep(random.uniform(0.8, 1.5))
-                      except Exception:
-                          pass
+                  except Exception:
+                      pass
 
                   # Tempistiche finali di calcolo per i siti più pesanti
                   if "creepjs" in url:
