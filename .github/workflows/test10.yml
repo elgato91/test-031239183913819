@@ -31,7 +31,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avvio dei 6 container con delay scaglionato casuale (5-8 secondi)
+          # Avviamo i 6 container con un delay randomico di 5-8 secondi l'uno dall'altro
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -54,7 +54,7 @@ jobs:
 
       - name: Verifica IP IPv6 con Auto-healing (socks5h)
         run: |
-          # Utilizzo di socks5h per delegare la risoluzione DNS al proxy ed evitare perdite locali
+          # Verifica curl dei container tramite protocollo socks5h
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
@@ -169,26 +169,21 @@ jobs:
 
           random_seed = str(random.randint(100000, 999999))
 
-          # Definizione della stringa proxy SOCKS5h
-          ACTIVE_PROXY = f"socks5h://127.0.0.1:{ACTIVE_PORT}"
-
-          # Traduzione dello schema per Playwright ed inserimento delle regole di isolamento host
-          playwright_proxy = ACTIVE_PROXY.replace("socks5h://", "socks5://")
-
-          # Istruiamo Chromium ad inibire la risoluzione DNS locale (comportamento SOCKS5h)
+          # Configurazione lineare e pulita dei parametri di Chromium
           extra_args = [
               "--no-sandbox",
-              "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
-              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+              "--disable-dev-shm-usage"
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
+          # Passaggio diretto dello schema socks5h:// per attivare la risoluzione DNS remota di CloakBrowser
+          ACTIVE_PROXY = f"socks5h://127.0.0.1:{ACTIVE_PORT}"
+
           context = launch_context(
               headless=False,
               humanize=True,
-              proxy=playwright_proxy,
+              proxy=ACTIVE_PROXY,
               geoip=True,
               viewport={"width": 1920, "height": 950},
               args=extra_args
