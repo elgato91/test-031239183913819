@@ -10,7 +10,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Font di Sitema
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -40,8 +40,8 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
             
             if [ $i -lt $NUM_NODES ]; then
-              echo "Attesa scaglionamento per il prossimo nodo..."
-              sleep 3
+              echo "Attesa scaglionamento per evitare rate-limit Cloudflare..."
+              sleep 6
             fi
           done
 
@@ -60,16 +60,17 @@ jobs:
             for tentativo in {1..5}; do
               echo "Tentativo $tentativo/5 per container $i..."
               
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              # L'operatore '|| true' impedisce a GitHub Actions di interrompere lo script in caso di fallimento di curl
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || true)
               
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+              if echo "$IP" | grep -q '"ip"'; then
                 echo "Container $i pronto! IP: $IP"
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
+                echo "Container $i non risponde o bloccato (Risposta: $IP). Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 5
+                sleep 8
               fi
             done
             
@@ -129,14 +130,15 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          if len(sys.argv) < 2:
+          if len(sys.argv) < 3:
+              print("Uso corretto: python m2_insocket.py <node_id> <num_nodes>")
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          num_nodes = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+          num_nodes = int(sys.argv[2])
           ACTIVE_PORT = 40000 + node_id
 
-          # Distribuzione dinamica dei target in modalità Round-Robin
+          # Suddivisione dinamica dei target basata sul numero totale di nodi (Round-Robin)
           MY_TARGETS = [TARGETS[i] for i in range(len(TARGETS)) if i % num_nodes == (node_id - 1)]
 
           def extract_text(html_content, url):
@@ -278,28 +280,28 @@ jobs:
           NUM_NODES=10
           echo "Avvio di $NUM_NODES processi paralleli..."
           
-          # Esecuzione in background dei 10 nodi
           for i in $(seq 1 $NUM_NODES); do
             python -u m2_insocket.py $i $NUM_NODES > node$i.log 2>&1 &
           done
           
-          # Attende il completamento di tutti i processi in background
           wait
 
-          # Visualizzazione sequenziale dei log di ciascun nodo
           for i in $(seq 1 $NUM_NODES); do
             echo "=== LOG NODO $i ==="
             cat node$i.log || true
           done
           echo "=================="
 
-          # Previene errori di concatenazione in caso di fallimento di uno dei nodi
+          # Crea i file se mancanti per prevenire errori in fase di cat
           for i in $(seq 1 $NUM_NODES); do
             touch output_node_$i.txt
           done
 
-          # Unione di tutti i risultati estratti
-          cat output_node_*.txt > output_macchina2_cdp.txt
+          # Combina i file ordinandoli sequenzialmente dal nodo 1 al nodo 10
+          rm -f output_macchina2_cdp.txt
+          for i in $(seq 1 $NUM_NODES); do
+            cat output_node_$i.txt >> output_macchina2_cdp.txt
+          done
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
