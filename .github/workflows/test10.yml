@@ -14,7 +14,7 @@ jobs:
 
       - name: Sincronizza Orologio di Sistema (NTP)
         run: |
-          # Installiamo esplicitamente ntpdate per evitare l'errore "command not found"
+          # Installiamo ntpdate prima di eseguirlo per evitare l'errore "command not found"
           sudo apt-get update && sudo apt-get install -y ntpdate || true
           sudo systemctl stop systemd-timesyncd.service || true
           sudo ntpdate -s pool.ntp.org || true
@@ -37,62 +37,32 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avviamo i container uno alla volta con un delay strutturato per evitare rate-limit su Cloudflare
+          # Avvio lineare e pulito dei container
           for i in 1 2 3; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
-            if [ $i -lt 3 ]; then
-              echo "Attesa scaglionamento per il prossimo nodo..."
-              sleep 8
-            fi
           done
 
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 15
+          docker ps -a
 
-      - name: Verifica IP IPv6 con Auto-healing
+      - name: Verifica IP IPv6 di uscita sui 3 Proxy
         run: |
-          # Per ogni container, verifichiamo la connessione. Se fallisce, riavviamo e riproviamo.
           for i in 1 2 3; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
-            SUCCESS=false
-            for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              
-              # Proviamo a risolvere l'IP
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP: $IP"
-                SUCCESS=true
-                break
-              else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
-                docker restart warproxy-$i
-                sleep 8  # Diamo tempo al tunnel Wireguard di ricollegarsi dopo il riavvio
-              fi
-            done
-            
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
-              docker logs warproxy-$i || true
-              exit 1
-            fi
+            echo "VERIFICA IP CONTAINER $i ($PORT):"
+            curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
           done
           echo "=================================================="
-          docker ps -a
 
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Avvio Xvfb (Virtual Display Stabile)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -106,22 +76,20 @@ jobs:
           cat << 'EOF' > m2_insocket.py
           import time
           import sys
-          import random
-          from cloakbrowser import launch_persistent_context
+          import requests
+          from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
-          from urllib.parse import urlparse, parse_qs
 
-          # Utilizziamo spazi letterali negli URL: Playwright li codificherà in modo nativo e corretto per ciascun motore di ricerca
           TARGETS = [
-              "https://api6.ipify.org?format=json",
+              "https://api64.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa vedere roma",
-              "https://www.bing.com/search?q=cosa vedere roma",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
@@ -132,13 +100,14 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore carbonara roma",
-              "https://html.duckduckgo.com/html/?q=migliore carbonara roma",
-              "https://www.bing.com/search?q=migliore carbonara roma",
-              "https://www.startpage.com/sp/search?query=migliore carbonara roma",
-              "https://search.yahoo.com/search?p=migliore carbonara roma",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
+              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
@@ -149,7 +118,9 @@ jobs:
 
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
-          MY_TARGETS = TARGETS[(node_id-1)*9 : node_id*9]
+          MY_TARGETS = TARGETS[(node_id-1)*10 : node_id*10] # Distribuzione dei 28 target
+
+          results = ""
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -158,141 +129,123 @@ jobs:
                   return text
               return text[:5000]
 
-          def get_query_from_url(url, default="migliore carbonara roma"):
-              try:
-                  parsed = urlparse(url)
-                  queries = parse_qs(parsed.query)
-                  for param in ['q', 'query', 'p']:
-                      if param in queries:
-                          return queries[param][0]
-              except Exception:
-                  pass
-              return default
-
-          random_seed = str(random.randint(100000, 999999))
-          profile_dir = f"./profile_node_{node_id}"
-
-          # Configurazione Standard e Pulita originale (Garantisce un trust score ottimale)
-          extra_args = [
-              "--no-sandbox", 
-              "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
-              "--fingerprint-storage-quota=5000",
-              "--fingerprint-windows-font-metrics"
+          # Rilevamento geografico robusto multi-stage instradato attraverso il proxy del nodo
+          print(f"[NODO {node_id}] Rilevamento parametri geografici dell'IP di rete...", flush=True)
+          timezone = "UTC"
+          locale = "it-IT" # Forziamo la lingua italiana per evitare il soft-block dei motori USA (es. l'acronimo COSA su Bing)
+          
+          proxies = {
+              "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
+              "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
+          }
+          
+          geo_services = [
+              ("http://ip-api.com/json/", lambda d: (d.get("timezone"), "it-IT")),
+              ("https://ipapi.co/json/", lambda d: (d.get("timezone"), "it-IT")),
+              ("https://ipwho.is/", lambda d: (d.get("timezone"), "it-IT"))
           ]
+          
+          for url, parse_func in geo_services:
+              try:
+                  print(f"[NODO {node_id}] Tentativo con {url}...", flush=True)
+                  response = requests.get(url, proxies=proxies, timeout=5)
+                  if response.status_code == 200:
+                      data = response.json()
+                      tz, loc = parse_func(data)
+                      if tz:
+                          timezone = tz
+                          locale = loc
+                          print(f"[NODO {node_id}] Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
+                          break
+              except Exception as e:
+                  print(f"[NODO {node_id}] Avviso: {url} in rate-limit ({e}). Provo il successivo...", flush=True)
 
-          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
-
-          context = launch_persistent_context(
-              user_data_dir=profile_dir,
+          print(f"[NODO {node_id}] Avviando CloakBrowser con i parametri allineati...", flush=True)
+          
+          # launch_context in-memory (stateless) originale per garantire isolamento e velocità
+          context = launch_context(
               headless=False,
               humanize=True,
+              timezone=timezone,
+              locale=locale,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True,
-              viewport={"width": 1920, "height": 950},
-              args=extra_args
+              viewport={"width": 1920, "height": 1080},
+              args=[
+                  "--no-sandbox", 
+                  "--disable-dev-shm-usage",
+                  f"--fingerprint-timezone={timezone}",
+                  f"--fingerprint-locale={locale}",
+                  "--fingerprint=42069" # Seed hardware stabile e credibile della tua configurazione di successo
+              ]
           )
-
-          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[NODO {node_id}] -> {url}", flush=True)
+              print(f"[NODO {node_id}] Analizzando: {url}", flush=True)
               try:
                   page = context.new_page()
-                  query_to_search = get_query_from_url(url)
+
+                  # GESTIONE SPECIFICA YELP (Warm-up della sessione sulla home page)
+                  if "yelp.com" in url or "yelp.it" in url:
+                      print(f"[NODO {node_id}] Esecuzione del warm-up su Yelp...", flush=True)
+                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(3)
+                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
                   
-                  # ==========================================
-                  # WORKAROUND MOTORI DI RICERCA MINORI
-                  # ==========================================
-                  if "startpage.com" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
-                      try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
-                          page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=10000)
-                      except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                          
-                  elif "html.duckduckgo.com" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
-                      try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
-                          page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=10000)
-                      except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                          
-                  else:
-                      # Navigazione diretta passiva
-                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                  # Navigazione originale per Startpage
+                  elif "startpage.com/sp/search" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(2)
+                      page.type("input#q", "migliore carbonara roma", delay=150)
+                      page.keyboard.press("Enter")
                   
-                  # Pausa per fare valutare gli script di rete e i cookie
-                  time.sleep(6)
-
-                  # ==========================================
-                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
-                  # ==========================================
-                  if "google.com/search" in url:
-                      try:
-                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
-                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
-                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
-                              if checkbox.is_visible(timeout=3000):
-                                  checkbox.click() # Clicca e sblocca istantaneamente grazie a CloakBrowser
-                                  time.sleep(6) 
-                      except Exception: pass
-
-                  # ==========================================
-                  # RIMOZIONE MURI DI COOKIE (CN TRAVELER)
-                  # ==========================================
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
-                      try:
-                          consent_selectors = [
-                              "button#onetrust-accept-btn-handler", # Specifico OneTrust
-                              "button:has-text('Accetta tutto')", 
-                              "button:has-text('Accept all')",
-                              "button:has-text('Accept All')",
-                              "button:has-text('Consenti')", 
-                              "button:has-text('I agree')"
-                          ]
-                          for selector in consent_selectors:
-                              btn = page.locator(selector).first
-                              if btn.is_visible(timeout=1000):
-                                  btn.click() 
-                                  break
-                      except Exception: pass
-
-                  # Trigger esplicito per Pixelscan
-                  if "pixelscan.net" in url:
-                      try:
-                          btn = page.locator("text=Scan My Browser Now").first
-                          if btn.is_visible(timeout=3000):
-                              btn.click()
-                      except Exception: pass
+                  # Navigazione originale per DuckDuckGo
+                  elif "html.duckduckgo.com/html/" in url:
+                      page.goto("https://duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(2)
+                      page.type("input[name=q]", "migliore carbonara roma", delay=150)
+                      page.keyboard.press("Enter")
                       
-                  # Scroll umano simulato (Lazy Loading)
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                  
+                  # GESTIONE SPECIFICA YAHOO FINANCE
+                  if "finance.yahoo.com" in url:
+                      print(f"[NODO {node_id}] In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+                      try:
+                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=15000)
+                          time.sleep(2)
+                      except Exception: pass
+
+                  # Movimento scorrimento simulato originale
                   try:
                       for _ in range(3):
-                          page.mouse.wheel(0, random.randint(300, 600))
-                          time.sleep(random.uniform(0.8, 1.5))
-                  except Exception: pass
+                          page.mouse.wheel(0, 300)
+                          time.sleep(1)
+                  except:
+                      pass
 
-                  # Tempistiche finali di calcolo per i siti più pesanti
-                  if "creepjs" in url: time.sleep(12) 
-                  elif "pixelscan" in url: time.sleep(8)
-                  elif "reddit" in url: time.sleep(5)
+                  # Attese necessarie per permettere la profilazione diagnostica completa
+                  if "creepjs" in url:
+                      time.sleep(20) 
+                  elif "pixelscan" in url:
+                      time.sleep(10)
+                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
+                      time.sleep(5)
+                  else:
+                      time.sleep(6)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
                   page.close()
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore critico su {url}: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try: page.close()
-                  except Exception: pass
+                  try:
+                      page.close()
+                  except:
+                      pass
 
           context.close()
 
