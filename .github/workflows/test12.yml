@@ -1,7 +1,7 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
 on: 
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA FONDAMENTALE DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per Linux)
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -161,22 +161,22 @@ jobs:
               return default
 
           def get_safe_content(page, retries=3):
-              """Recupera l'HTML in modo sicuro gestendo l'errore di Navigating."""
+              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
               for attempt in range(retries):
                   try:
                       return page.content()
                   except Exception as e:
                       if "navigating" in str(e).lower() or "execution context" in str(e).lower():
-                          time.sleep(2)
+                          time.sleep(3)
                       else:
-                          return ""
+                          break
               return ""
 
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # CONFIGURAZIONE BACK-TO-BASICS: Solo lo stretto necessario per funzionare in Docker/GHA
+          # CONFIGURAZIONE MINIMALE: rimosso qualsiasi flag in conflitto con i protocolli standard di rete
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
@@ -186,12 +186,13 @@ jobs:
 
           print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
-          # Nessun viewport manuale, nessuna regola DNS astrusa: lasciamo fare a CloakBrowser
+          # viewport=None permette al browser di usare la propria geometria coerente impostata a monte
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
+              viewport=None, 
               args=extra_args
           )
 
@@ -206,101 +207,48 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
+                  # Navigazione e gestione ricerche
                   if "startpage.com" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(3)
                       try:
                           page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                   elif "html.duckduckgo.com" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(3)
                       try:
                           page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                   else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  time.sleep(6)
+                  # SILENZIO ASSOLUTO CDP (15s): Cruciale per consentire a Cloudflare e reCAPTCHA 
+                  # di completare le verifiche senza rilevare interrogazioni continue sul DOM.
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
+                  time.sleep(15)
 
-                  content_preview = get_safe_content(page)
-
-                  # CLOUDFLARE TURNSTILE (Gestione invisibile)
-                  if "Just a moment" in content_preview or "security verification" in content_preview:
-                      print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
-                      time.sleep(12)
-
-                  # GOOGLE CAPTCHA 
-                  if "google.com/search" in url:
-                      try:
-                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=2000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Tento click umano...", flush=True)
-                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA'], iframe[src*='recaptcha']").first
-                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border").first
-                              if checkbox.is_visible(timeout=5000):
-                                  checkbox.click()
-                                  time.sleep(6) 
-                      except Exception:
-                          pass
-
-                  # REDDIT CAPTCHA 
-                  if "reddit.com" in url:
-                      try:
-                          if page.locator('text="Prove your humanity"').is_visible(timeout=2000) or page.locator('text="a real person"').is_visible(timeout=2000):
-                              print(f"[NODO {node_id}] Reddit CAPTCHA rilevato. Tento click umano...", flush=True)
-                              captcha_frame = page.frame_locator("iframe[title*='reCAPTCHA'], iframe[src*='recaptcha'], iframe[title*='hCaptcha'], iframe[src*='hcaptcha']").first
-                              checkbox = captcha_frame.locator(".recaptcha-checkbox-border, #checkbox").first
-                              if checkbox.is_visible(timeout=5000):
-                                  checkbox.click()
-                                  time.sleep(6)
-                      except Exception:
-                          pass
-
-                  # RIMOZIONE MURI DI COOKIE
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
-                      try:
-                          consent_selectors = [
-                              "button#onetrust-accept-btn-handler",
-                              "button:has-text('Accetta tutto')", 
-                              "button:has-text('Accept all')",
-                              "button:has-text('Consenti')", 
-                              "button:has-text('I agree')"
-                          ]
-                          for selector in consent_selectors:
-                              btn = page.locator(selector).first
-                              if btn.is_visible(timeout=1000):
-                                  btn.click() 
-                                  break
-                      except Exception:
-                          pass
-
+                  # Click specifico finalizzato unicamente a pixelscan (se presente)
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
-                              btn.click()
+                              btn.click() 
+                              time.sleep(8)
                       except Exception:
                           pass
                       
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, random.randint(300, 600))
-                          time.sleep(random.uniform(0.8, 1.5))
-                  except Exception:
-                          pass
-
+                  # Assestamento per diagnostici lenti
                   if "creepjs" in url:
-                      time.sleep(12) 
-                  elif "pixelscan" in url:
-                      time.sleep(8)
+                      time.sleep(6) 
 
-                  # ESTRAZIONE TESTO SICURA
+                  # Estrazione sicura del sorgente pagina
                   raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
