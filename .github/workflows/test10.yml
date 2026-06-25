@@ -8,17 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Sincronizza Orologio di Sistema (NTP)
-        run: |
-          # Installiamo ntpdate per sincronizzare l'orologio
-          sudo apt-get update && sudo apt-get install -y ntpdate || true
-          sudo systemctl stop systemd-timesyncd.service || true
-          sudo ntpdate -s pool.ntp.org || true
-
       - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          # Installiamo i font per fornire la base corretta per il rendering Canvas/Emoji
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
@@ -33,7 +27,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avvio dei 6 container uno alla volta con delay randomico tra 5 e 8 secondi
+          # Avviamo i 6 container con un delay randomico
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -45,7 +39,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 4))
+              DELAY=$((3 + RANDOM % 2))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -56,20 +50,18 @@ jobs:
 
       - name: Verifica IP IPv6 con Auto-healing (socks5h)
         run: |
-          # Verifica dei 6 container con un delay randomico prima di interrogare l'endpoint
+          # Test curl per verificare la bontà dei tunnel IPv6
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((5 + RANDOM % 4))
-            echo "Attesa preventiva di $DELAY secondi..."
+            DELAY=$((3 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
             for tentativo in {1..5}; do
               echo "Tentativo $tentativo/5 per container $i..."
-              
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
@@ -77,7 +69,7 @@ jobs:
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
+                echo "Container $i non risponde. Riavvio in corso..."
                 docker restart warproxy-$i
                 sleep 8
               fi
@@ -85,20 +77,20 @@ jobs:
 
             if [ "$SUCCESS" = "false" ]; then
               echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
-              docker logs warproxy-$i || true
               exit 1
             fi
           done
           echo "=================================================="
-          docker ps -a
 
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
+          # Obbligatorio per far girare CloakBrowser in headless=False senza schermi fisici
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Pre-inizializzazione Cache CloakBrowser
         run: |
+          # Scarica il binario v146 pre-patchato
           python -m cloakbrowser install
 
       - name: Creazione script Python (Macchina 2)
@@ -108,7 +100,7 @@ jobs:
           import sys
           import random
           import math
-          from cloakbrowser import launch_persistent_context
+          from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
@@ -146,7 +138,6 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          # Suddivisione dinamica per 6 nodi basata sul numero di target totali
           num_nodes = 6
           slice_size = math.ceil(len(TARGETS) / num_nodes)
           MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
@@ -169,66 +160,62 @@ jobs:
                   pass
               return default
 
-          random_seed = str(random.randint(100000, 999999))
-          profile_dir = f"./profile_node_{node_id}"
+          print(f"[NODO {node_id}] Avvio Context Nativo CloakBrowser", flush=True)
 
-          # Configurazione Standard e Pulita originale
+          # Solo le flag strettamente necessarie per l'ambiente Linux/Docker
           extra_args = [
               "--no-sandbox",
-              "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
-              "--fingerprint-storage-quota=5000",
-              "--fingerprint-windows-font-metrics"
+              "--disable-dev-shm-usage"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
-
-          context = launch_persistent_context(
-              user_data_dir=profile_dir,
-              headless=False,
-              humanize=True,
-              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True,
-              viewport={"width": 1920, "height": 950},
-              args=extra_args
-          )
+          try:
+              # Configurazione PURA: SOCKS5 nativo, geoip automatico, e humanize attivo.
+              context = launch_context(
+                  headless=False,
+                  humanize=True,
+                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+                  geoip=True,
+                  viewport={"width": 1920, "height": 950},
+                  args=extra_args
+              )
+          except Exception as e:
+              print(f"[NODO {node_id}] Fallito avvio browser: {e}", flush=True)
+              sys.exit(1)
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # ==========================================
-                  # WORKAROUND MOTORI DI RICERCA MINORI
-                  # ==========================================
                   if "startpage.com" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=40000)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(80, 150))
                           page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=10000)
+                          page.wait_for_load_state("domcontentloaded", timeout=15000)
                       except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          page.goto(url, wait_until="domcontentloaded", timeout=40000)
                           
                   elif "html.duckduckgo.com" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=40000)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(80, 150))
                           page.keyboard.press("Enter")
-                          page.wait_for_load_state("domcontentloaded", timeout=10000)
+                          page.wait_for_load_state("domcontentloaded", timeout=15000)
                       except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          page.goto(url, wait_until="domcontentloaded", timeout=40000)
                           
                   else:
-                      # Navigazione diretta passiva
-                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # Pausa per fare valutare gli script di rete e i cookie
-                  time.sleep(6)
+                  # Time sleep nativo di Python (non CDP) per far depositare la pagina
+                  time.sleep(random.uniform(4.0, 7.0))
 
                   # ==========================================
                   # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
@@ -236,25 +223,25 @@ jobs:
                   if "google.com/search" in url:
                       try:
                           if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
+                              print(f"[NODO {node_id}] Google CAPTCHA rilevato.", flush=True)
+                              time.sleep(10) # Pausa fiduciaria pre-click
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
-                                  checkbox.click() # Clicca e sblocca istantaneamente grazie a CloakBrowser
-                                  time.sleep(6) 
+                                  checkbox.click() # Humanize subentra con mouse curve
+                                  time.sleep(8) 
                       except Exception:
                           pass
 
                   # ==========================================
-                  # RIMOZIONE MURI DI COOKIE (CN TRAVELER)
+                  # RIMOZIONE MURI DI COOKIE
                   # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
-                              "button#onetrust-accept-btn-handler", # Specifico OneTrust
+                              "button#onetrust-accept-btn-handler",
                               "button:has-text('Accetta tutto')", 
                               "button:has-text('Accept all')",
-                              "button:has-text('Accept All')",
                               "button:has-text('Consenti')", 
                               "button:has-text('I agree')"
                           ]
@@ -266,42 +253,32 @@ jobs:
                       except Exception:
                           pass
 
-                  # Trigger esplicito per Pixelscan
-                  if "pixelscan.net" in url:
-                      try:
-                          btn = page.locator("text=Scan My Browser Now").first
-                          if btn.is_visible(timeout=3000):
-                              btn.click()
-                      except Exception:
-                          pass
-                      
-                  # Scroll umano simulato (Lazy Loading)
+                  # ==========================================
+                  # SCROLL UMANO NATIVO
+                  # ==========================================
                   try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, random.randint(300, 600))
-                          time.sleep(random.uniform(0.8, 1.5))
+                      for _ in range(2):
+                          page.mouse.wheel(0, random.randint(400, 700))
+                          time.sleep(random.uniform(1.0, 2.0))
                   except Exception:
                       pass
 
-                  # Tempistiche finali di calcolo per i siti più pesanti
-                  if "creepjs" in url:
-                      time.sleep(12) 
-                  elif "pixelscan" in url:
+                  if any(x in url for x in ["creepjs", "pixelscan", "sannysoft", "incolumitas"]):
                       time.sleep(8)
-                  elif "reddit" in url:
-                      time.sleep(5)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore navigazione: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except Exception:
-                      pass
+                  
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
 
           context.close()
 
@@ -311,12 +288,19 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo (6 Nodi)
         run: |
-          echo "Avvio processi paralleli..."
+          echo "Avvio processi paralleli su 6 nodi..."
+          # Aggiungiamo un micro-stagger di 2 secondi tra un processo e l'altro 
+          # per evitare picchi istantanei di I/O all'avvio di Chromium
           python -u m2_insocket.py 1 > node1.log 2>&1 &
+          sleep 2
           python -u m2_insocket.py 2 > node2.log 2>&1 &
+          sleep 2
           python -u m2_insocket.py 3 > node3.log 2>&1 &
+          sleep 2
           python -u m2_insocket.py 4 > node4.log 2>&1 &
+          sleep 2
           python -u m2_insocket.py 5 > node5.log 2>&1 &
+          sleep 2
           python -u m2_insocket.py 6 > node6.log 2>&1 &
 
           wait
