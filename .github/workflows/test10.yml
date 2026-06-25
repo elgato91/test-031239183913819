@@ -1,110 +1,4 @@
-name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
-
-on: 
-  workflow_dispatch:
-
-jobs:
-  machine2_cdp_insocket:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Sincronizza Orologio di Sistema (NTP)
-        run: |
-          # Installiamo ntpdate per evitare l'errore "command not found"
-          sudo apt-get update && sudo apt-get install -y ntpdate || true
-          sudo systemctl stop systemd-timesyncd.service || true
-          sudo ntpdate -s pool.ntp.org || true
-
-      - name: Installazione Font di Sistema
-        run: |
-          sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          fc-cache -f -v
-
-      - name: Installazione Dipendenze Scraper
-        run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
-          playwright install-deps chromium
-
-      - name: Setup 3 WARProxy Docker Containers (IPv6)
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          # Avviamo i container uno alla volta con un delay strutturato per evitare rate-limit su Cloudflare
-          for i in 1 2 3; do
-            PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            
-            if [ $i -lt 3 ]; then
-              echo "Attesa scaglionamento per il prossimo nodo..."
-              sleep 8
-            fi
-          done
-
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
-
-      - name: Verifica IP IPv6 con Auto-healing
-        run: |
-          # Per ogni container, verifichiamo la connessione. Se fallisce, riavviamo e riproviamo.
-          for i in 1 2 3; do
-            PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
-            SUCCESS=false
-            for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              
-              # Proviamo a risolvere l'IP
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP: $IP"
-                SUCCESS=true
-                break
-              else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
-                docker restart warproxy-$i
-                sleep 8  # Diamo tempo al tunnel Wireguard di ricollegarsi dopo il riavvio
-              fi
-            done
-            
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
-              docker logs warproxy-$i || true
-              exit 1
-            fi
-          done
-          echo "=================================================="
-          docker ps -a
-
-      - name: Avvio Xvfb (Virtual Display Headful)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Pre-inizializzazione Cache CloakBrowser
-        run: |
-          python -m cloakbrowser install
-
-      - name: Creazione script Python (Macchina 2)
-        run: |
-          cat << 'EOF' > m2_insocket.py
-          import time
+import time
           import sys
           import random
           from cloakbrowser import launch_persistent_context
@@ -164,7 +58,6 @@ jobs:
                   pass
               return default
 
-          # Seed fisso per nodo per simulare un "returning visitor" su reCAPTCHA/Turnstile
           stable_seed = str(123450 + node_id)
           profile_dir = f"./profile_node_{node_id}"
 
@@ -172,20 +65,20 @@ jobs:
               "--no-sandbox", 
               "--disable-dev-shm-usage",
               f"--fingerprint={stable_seed}",
-              "--fingerprint-storage-quota=5000",       # Previene il rilevamento dell'incognito mode
-              "--fingerprint-windows-font-metrics",      # Allinea le metriche dei font simulati
-              "--fingerprint-noise=false"                # Evita che il ML rilevi la manipolazione del canvas
+              "--fingerprint-storage-quota=5000",       
+              "--fingerprint-windows-font-metrics",      
+              "--fingerprint-noise=false"                
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Stable Seed: {stable_seed})", flush=True)
 
           context = launch_persistent_context(
               user_data_dir=profile_dir,
-              headless=False,                            # Headed mode necessario per Turnstile/DataDome
-              humanize=True,                             # Abilita movimenti mouse Bézier, scroll e typing umani
-              human_preset="careful",                    # Preset più lento ed elusivo
+              headless=False,                            
+              humanize=True,                             
+              human_preset="careful",                    
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}", 
-              geoip=True,                                # Auto-rilevamento geografico e WebRTC dal proxy
+              geoip=True,                                
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
@@ -250,22 +143,25 @@ jobs:
                       except Exception: pass
 
                   # ==========================================
-                  # RIMOZIONE MURI DI COOKIE
+                  # RIMOZIONE MURI DI COOKIE E OPT-OUT (CN TRAVELER)
                   # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
                               "button#onetrust-accept-btn-handler",
+                              "#onetrust-accept-btn-handler",
+                              "button:has-text('Accept All')",
                               "button:has-text('Accetta tutto')", 
                               "button:has-text('Accept all')",
-                              "button:has-text('Accept All')",
                               "button:has-text('Consenti')", 
-                              "button:has-text('I agree')"
+                              "button:has-text('I agree')",
+                              "button[class*='accept']"
                           ]
                           for selector in consent_selectors:
                               btn = page.locator(selector).first
-                              if btn.is_visible(timeout=1000):
+                              if btn.is_visible(timeout=2000):
                                   btn.click() 
+                                  time.sleep(2)
                                   break
                       except Exception: pass
 
@@ -299,7 +195,22 @@ jobs:
                   elif "pixelscan" in url: time.sleep(8)
                   elif "reddit" in url: time.sleep(5)
 
-                  raw_html = page.content()
+                  # ==========================================
+                  # TRICK 5: PREVENZIONE CRASH NAVIGAZIONE (Katie Parla)
+                  # ==========================================
+                  raw_html = ""
+                  try:
+                      # Attendiamo che la pagina finisca eventuali reindirizzamenti asincroni
+                      page.wait_for_load_state("load", timeout=10000)
+                      raw_html = page.content()
+                  except Exception as nav_err:
+                      print(f"[NODO {node_id}] Navigazione instabile riavvisata, attendo assestamento...", flush=True)
+                      time.sleep(4)
+                      try:
+                          raw_html = page.content()
+                      except Exception:
+                          raw_html = "<h1>Errore: Impossibile recuperare il DOM stabilizzato</h1>"
+
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
                   page.close()
 
@@ -314,29 +225,3 @@ jobs:
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
-
-      - name: Esecuzione Scraping Parallelo
-        run: |
-          echo "Avvio processi paralleli..."
-          python -u m2_insocket.py 1 > node1.log 2>&1 &
-          python -u m2_insocket.py 2 > node2.log 2>&1 &
-          python -u m2_insocket.py 3 > node3.log 2>&1 &
-          
-          wait
-
-          echo "=== LOG NODO 1 ==="
-          cat node1.log || true
-          echo "=== LOG NODO 2 ==="
-          cat node2.log || true
-          echo "=== LOG NODO 3 ==="
-          cat node3.log || true
-          echo "=================="
-
-          touch output_node_1.txt output_node_2.txt output_node_3.txt
-          cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
-
-      - name: Upload Artifact Macchina 2
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
