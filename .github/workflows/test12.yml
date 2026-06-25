@@ -1,7 +1,6 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on:
-  workflow_dispatch:
+on: workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
@@ -15,6 +14,11 @@ jobs:
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          # COPIA FONDAMENTALE DEI FONT WINDOWS PER CLOAKBROWSER
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -95,6 +99,7 @@ jobs:
           import sys
           import random
           import math
+          import os
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -115,7 +120,7 @@ jobs:
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
@@ -154,24 +159,29 @@ jobs:
                   pass
               return default
 
+          # Generazione seed randomico
           random_seed = str(random.randint(100000, 999999))
 
-          # Spazi rimossi intorno alla virgola per correggere il parsing di Chromium
+          # Path assoluto ai font copiati in precedenza dallo step Bash
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+
+          # Args essenziali puliti - RIMOSSO HACK DNS E AGGIUNTA FONT DIR
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1" 
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
+          # RIMOSSO VIEWPORT CUSTOM (per match perfetto con hardware spoofato)
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              viewport={"width": 1920, "height": 950},
               args=extra_args
           )
 
@@ -189,7 +199,6 @@ jobs:
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          # Timeout corretto a 3000ms
                           page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
@@ -199,7 +208,6 @@ jobs:
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          # Timeout corretto a 3000ms
                           page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
@@ -211,12 +219,13 @@ jobs:
                   
                   time.sleep(6)
 
+                  # CLOUDFLARE TURNSTILE (Cloakbrowser lo risolve da solo)
                   content_preview = page.content()
                   if "Just a moment" in content_preview or "security verification" in content_preview:
                       print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
                       time.sleep(12)
 
-                  # Risoluzione automatica Google CAPTCHA originale
+                  # GOOGLE CAPTCHA 
                   if "google.com/search" in url:
                       try:
                           if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
@@ -229,7 +238,7 @@ jobs:
                       except Exception:
                           pass
 
-                  # Rimozione barriere cookie generiche
+                  # BANNER COOKIE
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
