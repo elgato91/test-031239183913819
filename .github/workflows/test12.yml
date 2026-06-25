@@ -115,7 +115,7 @@ jobs:
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://www.google.com/search?q=migliore+carbonara+roma",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
@@ -154,20 +154,25 @@ jobs:
                   pass
               return default
 
-          # Argomenti minimi indispensabili per evitare problemi in GHA
+          # Generazione seed randomico originale
+          random_seed = str(random.randint(100000, 999999))
+
+          # Configurazione originaria con inibizione della risoluzione DNS locale
+          # per prevenire leak di rete ed evitare l'intercettazione dell'AS di GitHub Actions
           extra_args = [
               "--no-sandbox",
-              "--disable-dev-shm-usage"
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" 
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard su porta {ACTIVE_PORT}", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
-          # Inizializziamo il contesto usando le funzionalità native di CloakBrowser
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True, # Gestisce autonomamente WebRTC, fuso orario e lingua in base all'IP WARP
+              geoip=True,
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
@@ -176,18 +181,17 @@ jobs:
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[NODO {node_id}] Navigazione verso -> {url}", flush=True)
+              print(f"[NODO {node_id}] -> {url}", flush=True)
               page = None
               
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Navigazioni con inserimento query umanizzato
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input#q").fill(query_to_search)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=300)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
@@ -196,7 +200,7 @@ jobs:
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input[name=q]").fill(query_to_search)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=300)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
@@ -205,24 +209,35 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
-                  # Attesa standard non intrusiva (evita page.wait_for_timeout)
-                  time.sleep(8)
+                  time.sleep(6)
 
-                  # Gestione passiva per l'auto-risoluzione di Cloudflare Turnstile
+                  # Monitoraggio stato Cloudflare Turnstile
                   content_preview = page.content()
                   if "Just a moment" in content_preview or "security verification" in content_preview:
                       print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
                       time.sleep(12)
 
-                  # Interazione nativa per il trigger di Pixelscan
+                  # Gestione Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
                               btn.click()
-                              time.sleep(5)
                       except Exception:
                           pass
+                      
+                  # Movimento di interazione di base
+                  try:
+                      for _ in range(3):
+                          page.mouse.wheel(0, random.randint(300, 600))
+                          time.sleep(random.uniform(0.8, 1.5))
+                  except Exception:
+                      pass
+
+                  if "creepjs" in url:
+                      time.sleep(12) 
+                  elif "pixelscan" in url:
+                      time.sleep(8)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
