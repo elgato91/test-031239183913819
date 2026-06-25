@@ -43,7 +43,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 2))
+              DELAY=$((5 + RANDOM % 4))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -60,7 +60,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((4 + RANDOM % 2))
+            DELAY=$((5 + RANDOM % 4))
             echo "Attesa preventiva di $DELAY secondi prima di richiedere l'IP..."
             sleep $DELAY
 
@@ -175,6 +175,8 @@ jobs:
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
               "--fingerprint-storage-quota=5000",   # Alzato a 5000 per mitigare i controlli incognito
+              "--fingerprint-noise=false",          # Previene l'identificazione euristica basata sul rumore
+              "--fingerprint-windows-font-metrics"  # Allinea i parametri dei font su ambienti Linux
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
