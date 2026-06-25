@@ -1,8 +1,6 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
-
-on: 
+on:
   workflow_dispatch:
-
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
@@ -12,7 +10,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Font di Sistema
+      - name: Installazione Font di Sitema
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -26,11 +24,12 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (IPv6)
+      - name: Setup 10 WARProxy Docker Containers (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          for i in {1..6}; do
+          NUM_NODES=10
+          for i in $(seq 1 $NUM_NODES); do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
@@ -40,25 +39,27 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            if [ $i -lt 6 ]; then
-              echo "Attesa scaglionamento..."
-              sleep 4
+            if [ $i -lt $NUM_NODES ]; then
+              echo "Attesa scaglionamento per il prossimo nodo..."
+              sleep 3
             fi
           done
 
-          echo "Attesa finale inizializzazione tunnel..."
-          sleep 8
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
 
-      - name: Verifica IP IPv6 con Auto-healing (6 Nodi)
+      - name: Verifica IP IPv6 con Auto-healing
         run: |
-          for i in {1..6}; do
+          NUM_NODES=10
+          for i in $(seq 1 $NUM_NODES); do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
             SUCCESS=false
             for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5..."
+              echo "Tentativo $tentativo/5 per container $i..."
+              
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
@@ -66,14 +67,14 @@ jobs:
                 SUCCESS=true
                 break
               else
-                echo "Riavvio container warproxy-$i..."
+                echo "Container $i non risponde o bloccato. Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 8
+                sleep 5
               fi
             done
             
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE: Nodo $i fallito."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               docker logs warproxy-$i || true
               exit 1
             fi
@@ -132,11 +133,11 @@ jobs:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
+          num_nodes = int(sys.argv[2]) if len(sys.argv) > 2 else 10
           ACTIVE_PORT = 40000 + node_id
 
-          # Suddivisione dinamica delle URL su 6 nodi paralleli (circa 4 URL ciascuno)
-          chunk_size = (len(TARGETS) + 5) // 6
-          MY_TARGETS = TARGETS[(node_id-1)*chunk_size : node_id*chunk_size]
+          # Distribuzione dinamica dei target in modalità Round-Robin
+          MY_TARGETS = [TARGETS[i] for i in range(len(TARGETS)) if i % num_nodes == (node_id - 1)]
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -156,19 +157,18 @@ jobs:
                   pass
               return default
 
-          stable_seed = str(123450 + node_id)
+          random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
-              f"--fingerprint={stable_seed}",
+              f"--fingerprint={random_seed}",
               "--fingerprint-storage-quota=5000",
-              "--fingerprint-windows-font-metrics",
-              "--fingerprint-noise=false"
+              "--fingerprint-windows-font-metrics"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {stable_seed})", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
 
           context = launch_persistent_context(
               user_data_dir=profile_dir,
@@ -183,10 +183,6 @@ jobs:
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
-              # Bypass nativo di Facebook www -> mobile touch
-              if "facebook.com/groups" in url:
-                  url = url.replace("www.facebook.com", "m.facebook.com")
-
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               print(f"[NODO {node_id}] -> {url}", flush=True)
               try:
@@ -216,39 +212,10 @@ jobs:
                   
                   time.sleep(6)
 
-                  # Rimozione popup login su Facebook Mobile Touch
-                  if "m.facebook.com" in url:
-                      try:
-                          page.evaluate("""() => {
-                              const targets = ['#header', '#footer', '[role="dialog"]', 'div[class*="login"]'];
-                              targets.forEach(sel => {
-                                  document.querySelectorAll(sel).forEach(el => el.remove());
-                              });
-                              document.body.style.setProperty('overflow', 'auto', 'important');
-                              document.documentElement.style.setProperty('overflow', 'auto', 'important');
-                          }""")
-                      except Exception: pass
-
-                  # Rimozione barriera AdBlock su Canadian Insider (Risolve la sovrascrittura di visualizzazione)
-                  if "canadianinsider.com" in url:
-                      try:
-                          page.evaluate("""() => {
-                              const bad = ['modal', 'overlay', 'adblock', 'blocking'];
-                              document.querySelectorAll('*').forEach(el => {
-                                  if (badClasses.some(cls => el.className && typeof el.className === 'string' && el.className.toLowerCase().includes(cls)) || 
-                                      badClasses.some(id => el.id && typeof el.id === 'string' && el.id.toLowerCase().includes(id))) {
-                                      el.remove();
-                                  }
-                              });
-                              document.body.style.setProperty('overflow', 'auto', 'important');
-                              document.documentElement.style.setProperty('overflow', 'auto', 'important');
-                          }""")
-                      except Exception: pass
-
-                  # Risolutore Google CAPTCHA
                   if "google.com/search" in url:
                       try:
                           if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
+                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
@@ -256,7 +223,6 @@ jobs:
                                   time.sleep(6) 
                       except Exception: pass
 
-                  # Risoluzione Cookie generica
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
@@ -274,7 +240,6 @@ jobs:
                                   break
                       except Exception: pass
 
-                  # Trigger Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
@@ -310,32 +275,31 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo
         run: |
-          echo "Avvio processi paralleli (6 Nodi)..."
-          python -u m2_insocket.py 1 > node1.log 2>&1 &
-          python -u m2_insocket.py 2 > node2.log 2>&1 &
-          python -u m2_insocket.py 3 > node3.log 2>&1 &
-          python -u m2_insocket.py 4 > node4.log 2>&1 &
-          python -u m2_insocket.py 5 > node5.log 2>&1 &
-          python -u m2_insocket.py 6 > node6.log 2>&1 &
+          NUM_NODES=10
+          echo "Avvio di $NUM_NODES processi paralleli..."
           
+          # Esecuzione in background dei 10 nodi
+          for i in $(seq 1 $NUM_NODES); do
+            python -u m2_insocket.py $i $NUM_NODES > node$i.log 2>&1 &
+          done
+          
+          # Attende il completamento di tutti i processi in background
           wait
 
-          echo "=== LOG NODO 1 ==="
-          cat node1.log || true
-          echo "=== LOG NODO 2 ==="
-          cat node2.log || true
-          echo "=== LOG NODO 3 ==="
-          cat node3.log || true
-          echo "=== LOG NODO 4 ==="
-          cat node4.log || true
-          echo "=== LOG NODO 5 ==="
-          cat node5.log || true
-          echo "=== LOG NODO 6 ==="
-          cat node6.log || true
+          # Visualizzazione sequenziale dei log di ciascun nodo
+          for i in $(seq 1 $NUM_NODES); do
+            echo "=== LOG NODO $i ==="
+            cat node$i.log || true
+          done
           echo "=================="
 
-          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
-          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
+          # Previene errori di concatenazione in caso di fallimento di uno dei nodi
+          for i in $(seq 1 $NUM_NODES); do
+            touch output_node_$i.txt
+          done
+
+          # Unione di tutti i risultati estratti
+          cat output_node_*.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
