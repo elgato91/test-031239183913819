@@ -8,6 +8,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          fc-cache -f -v
+
       - name: Installazione Dipendenze Scraper
         run: |
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
@@ -29,7 +38,7 @@ jobs:
 
             if [ $i -lt 6 ]; then
               DELAY=$((3 + RANDOM % 2))
-              echo "Attesa scaglionata di $DELAY secondi per il prowessimo container..."
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
           done
@@ -44,7 +53,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((2 + RANDOM % 2))
+            DELAY=$((3 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
@@ -91,6 +100,13 @@ jobs:
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -98,7 +114,6 @@ jobs:
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
-              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://katieparla.com/budget-dining-in-rome-revised/",
               "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
@@ -106,7 +121,6 @@ jobs:
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
@@ -140,26 +154,20 @@ jobs:
                   pass
               return default
 
-          # Generazione seed randomico originale vostro
-          random_seed = str(random.randint(100000, 999999))
-
-          # Vostra configurazione originale infallibile che inibisce il DNS leak locale su WARP
+          # Argomenti minimi indispensabili per evitare problemi in GHA
           extra_args = [
               "--no-sandbox",
-              "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
-              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" 
+              "--disable-dev-shm-usage"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard su porta {ACTIVE_PORT}", flush=True)
 
-          # Launch standard con locale e fuso orario italiani espliciti per aggirare
-          # i geoblocchi e la localizzazione americana di Bing ("COSA") e russa di Google.
+          # Inizializziamo il contesto usando le funzionalità native di CloakBrowser
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              geoip=True,
+              geoip=True, # Gestisce autonomamente WebRTC, fuso orario e lingua in base all'IP WARP
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
@@ -168,20 +176,18 @@ jobs:
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[NODO {node_id}] -> {url}", flush=True)
+              print(f"[NODO {node_id}] Navigazione verso -> {url}", flush=True)
               page = None
               
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # ==========================================
-                  # FUNZIONI SPECIFICHE DI NAVIGAZIONE E DIGITAZIONE (Vostre originali)
-                  # ==========================================
+                  # Navigazioni con inserimento query umanizzato
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.locator("input#q").fill(query_to_search)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
@@ -190,48 +196,33 @@ jobs:
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.locator("input[name=q]").fill(query_to_search)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
                           
                   else:
-                      # Navigazione dritta originale per tutti gli altri siti
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
-                  # Attesa assestamento originale
-                  time.sleep(6)
+                  # Attesa standard non intrusiva (evita page.wait_for_timeout)
+                  time.sleep(8)
 
-                  # ==========================================
-                  # ATTESA ASSICURATA PER AUTO-RESOLVE CLOUDFLARE (Turnstile)
-                  # ==========================================
+                  # Gestione passiva per l'auto-risoluzione di Cloudflare Turnstile
                   content_preview = page.content()
                   if "Just a moment" in content_preview or "security verification" in content_preview:
                       print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
                       time.sleep(12)
 
-                  # ==========================================
-                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
-                  # ==========================================
-                  if "google.com/search" in url:
+                  # Interazione nativa per il trigger di Pixelscan
+                  if "pixelscan.net" in url:
                       try:
-                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
-                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
-                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
-                              if checkbox.is_visible(timeout=3000):
-                                  checkbox.click()
-                                  time.sleep(6) 
+                          btn = page.locator("text=Scan My Browser Now").first
+                          if btn.is_visible(timeout=3000):
+                              btn.click()
+                              time.sleep(5)
                       except Exception:
                           pass
-            
-
-                  # Tempistiche finali diagnostici originali
-                  if "creepjs" in url:
-                      time.sleep(12) 
-                  elif "pixelscan" in url:
-                      time.sleep(8)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
