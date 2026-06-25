@@ -1,10 +1,13 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+
 on:
   workflow_dispatch:
+
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
     steps:
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -24,17 +27,14 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup e Verifica 10 WARProxy Docker Containers (con auto-healing e anti-rate-limit)
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
-          NUM_NODES=10
 
-          for i in $(seq 1 $NUM_NODES); do
+          # Avvio dei 6 container uno alla volta con delay scaglionato casuale (5-8 secondi)
+          for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "=================================================="
-            echo "AVVIO E ABILITAZIONE NODO $i (PORTA $PORT)..."
-            echo "=================================================="
-
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
@@ -42,43 +42,54 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
+            if [ $i -lt 6 ]; then
+              # Delay randomico tra 5 e 8 secondi
+              DELAY=$((5 + RANDOM % 4))
+              echo "Attesa scaglionata di $DELAY secondi prima del prossimo container..."
+              sleep $DELAY
+            fi
+          done
+
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
+
+      - name: Verifica IP IPv6 con Auto-healing
+        run: |
+          # Per ogni container, verifichiamo la connessione con un delay randomico prima di interrogare l'API
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            # Delay randomico tra 5 e 8 secondi per evitare rate limits sull'endpoint dell'IP
+            DELAY=$((5 + RANDOM % 4))
+            echo "Attesa preventiva di $DELAY secondi prima di richiedere l'IP..."
+            sleep $DELAY
+
             SUCCESS=false
             for tentativo in {1..5}; do
-              # Aumentiamo progressivamente il tempo di attesa a ogni tentativo per mitigare il rate-limit
-              WAIT_TIME=$((5 + tentativo * 5))
-              echo "  [Nodo $i] Tentativo $tentativo/5: attesa di $WAIT_TIME secondi..."
-              sleep $WAIT_TIME
-
-              # L'operatore '|| true' impedisce l'arresto immediato dello script in caso di curl fallito
-              IP=$(curl -s --max-time 15 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || true)
-
-              if echo "$IP" | grep -q '"ip"'; then
-                echo "  [Nodo $i] Pronto! IP: $IP"
+              echo "Tentativo $tentativo/5 per container $i..."
+              
+              # Proviamo a risolvere l'IP tramite proxy SOCKS5
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
                 SUCCESS=true
                 break
               else
-                echo "  [Nodo $i] Non risponde o bloccato da Cloudflare 429 (Risposta: $IP)."
-                echo "  Riavvio del container per forzare una nuova registrazione..."
+                echo "Container $i non risponde o bloccato. Riavvio in corso..."
                 docker restart warproxy-$i
+                sleep 8  # Tempo al tunnel Wireguard di ricollegarsi dopo il riavvio
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non si è registrato correttamente dopo 5 tentativi."
-              echo "Visualizzazione log del container fallito per diagnostica:"
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               docker logs warproxy-$i || true
               exit 1
             fi
-
-            # Pausa di scaglionamento tra le registrazioni di diversi nodi per non congestionare le API
-            if [ $i -lt $NUM_NODES ]; then
-              echo "Nodo $i pronto. Attesa precauzionale di 12 secondi prima del prossimo nodo..."
-              sleep 12
-            fi
           done
-
-          echo "=================================================="
-          echo "TUTTI I 10 NODI SONO OPERATIVI E CONFIGURATI CON SUCCESSO!"
           echo "=================================================="
           docker ps -a
 
@@ -97,6 +108,7 @@ jobs:
           import time
           import sys
           import random
+          import math
           from cloakbrowser import launch_persistent_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -129,16 +141,16 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          if len(sys.argv) < 3:
-              print("Uso corretto: python m2_insocket.py <node_id> <num_nodes>")
+          if len(sys.argv) < 2:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          num_nodes = int(sys.argv[2])
           ACTIVE_PORT = 40000 + node_id
 
-          # Distribuzione dinamica dei target basata sul numero totale di nodi (Round-Robin)
-          MY_TARGETS = [TARGETS[i] for i in range(len(TARGETS)) if i % num_nodes == (node_id - 1)]
+          # Suddivisione dinamica bilanciata su 6 nodi
+          num_nodes = 6
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -161,11 +173,13 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
+          # Configurazione Standard e Ottimizzata secondo specifiche di CloakBrowser
           extra_args = [
-              "--no-sandbox", 
+              "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--fingerprint-storage-quota=5000",
+              "--fingerprint-storage-quota=500",    # Raccomandato a 500 per eludere il rilevamento incognito/nodriver
+              "--fingerprint-noise=false",           # Disattivato per evitare il blocco euristico anti-tampering
               "--fingerprint-windows-font-metrics"
           ]
 
@@ -189,7 +203,10 @@ jobs:
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
-                  
+
+                  # ==========================================
+                  # WORKAROUND MOTORI DI RICERCA MINORI
+                  # ==========================================
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
@@ -209,10 +226,15 @@ jobs:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
                           
                   else:
+                      # Navigazione diretta passiva
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
+                  # Pausa per fare valutare gli script di rete e i cookie
                   time.sleep(6)
 
+                  # ==========================================
+                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
+                  # ==========================================
                   if "google.com/search" in url:
                       try:
                           if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
@@ -220,14 +242,18 @@ jobs:
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
-                                  checkbox.click()
+                                  checkbox.click() # Sblocco facilitato grazie alle patch integrate di CloakBrowser
                                   time.sleep(6) 
-                      except Exception: pass
+                      except Exception:
+                          pass
 
+                  # ==========================================
+                  # RIMOZIONE MURI DI COOKIE (CN TRAVELER)
+                  # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
-                              "button#onetrust-accept-btn-handler",
+                              "button#onetrust-accept-btn-handler", # Specifico OneTrust
                               "button:has-text('Accetta tutto')", 
                               "button:has-text('Accept all')",
                               "button:has-text('Accept All')",
@@ -239,24 +265,33 @@ jobs:
                               if btn.is_visible(timeout=1000):
                                   btn.click() 
                                   break
-                      except Exception: pass
+                      except Exception:
+                          pass
 
+                  # Trigger esplicito per Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
                               btn.click()
-                      except Exception: pass
+                      except Exception:
+                          pass
                       
+                  # Scroll umano simulato (Lazy Loading)
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
                           time.sleep(random.uniform(0.8, 1.5))
-                  except Exception: pass
+                  except Exception:
+                      pass
 
-                  if "creepjs" in url: time.sleep(12) 
-                  elif "pixelscan" in url: time.sleep(8)
-                  elif "reddit" in url: time.sleep(5)
+                  # Tempistiche finali di calcolo per i siti più pesanti
+                  if "creepjs" in url:
+                      time.sleep(12) 
+                  elif "pixelscan" in url:
+                      time.sleep(8)
+                  elif "reddit" in url:
+                      time.sleep(5)
 
                   raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
@@ -265,8 +300,10 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try: page.close()
-                  except Exception: pass
+                  try:
+                      page.close()
+                  except Exception:
+                      pass
 
           context.close()
 
@@ -274,33 +311,28 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo
+      - name: Esecuzione Scraping Parallelo (6 Nodi)
         run: |
-          NUM_NODES=10
-          echo "Avvio di $NUM_NODES processi paralleli..."
-          
-          for i in $(seq 1 $NUM_NODES); do
-            python -u m2_insocket.py $i $NUM_NODES > node$i.log 2>&1 &
-          done
-          
+          echo "Avvio processi paralleli su 6 nodi..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          python -u m2_insocket.py 4 > node4.log 2>&1 &
+          python -u m2_insocket.py 5 > node5.log 2>&1 &
+          python -u m2_insocket.py 6 > node6.log 2>&1 &
+
           wait
 
-          for i in $(seq 1 $NUM_NODES); do
-            echo "=== LOG NODO $i ==="
-            cat node$i.log || true
-          done
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
           echo "=================="
 
-          # Crea i file se mancanti per prevenire errori in fase di cat
-          for i in $(seq 1 $NUM_NODES); do
-            touch output_node_$i.txt
-          done
-
-          # Combina i file ordinandoli sequenzialmente dal nodo 1 al nodo 10
-          rm -f output_macchina2_cdp.txt
-          for i in $(seq 1 $NUM_NODES); do
-            cat output_node_$i.txt >> output_macchina2_cdp.txt
-          done
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
