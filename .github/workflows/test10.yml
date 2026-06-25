@@ -14,9 +14,10 @@ jobs:
 
       - name: Sincronizza Orologio di Sistema (NTP)
         run: |
+          # Installiamo esplicitamente ntpdate per evitare l'errore "command not found"
+          sudo apt-get update && sudo apt-get install -y ntpdate || true
           sudo systemctl stop systemd-timesyncd.service || true
-          sudo sntp -sS pool.ntp.org || sudo ntpdate -s pool.ntp.org || true
-          sudo systemctl start systemd-timesyncd.service || true
+          sudo ntpdate -s pool.ntp.org || true
 
       - name: Installazione Font di Sistema
         run: |
@@ -36,7 +37,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avviamo i container uno alla volta con un delay strutturato per evitare rate-limit
+          # Avviamo i container uno alla volta con un delay strutturato per evitare rate-limit su Cloudflare
           for i in 1 2 3; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -56,48 +57,39 @@ jobs:
           echo "Attesa finale inizializzazione dei tunnel..."
           sleep 10
 
-      - name: Verifica IP IPv6 con Auto-healing e Salvataggio IP
+      - name: Verifica IP IPv6 con Auto-healing
         run: |
-          # Per ogni container, verifichiamo la connessione, estraiamo l'IPv6 e lo salviamo per Python
-          IP_1=""
-          IP_2=""
-          IP_3=""
+          # Per ogni container, verifichiamo la connessione. Se fallisce, riavviamo e riproviamo.
           for i in 1 2 3; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
             SUCCESS=false
             for tentativo in {1..5}; do
               echo "Tentativo $tentativo/5 per container $i..."
               
-              IP_JSON=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              # Proviamo a risolvere l'IP
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
-              if [ $? -eq 0 ] && [ ! -z "$IP_JSON" ]; then
-                # Estraiamo l'IP pulito dal JSON
-                IP=$(echo "$IP_JSON" | grep -oE '"ip":"[^"]+"' | cut -d'"' -f4)
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
                 echo "Container $i pronto! IP: $IP"
-                eval "IP_$i=\$IP"
                 SUCCESS=true
                 break
               else
                 echo "Container $i non risponde o bloccato. Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 8
+                sleep 8  # Diamo tempo al tunnel Wireguard di ricollegarsi dopo il riavvio
               fi
             done
             
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 tentativi."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               docker logs warproxy-$i || true
               exit 1
             fi
           done
           echo "=================================================="
-          # Salviamo gli IP reali in file locali leggibili da Python
-          echo "$IP_1" > ip_node_1.txt
-          echo "$IP_2" > ip_node_2.txt
-          echo "$IP_3" > ip_node_3.txt
           docker ps -a
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -119,6 +111,7 @@ jobs:
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
+          # Utilizziamo spazi letterali negli URL: Playwright li codificherà in modo nativo e corretto per ciascun motore di ricerca
           TARGETS = [
               "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
@@ -127,8 +120,8 @@ jobs:
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.google.com/search?q=cosa vedere roma",
+              "https://www.bing.com/search?q=cosa vedere roma",
               "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
@@ -139,11 +132,11 @@ jobs:
               "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
               "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.google.com/search?q=migliore carbonara roma",
+              "https://html.duckduckgo.com/html/?q=migliore carbonara roma",
+              "https://www.bing.com/search?q=migliore carbonara roma",
+              "https://www.startpage.com/sp/search?query=migliore carbonara roma",
+              "https://search.yahoo.com/search?p=migliore carbonara roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
               "https://www.canadianinsider.com/money-is-moving"
@@ -176,17 +169,10 @@ jobs:
                   pass
               return default
 
-          # Leggiamo l'IPv6 reale assegnato a questo nodo per allinearlo al WebRTC
-          ipv6_exit_ip = None
-          try:
-              with open(f"ip_node_{node_id}.txt", "r") as f:
-                  ipv6_exit_ip = f.read().strip()
-          except Exception:
-              pass
-
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
+          # Configurazione Standard e Pulita originale (Garantisce un trust score ottimale)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -194,11 +180,6 @@ jobs:
               "--fingerprint-storage-quota=5000",
               "--fingerprint-windows-font-metrics"
           ]
-
-          # Se abbiamo l'IPv6 esatto del proxy, forziamo il WebRTC a usarlo eliminando ogni incoerenza
-          if ipv6_exit_ip:
-              print(f"[NODO {node_id}] Spoofing WebRTC IP con IPv6 reale: {ipv6_exit_ip}", flush=True)
-              extra_args.append(f"--fingerprint-webrtc-ip={ipv6_exit_ip}")
 
           print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
 
@@ -259,7 +240,7 @@ jobs:
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
-                                  checkbox.click() # Clicca e passa da solo grazie al punteggio 0.9 di CloakBrowser
+                                  checkbox.click() # Clicca e sblocca istantaneamente grazie a CloakBrowser
                                   time.sleep(6) 
                       except Exception: pass
 
