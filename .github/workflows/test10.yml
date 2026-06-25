@@ -37,7 +37,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$(3 + RANDOM % 2))
+              DELAY=$((5 + RANDOM % 4))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -53,7 +53,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((3 + RANDOM % 2))
+            DELAY=$((5 + RANDOM % 4))
             sleep $DELAY
 
             SUCCESS=false
@@ -121,7 +121,7 @@ jobs:
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.getyourguide.com/it-it/musei-vaticani-l2738/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
