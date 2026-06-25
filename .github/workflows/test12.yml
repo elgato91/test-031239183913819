@@ -235,47 +235,7 @@ jobs:
                                   time.sleep(6) 
                       except Exception:
                           pass
-
-                  # ==========================================
-                  # RIMOZIONE MURI DI COOKIE GENERICI / YELP (onetrust-accept-btn-handler)
-                  # ==========================================
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
-                      try:
-                          consent_selectors = [
-                              "button#onetrust-accept-btn-handler",
-                              "button:has-text('Accetta tutto')", 
-                              "button:has-text('Accept all')",
-                              "button:has-text('Consenti')", 
-                              "button:has-text('I agree')"
-                          ]
-                          for selector in consent_selectors:
-                              btn = page.locator(selector).first
-                              if btn.is_visible(timeout=1000):
-                                  btn.click() 
-                                  break
-                      except Exception:
-                          pass
-
-                  # ==========================================
-                  # TRIGGER ESPLICITO PIXELSCAN (Vostro originale)
-                  # ==========================================
-                  if "pixelscan.net" in url:
-                      try:
-                          btn = page.locator("text=Scan My Browser Now").first
-                          if btn.is_visible(timeout=3000):
-                              btn.click()
-                      except Exception:
-                          pass
-                      
-                  # ==========================================
-                  # SCROLL UMANO SIMULATO (Vostro originale)
-                  # ==========================================
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, random.randint(300, 600))
-                          time.sleep(random.uniform(0.8, 1.5))
-                  except Exception:
-                      pass
+            
 
                   # Tempistiche finali diagnostici originali
                   if "creepjs" in url:
