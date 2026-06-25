@@ -170,8 +170,8 @@ jobs:
               f"--fingerprint={stable_seed}",
               "--fingerprint-storage-quota=5000",       
               "--fingerprint-windows-font-metrics",      
-              "--fingerprint-noise=false",
-              "--disable-http2"                          # Forza l'utilizzo di HTTP/1.1 per ingannare i controlli TLS asimmetrici
+              "--fingerprint-noise=false"
+              # NOTA: Rimosso --disable-http2 per mantenere la corretta negoziazione ALPN/HTTP2 nativa di Chrome 146
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Stable Seed: {stable_seed})", flush=True)
@@ -190,13 +190,6 @@ jobs:
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
-              # ======================================================================
-              # BYPASS NATIVO LOGIN FACEBOOK (PUNTO 4): Deviazione su mbasic.facebook.com
-              # ======================================================================
-              if "facebook.com/groups" in url:
-                  print(f"[NODO {node_id}] Rilevato URL Facebook. Reindirizzamento su mbasic per saltare il login obbligatorio...", flush=True)
-                  url = url.replace("www.facebook.com", "mbasic.facebook.com").replace("facebook.com", "mbasic.facebook.com")
-
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               print(f"[NODO {node_id}] -> {url}", flush=True)
               try:
@@ -238,6 +231,42 @@ jobs:
                   
                   # Pausa per fare valutare gli script di rete e i cookie
                   time.sleep(6)
+
+                  # ======================================================================
+                  # BYPASS POPUP DI LOGIN DI FACEBOOK (PUNTO 4): JS DOM Injection
+                  # ======================================================================
+                  if "facebook.com/groups" in url:
+                      try:
+                          print(f"[NODO {node_id}] Pagina di gruppo Facebook caricata. Rimozione del muro di login...", flush=True)
+                          time.sleep(3) # Diamo tempo al popup di rendering di attivarsi
+                          page.evaluate("""() => {
+                              // Selezioniamo il dialog di login e gli elementi oscuranti correlati
+                              const dialogSelectors = [
+                                  'div[role="dialog"]', 
+                                  'div[id*="login"]', 
+                                  'div[class*="login"]',
+                                  '.generic_dialog',
+                                  '#login_popup'
+                              ];
+                              dialogSelectors.forEach(sel => {
+                                  document.querySelectorAll(sel).forEach(el => el.remove());
+                              });
+                              // Rimuove eventuali fogli grigi o backdrop di blocco
+                              document.querySelectorAll('div').forEach(el => {
+                                  const style = window.getComputedStyle(el);
+                                  if (style.position === 'fixed' && (parseInt(style.zIndex) > 10 || style.backgroundColor.includes('rgba'))) {
+                                      if (!el.querySelector('article') && !el.querySelector('[role="feed"]')) {
+                                          el.remove();
+                                      }
+                                  }
+                              });
+                              // Sblocca lo scrolling
+                              document.body.style.setProperty('overflow', 'auto', 'important');
+                              document.documentElement.style.setProperty('overflow', 'auto', 'important');
+                          }""")
+                          print(f"[NODO {node_id}] Muro di login Facebook eliminato con successo. Scrolling ripristinato.", flush=True)
+                      except Exception as fb_err:
+                          print(f"[NODO {node_id}] Errore durante il bypass Facebook: {fb_err}", flush=True)
 
                   # ==========================================
                   # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
