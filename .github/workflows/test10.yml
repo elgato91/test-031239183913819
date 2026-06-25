@@ -31,7 +31,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avvio dei 6 container con delay randomico (5-8 secondi)
+          # Avvio dei 6 container con delay scaglionato casuale (5-8 secondi)
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -44,7 +44,7 @@ jobs:
 
             if [ $i -lt 6 ]; then
               DELAY=$((3 + RANDOM % 2))
-              echo "Attesa scaglionata di $DELAY secondi prima del prossimo container..."
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
           done
@@ -52,9 +52,9 @@ jobs:
           echo "Attesa finale inizializzazione dei tunnel..."
           sleep 10
 
-      - name: Verifica IP IPv6 con Auto-healing e DNS Remoto (socks5h)
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
         run: |
-          # Utilizzo di socks5h per delegare la risoluzione DNS interamente al proxy
+          # Utilizzo di socks5h per delegare la risoluzione DNS al proxy ed evitare perdite locali
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
@@ -68,7 +68,6 @@ jobs:
             for tentativo in {1..5}; do
               echo "Tentativo $tentativo/5 per container $i..."
               
-              # curl utilizza socks5h per prevenire DNS leaks locali nel runner
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
@@ -76,14 +75,14 @@ jobs:
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde. Tentativo di riavvio per ottenere un nuovo IP..."
+                echo "Container $i non risponde o bloccato. Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 10
+                sleep 8
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 tentativi."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               docker logs warproxy-$i || true
               exit 1
             fi
@@ -145,7 +144,7 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          # Suddivisione dinamica su 6 nodi
+          # Suddivisione dinamica dei target su 6 nodi
           num_nodes = 6
           slice_size = math.ceil(len(TARGETS) / num_nodes)
           MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
@@ -170,21 +169,26 @@ jobs:
 
           random_seed = str(random.randint(100000, 999999))
 
-          # Rimossi argomenti ridondanti e non supportati.
-          # Lasciata la gestione nativa dell'identità coerente basata su seed.
+          # Definizione della stringa proxy SOCKS5h
+          ACTIVE_PROXY = f"socks5h://127.0.0.1:{ACTIVE_PORT}"
+
+          # Traduzione dello schema per Playwright ed inserimento delle regole di isolamento host
+          playwright_proxy = ACTIVE_PROXY.replace("socks5h://", "socks5://")
+
+          # Istruiamo Chromium ad inibire la risoluzione DNS locale (comportamento SOCKS5h)
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--fingerprint-storage-quota=5000"
+              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
           context = launch_context(
               headless=False,
               humanize=True,
-              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              proxy=playwright_proxy,
               geoip=True,
               viewport={"width": 1920, "height": 950},
               args=extra_args
@@ -199,9 +203,7 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # ==========================================
-                  # WORKAROUND MOTORI DI RICERCA MINORI
-                  # ==========================================
+                  # Navigazione lineare originale
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
@@ -241,7 +243,7 @@ jobs:
                           pass
 
                   # ==========================================
-                  # RIMOZIONE MURI DI COOKIE (CN TRAVELER)
+                  # RIMOZIONE MURI DI COOKIE GENERI
                   # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
