@@ -168,8 +168,7 @@ jobs:
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-              human_preset="careful"
-              geoip=True
+              geoip=True,
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
