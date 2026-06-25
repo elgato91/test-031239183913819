@@ -31,7 +31,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avviamo i 6 container con un delay randomico di 5-8 secondi l'uno dall'altro
+          # Avvio dei 6 container con delay randomico (5-8 secondi)
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -43,8 +43,8 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((2 + RANDOM % 2))
-              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              DELAY=$((5 + RANDOM % 4))
+              echo "Attesa scaglionata di $DELAY secondi prima del prossimo container..."
               sleep $DELAY
             fi
           done
@@ -52,15 +52,15 @@ jobs:
           echo "Attesa finale inizializzazione dei tunnel..."
           sleep 10
 
-      - name: Verifica IP IPv6 con Auto-healing
+      - name: Verifica IP IPv6 con Auto-healing e DNS Remoto (socks5h)
         run: |
-          # Ogni richiesta di verifica dell'IP viene effettuata con un ritardo casuale di 5-8 secondi
+          # Utilizzo di socks5h per delegare la risoluzione DNS interamente al proxy
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((2 + RANDOM % 2))
+            DELAY=$((5 + RANDOM % 4))
             echo "Attesa preventiva di $DELAY secondi prima di richiedere l'IP..."
             sleep $DELAY
 
@@ -68,6 +68,7 @@ jobs:
             for tentativo in {1..5}; do
               echo "Tentativo $tentativo/5 per container $i..."
               
+              # curl utilizza socks5h per prevenire DNS leaks locali nel runner
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
@@ -75,14 +76,14 @@ jobs:
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
+                echo "Container $i non risponde. Tentativo di riavvio per ottenere un nuovo IP..."
                 docker restart warproxy-$i
-                sleep 8
+                sleep 10
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 tentativi."
               docker logs warproxy-$i || true
               exit 1
             fi
@@ -169,17 +170,17 @@ jobs:
 
           random_seed = str(random.randint(100000, 999999))
 
-          # Parametri ottimizzati secondo le specifiche di CloakBrowser
+          # Rimossi argomenti ridondanti e non supportati.
+          # Lasciata la gestione nativa dell'identità coerente basata su seed.
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--fingerprint-storage-quota=5000",   # Impostato a 5000 per mitigare i controlli incognito
+              "--fingerprint-storage-quota=5000"
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
 
-          # launch_context evita i requisiti Widevine della modalità persistente
           context = launch_context(
               headless=False,
               humanize=True,
