@@ -1,228 +1,305 @@
-import time
-import sys
-import random
-import math
-from cloakbrowser import launch_context
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-TARGETS = [
-    "https://tls.browserleaks.com/json",
-    "https://bot.sannysoft.com/",
-    "https://abrahamjuliot.github.io/creepjs/",
-    "https://pixelscan.net/",
-    "https://bot.incolumitas.com/",
-    "https://www.deviceinfo.me/",
-    "https://www.google.com/search?q=cosa+vedere+roma",
-    "https://www.bing.com/search?q=cosa+vedere+roma",
-    "https://www.bloomberg.com/markets/stocks",
-    "https://www.morningstar.com/stocks/xnas/aapl/quote",
-    "https://finance.yahoo.com/quote/AAPL/key-statistics",
-    "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-    "https://www.passportindex.org/passport/italy/",
-    "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
-    "https://katieparla.com/budget-dining-in-rome-revised/",
-    "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-    "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-    "https://www.bing.com/search?q=migliore+carbonara+roma",
-    "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-    "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-    "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-    "https://www.facebook.com/groups/expatsinparaguay/",
-    "https://www.canadianinsider.com/money-is-moving"
-]
+on:
+  workflow_dispatch:
 
-DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+jobs:
+  machine2_cdp_insocket:
+    runs-on: ubuntu-latest
+    steps:
 
-if len(sys.argv) < 2:
-    print("Manca ID nodo.")
-    sys.exit(1)
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          fc-cache -f -v
 
-node_id = int(sys.argv[1])
-ACTIVE_PORT = 40000 + node_id
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
 
-num_nodes = 6
-slice_size = math.ceil(len(TARGETS) / num_nodes)
-MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-def extract_text(html_content, url):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    text = soup.get_text(separator=' ', strip=True)
-    if any(site in url for site in DIAGNOSTIC_SITES):
-        return text
-    return text[:5000]
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
 
-def get_query_from_url(url, default="migliore carbonara roma"):
-    try:
-        parsed = urlparse(url)
-        queries = parse_qs(parsed.query)
-        for param in ['q', 'query', 'p']:
-            if param in queries:
-                return queries[param][0]
-    except Exception:
-        pass
-    return default
+            if [ $i -lt 6 ]; then
+              DELAY=$((5 + RANDOM % 4))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
+            fi
+          done
 
-print(f"[NODO {node_id}] Avvio Context Perfetto", flush=True)
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
 
-# Il seed fisso garantisce che Google non ci veda come 20 device diversi dallo stesso IP.
-random_seed = str(random.randint(100000, 999999))
-
-# Ripristiniamo la vostra configurazione DNS infallibile + la disattivazione del WebDriver
-extra_args = [
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    f"--fingerprint={random_seed}",
-    "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
-    "--disable-blink-features=AutomationControlled"
-]
-
-try:
-    context = launch_context(
-        headless=False,
-        humanize=True,
-        proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-        geoip=True,
-        viewport={"width": 1920, "height": 950},
-        args=extra_args
-    )
-except Exception as e:
-    print(f"[NODO {node_id}] Fallito avvio browser: {e}", flush=True)
-    sys.exit(1)
-
-results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
-
-for url in MY_TARGETS:
-    results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-    print(f"[NODO {node_id}] -> {url}", flush=True)
-    page = None
-    
-    try:
-        page = context.new_page()
-        
-        # ==========================================
-        # LOGICA MOTORI DI RICERCA: Typing Umano
-        # ==========================================
-        search_engines = ["google.com/search", "bing.com/search", "search.yahoo.com", "startpage.com", "html.duckduckgo.com"]
-        
-        if any(se in url for se in search_engines):
-            query_to_search = get_query_from_url(url)
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+        run: |
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            if "google.com" in url:
-                base_url, sel = "https://www.google.com/", 'textarea[name="q"], input[name="q"]'
-            elif "bing.com" in url:
-                base_url, sel = "https://www.bing.com/", 'input[name="q"]'
-            elif "yahoo.com" in url:
-                base_url, sel = "https://search.yahoo.com/", 'input[name="p"]'
-            elif "startpage.com" in url:
-                base_url, sel = "https://www.startpage.com/", 'input#q'
-            else:
-                base_url, sel = "https://html.duckduckgo.com/", 'input[name="q"]'
-                
-            page.goto(base_url, wait_until="domcontentloaded", timeout=40000)
-            
-            # Accetta il muro dei cookie su Google/Bing se si presenta
-            try:
-                consent = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                if consent.is_visible(timeout=3000):
-                    consent.click()
-                    time.sleep(2)
-            except Exception:
-                pass
-                
-            try:
-                # humanize=True applicherà ritardi realistici nella digitazione
-                page.locator(sel).first.type(query_to_search, delay=random.randint(60, 150))
-                page.keyboard.press("Enter")
-                page.wait_for_load_state("domcontentloaded", timeout=20000)
-            except Exception:
-                # Fallback di sicurezza se la casella di ricerca non viene trovata
-                page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                
-            time.sleep(random.uniform(4.0, 7.0))
-            
-        else:
-            # Navigazione normale per tutti gli altri siti
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            time.sleep(random.uniform(4.0, 7.0))
+            DELAY=$((5 + RANDOM % 4))
+            sleep $DELAY
 
-        # ==========================================
-        # RISOLUTORE CLOUDFLARE TURNSTILE E GOOGLE CAPTCHA
-        # ==========================================
-        try:
-            if "Just a moment" in page.title() or page.locator("body:has-text('Cloudflare')").is_visible(timeout=2000):
-                time.sleep(random.uniform(3.0, 5.0))
-                cf_iframe = page.frame_locator("iframe[src*='cloudflare']")
-                cf_checkbox = cf_iframe.locator("input[type='checkbox'], .cb-c")
-                if cf_checkbox.is_visible(timeout=5000):
-                    cf_checkbox.click()
-                    time.sleep(10)
-        except Exception:
-            pass
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5 per container $i..."
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 8
+              fi
+            done
 
-        if "google.com" in url:
-            try:
-                if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                    time.sleep(8)
-                    recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
-                    checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
-                    if checkbox.is_visible(timeout=3000):
-                        checkbox.click()
-                        time.sleep(8) 
-            except Exception:
-                pass
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              exit 1
+            fi
+          done
+          echo "=================================================="
 
-        # ==========================================
-        # RIMOZIONE MURI DI COOKIE STANDARD
-        # ==========================================
-        if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing", "yahoo"]):
-            try:
-                consent_selectors = [
-                    "button#onetrust-accept-btn-handler",
-                    "button:has-text('Accetta tutto')", 
-                    "button:has-text('Accept all')",
-                    "button:has-text('Consenti')", 
-                    "button:has-text('I agree')"
-                ]
-                for selector in consent_selectors:
-                    btn = page.locator(selector).first
-                    if btn.is_visible(timeout=1000):
-                        btn.click() 
-                        break
-            except Exception:
-                pass
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
 
-        # ==========================================
-        # SCROLL UMANO NATIVO
-        # ==========================================
-        try:
-            page.mouse.move(random.randint(400, 1200), random.randint(200, 700))
-            time.sleep(1)
-            for _ in range(3):
-                page.mouse.wheel(0, random.randint(300, 600))
-                time.sleep(random.uniform(1.5, 3.0))
-        except Exception:
-            pass
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
 
-        # Siti di diagnostica pesanti
-        if any(x in url for x in ["creepjs", "pixelscan", "sannysoft", "incolumitas"]):
-            time.sleep(8)
+      - name: Creazione script Python (Macchina 2)
+        run: |
+          cat << 'EOF' > m2_insocket.py
+          import time
+          import sys
+          import random
+          import math
+          from cloakbrowser import launch_context
+          from bs4 import BeautifulSoup
+          from urllib.parse import urlparse, parse_qs
 
-        raw_html = page.content()
-        results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
 
-    except Exception as e:
-        print(f"[NODO {node_id}] Errore navigazione: {e}", flush=True)
-        results += f"ERRORE GLOBALE: {str(e)}\n"
-        
-    finally:
-        if page:
-            try:
-                page.close()
-            except Exception:
-                pass
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-context.close()
+          if len(sys.argv) < 2:
+              print("Manca ID nodo.")
+              sys.exit(1)
 
-with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
-    f.write(results)
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          num_nodes = 6
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
+
+          def extract_text(html_content, url):
+              soup = BeautifulSoup(html_content, 'html.parser')
+              text = soup.get_text(separator=' ', strip=True)
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return text
+              return text[:5000]
+
+          # Documentazione: "Use a fixed fingerprint seed for consistent device identity across sessions"
+          # Un seed costante per ogni nodo abbassa il punteggio di rischio (non sembri un device nuovo ad ogni richiesta)
+          fixed_seed = str(100000 + (node_id * 11111))
+
+          # Parametri puri e necessari: Sandboxing (obbligatorio Docker), Seed e Isolamento DNS (fondamentale per WARP)
+          extra_args = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={fixed_seed}",
+              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" 
+          ]
+
+          print(f"[NODO {node_id}] Avvio Context Nativo Ufficiale", flush=True)
+
+          try:
+              # Configurazione esatta raccomandata per massima invisibilità
+              context = launch_context(
+                  headless=False,
+                  humanize=True,
+                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+                  geoip=True,
+                  viewport={"width": 1920, "height": 950},
+                  args=extra_args
+              )
+          except Exception as e:
+              print(f"[NODO {node_id}] Fallito avvio browser: {e}", flush=True)
+              sys.exit(1)
+
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          for url in MY_TARGETS:
+              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
+              try:
+                  page = context.new_page()
+                  
+                  # 1. Navigazione diretta - zero workaround
+                  page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                  
+                  # 2. Time sleep nativo puro, zero comandi CDP ("invisible to the browser")
+                  time.sleep(random.uniform(5.0, 7.0))
+
+                  # ==========================================
+                  # 3. RISOLUTORE CLOUDFLARE TURNSTILE E CAPTCHA GOOGLE
+                  # (Azione passiva: controlla solo se la pagina è palesemente un muro e clicca)
+                  # ==========================================
+                  try:
+                      if "Just a moment" in page.title() or page.locator("body:has-text('Cloudflare')").is_visible(timeout=2000):
+                          cf_iframe = page.frame_locator("iframe[src*='cloudflare']")
+                          cf_checkbox = cf_iframe.locator("input[type='checkbox'], .cb-c")
+                          if cf_checkbox.is_visible(timeout=3000):
+                              cf_checkbox.click() # Humanize subentra col mouse
+                              time.sleep(10)
+                  except Exception:
+                      pass
+
+                  if "google.com/search" in url:
+                      try:
+                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=2000):
+                              # "Spend 15+ seconds on the page before triggering reCAPTCHA"
+                              time.sleep(10) 
+                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
+                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
+                              if checkbox.is_visible(timeout=3000):
+                                  checkbox.click()
+                                  time.sleep(8) 
+                      except Exception:
+                          pass
+
+                  # ==========================================
+                  # 4. CHIUSURA MURI DEI COOKIE (Mantiene la UI pulita per l'estrazione testo)
+                  # ==========================================
+                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
+                      try:
+                          consent_selectors = [
+                              "button#onetrust-accept-btn-handler",
+                              "button:has-text('Accetta tutto')", 
+                              "button:has-text('Accept all')",
+                              "button:has-text('Consenti')", 
+                              "button:has-text('I agree')"
+                          ]
+                          for selector in consent_selectors:
+                              btn = page.locator(selector).first
+                              if btn.is_visible(timeout=1000):
+                                  btn.click() 
+                                  break
+                      except Exception:
+                          pass
+
+                  # ==========================================
+                  # 5. SCROLL UMANO ("Accelerate -> cruise -> decelerate micro-steps")
+                  # ==========================================
+                  try:
+                      for _ in range(3):
+                          page.mouse.wheel(0, random.randint(300, 600))
+                          time.sleep(random.uniform(1.0, 2.0))
+                  except Exception:
+                      pass
+
+                  # Tempo aggiuntivo vitale per siti di diagnostica JS-heavy
+                  if any(x in url for x in ["creepjs", "pixelscan", "sannysoft", "incolumitas"]):
+                      time.sleep(8)
+
+                  raw_html = page.content()
+                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore navigazione: {e}", flush=True)
+                  results += f"ERRORE GLOBALE: {str(e)}\n"
+                  
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
+
+          context.close()
+
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
+              f.write(results)
+          EOF
+
+      - name: Esecuzione Scraping Parallelo (6 Nodi)
+        run: |
+          echo "Avvio processi paralleli su 6 nodi..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 4 > node4.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 5 > node5.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 6 > node6.log 2>&1 &
+
+          wait
+
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
+          echo "=================="
+
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
