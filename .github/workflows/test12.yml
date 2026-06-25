@@ -8,15 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Font di Sistema
-        run: |
-          sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          fc-cache -f -v
-
       - name: Installazione Dipendenze Scraper
         run: |
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
@@ -53,7 +44,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((3 + RANDOM % 2))
+            DELAY=$((2 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
