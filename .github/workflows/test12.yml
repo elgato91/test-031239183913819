@@ -239,23 +239,7 @@ jobs:
                       except Exception:
                           pass
 
-                  # BANNER COOKIE
-                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
-                      try:
-                          consent_selectors = [
-                              "button#onetrust-accept-btn-handler",
-                              "button:has-text('Accetta tutto')", 
-                              "button:has-text('Accept all')",
-                              "button:has-text('Consenti')", 
-                              "button:has-text('I agree')"
-                          ]
-                          for selector in consent_selectors:
-                              btn = page.locator(selector).first
-                              if btn.is_visible(timeout=1000):
-                                  btn.click() 
-                                  break
-                      except Exception:
-                          pass
+                
 
                   if "pixelscan.net" in url:
                       try:
