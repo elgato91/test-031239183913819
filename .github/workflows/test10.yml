@@ -37,7 +37,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 4))
+              DELAY=$((3 + RANDOM % 2))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -53,7 +53,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((5 + RANDOM % 4))
+            DELAY=$((3 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
@@ -95,7 +95,7 @@ jobs:
           import sys
           import random
           import math
-          from cloakbrowser import launch_persistent_context
+          from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
@@ -144,24 +144,21 @@ jobs:
                   return text
               return text[:5000]
 
-          # Torna alla vostra generazione originale e sicura del seed
+          # Torniamo al vostro generatore di seed randomico nativo ed efficace
           random_seed = str(random.randint(100000, 999999))
 
-          # Vostra configurazione originale infallibile che inibisce il DNS leak locale
+          # Le vostre regole DNS di inibizione leak locale infallibili (socks5:// delegato a Chromium)
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" 
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Persistente", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
-          # Passiamo a launch_persistent_context per eliminare il rilevamento incognito/storage quota
-          # Questo risolve nativamente i blocchi Turnstile su Katie Parla e Canadian Insider
-          profile_dir = f"./profile_node_{node_id}"
-          context = launch_persistent_context(
-              profile_dir,
+          # Launch standard (incognito) che ha garantito l'estrazione perfetta nei test positivi
+          context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
@@ -180,15 +177,23 @@ jobs:
               try:
                   page = context.new_page()
                   
-                  # Navigazione lineare diretta originale vostra
-                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                  # Navigazione lineare diretta originale (quella che ha sempre estratto Google/Reddit)
+                  page.goto(url, wait_until="domcontentloaded", timeout=45000)
                   
-                  # Tempistiche vostre originali
+                  # Tempo di permanenza vostro originale
                   time.sleep(6)
 
                   # ==========================================
+                  # CLOUDFLARE TURNSTILE REDIRECT (Canadian Insider)
+                  # Se rileva la schermata di verifica di Cloudflare, attende passivamente l'auto-redirect nativo del C++
+                  # ==========================================
+                  content_preview = page.content()
+                  if "Just a moment" in content_preview or "security verification" in content_preview:
+                      print(f"[NODO {node_id}] Turnstile/WAF rilevato. Attesa passiva del redirect...", flush=True)
+                      time.sleep(12) # Tempo ottimale per completare l'handshake automatico di CloakBrowser
+
+                  # ==========================================
                   # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
-                  # (Vostro originale, pulito e immediato senza attese asincrone)
                   # ==========================================
                   if "google.com/search" in url:
                       try:
@@ -203,20 +208,7 @@ jobs:
                           pass
 
                   # ==========================================
-                  # RISOLUTORE CLOUDFLARE TURNSTILE (Semplice e non bloccante)
-                  # ==========================================
-                  try:
-                      if "Just a moment" in page.title() or page.locator("body:has-text('Cloudflare')").is_visible(timeout=2000):
-                          cf_iframe = page.frame_locator("iframe[src*='cloudflare']")
-                          cf_checkbox = cf_iframe.locator("input[type='checkbox'], .cb-c")
-                          if cf_checkbox.is_visible(timeout=3000):
-                              cf_checkbox.click()
-                              time.sleep(10)
-                  except Exception:
-                      pass
-
-                  # ==========================================
-                  # RIMOZIONE MURI DI COOKIE GENERI (Vostra originale)
+                  # RIMOZIONE MURI DI COOKIE GENERICI
                   # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
@@ -236,7 +228,7 @@ jobs:
                           pass
                       
                   # ==========================================
-                  # SCROLL UMANO SIMULATO (Vostro originale, esclude movimenti mouse artificiali)
+                  # SCROLL UMANO SIMULATO (Vostro originale)
                   # ==========================================
                   try:
                       for _ in range(3):
@@ -245,7 +237,7 @@ jobs:
                   except Exception:
                       pass
 
-                  # Tempistiche finali vostre originali
+                  # Tempistiche diagnostiche vostre originali
                   if "creepjs" in url:
                       time.sleep(12) 
                   elif "pixelscan" in url:
