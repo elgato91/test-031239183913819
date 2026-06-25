@@ -37,7 +37,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((3 + RANDOM % 2))
+              DELAY=$((5 + RANDOM % 4))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -53,7 +53,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((3 + RANDOM % 2))
+            DELAY=$((5 + RANDOM % 4))
             sleep $DELAY
 
             SUCCESS=false
@@ -154,16 +154,14 @@ jobs:
                   pass
               return default
 
-          # Generazione seed randomico originale
           random_seed = str(random.randint(100000, 999999))
 
-          # Configurazione originaria con inibizione della risoluzione DNS locale
-          # per prevenire leak di rete ed evitare l'intercettazione dell'AS di GitHub Actions
+          # Spazi rimossi intorno alla virgola per correggere il parsing di Chromium
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" 
+              "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1" 
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
@@ -191,7 +189,8 @@ jobs:
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=300)
+                          # Timeout corretto a 3000ms
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
@@ -200,7 +199,8 @@ jobs:
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=300)
+                          # Timeout corretto a 3000ms
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
@@ -211,13 +211,42 @@ jobs:
                   
                   time.sleep(6)
 
-                  # Monitoraggio stato Cloudflare Turnstile
                   content_preview = page.content()
                   if "Just a moment" in content_preview or "security verification" in content_preview:
                       print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
                       time.sleep(12)
 
-                  # Gestione Pixelscan
+                  # Risoluzione automatica Google CAPTCHA originale
+                  if "google.com/search" in url:
+                      try:
+                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
+                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
+                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
+                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
+                              if checkbox.is_visible(timeout=3000):
+                                  checkbox.click()
+                                  time.sleep(6) 
+                      except Exception:
+                          pass
+
+                  # Rimozione barriere cookie generiche
+                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
+                      try:
+                          consent_selectors = [
+                              "button#onetrust-accept-btn-handler",
+                              "button:has-text('Accetta tutto')", 
+                              "button:has-text('Accept all')",
+                              "button:has-text('Consenti')", 
+                              "button:has-text('I agree')"
+                          ]
+                          for selector in consent_selectors:
+                              btn = page.locator(selector).first
+                              if btn.is_visible(timeout=1000):
+                                  btn.click() 
+                                  break
+                      except Exception:
+                          pass
+
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
@@ -226,7 +255,6 @@ jobs:
                       except Exception:
                           pass
                       
-                  # Movimento di interazione di base
                   try:
                       for _ in range(3):
                           page.mouse.wheel(0, random.randint(300, 600))
