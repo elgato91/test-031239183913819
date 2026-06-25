@@ -1,4 +1,106 @@
-import time
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  machine2_cdp_insocket:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Sincronizza Orologio di Sistema (NTP)
+        run: |
+          sudo apt-get update && sudo apt-get install -y ntpdate || true
+          sudo systemctl stop systemd-timesyncd.service || true
+          sudo ntpdate -s pool.ntp.org || true
+
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          fc-cache -f -v
+
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
+
+      - name: Setup 3 WARProxy Docker Containers (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          for i in 1 2 3; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            
+            if [ $i -lt 3 ]; then
+              echo "Attesa scaglionamento per il prossimo nodo..."
+              sleep 8
+            fi
+          done
+
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
+
+      - name: Verifica IP IPv6 con Auto-healing
+        run: |
+          for i in 1 2 3; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5 per container $i..."
+              
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde o bloccato. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 8
+              fi
+            done
+            
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              docker logs warproxy-$i || true
+              exit 1
+            fi
+          done
+          echo "=================================================="
+          docker ps -a
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (Macchina 2)
+        run: |
+          cat << 'EOF' > m2_insocket.py
+          import time
           import sys
           import random
           from cloakbrowser import launch_persistent_context
@@ -58,6 +160,7 @@ import time
                   pass
               return default
 
+          # Seed fisso per nodo per simulare un "returning visitor" credibile
           stable_seed = str(123450 + node_id)
           profile_dir = f"./profile_node_{node_id}"
 
@@ -67,7 +170,8 @@ import time
               f"--fingerprint={stable_seed}",
               "--fingerprint-storage-quota=5000",       
               "--fingerprint-windows-font-metrics",      
-              "--fingerprint-noise=false"                
+              "--fingerprint-noise=false",
+              "--disable-http2"                          # Forza l'utilizzo di HTTP/1.1 per ingannare i controlli TLS asimmetrici
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard (Stable Seed: {stable_seed})", flush=True)
@@ -86,6 +190,13 @@ import time
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
+              # ======================================================================
+              # BYPASS NATIVO LOGIN FACEBOOK (PUNTO 4): Deviazione su mbasic.facebook.com
+              # ======================================================================
+              if "facebook.com/groups" in url:
+                  print(f"[NODO {node_id}] Rilevato URL Facebook. Reindirizzamento su mbasic per saltare il login obbligatorio...", flush=True)
+                  url = url.replace("www.facebook.com", "mbasic.facebook.com").replace("facebook.com", "mbasic.facebook.com")
+
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               print(f"[NODO {node_id}] -> {url}", flush=True)
               try:
@@ -143,7 +254,29 @@ import time
                       except Exception: pass
 
                   # ==========================================
-                  # RIMOZIONE MURI DI COOKIE E OPT-OUT (CN TRAVELER)
+                  # RISOLUTORE AUTOMATICO CLOUDFLARE TURNSTILE (Reddit / Bloomberg / ecc.)
+                  # ==========================================
+                  try:
+                      turnstile_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
+                      checkbox = turnstile_frame.locator("input[type='checkbox'], #challenge-stage, .mark")
+                      if checkbox.first.is_visible(timeout=2000):
+                          print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Risolvo...", flush=True)
+                          checkbox.first.click()
+                          time.sleep(7)
+                  except Exception: pass
+
+                  # ==========================================
+                  # BYPASS DEL CONSENSO DI YAHOO (Yahoo Finance)
+                  # ==========================================
+                  if "consent.yahoo.com" in page.url:
+                      try:
+                          print(f"[NODO {node_id}] Risoluzione del consenso Yahoo...", flush=True)
+                          page.locator("button[name='agree']").click()
+                          time.sleep(4)
+                      except Exception: pass
+
+                  # ==========================================
+                  # RIMOZIONE MURI DI COOKIE E POPUP DI CONSENSO
                   # ==========================================
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
@@ -166,7 +299,7 @@ import time
                       except Exception: pass
 
                   # ==========================================
-                  # ATTESA YAHOO FINANCE
+                  # GESTIONE SPECIFICA YAHOO FINANCE
                   # ==========================================
                   if "finance.yahoo.com" in url:
                       try:
@@ -195,15 +328,36 @@ import time
                   elif "pixelscan" in url: time.sleep(8)
                   elif "reddit" in url: time.sleep(5)
 
+                  # ======================================================================
+                  # BYPASS OVERLAY ANTI-ADBLOCK (Canadian Insider): Rimozione via JS Injection
+                  # ======================================================================
+                  if "canadianinsider.com" in url:
+                      try:
+                          print(f"[NODO {node_id}] Rimozione dinamica del blocco AdBlock...", flush=True)
+                          page.evaluate("""() => {
+                              const badClasses = ['modal', 'overlay', 'adblock', 'blocking'];
+                              // Rimuove gli elementi di blocco ad alto contrasto
+                              document.querySelectorAll('*').forEach(el => {
+                                  if (badClasses.some(cls => el.className && typeof el.className === 'string' && el.className.toLowerCase().includes(cls)) || 
+                                      badClasses.some(id => el.id && typeof el.id === 'string' && el.id.toLowerCase().includes(id))) {
+                                      el.remove();
+                                  }
+                              });
+                              // Ripristina l'overflow per permettere lo scorrimento del corpo pagina
+                              document.body.style.setProperty('overflow', 'auto', 'important');
+                              document.documentElement.style.setProperty('overflow', 'auto', 'important');
+                          }""")
+                          time.sleep(1)
+                      except Exception: pass
+
                   # ==========================================
-                  # TRICK 5: PREVENZIONE CRASH NAVIGAZIONE (Katie Parla)
+                  # PREVENZIONE CRASH NAVIGAZIONE (Katie Parla)
                   # ==========================================
                   raw_html = ""
                   try:
-                      # Attendiamo che la pagina finisca eventuali reindirizzamenti asincroni
                       page.wait_for_load_state("load", timeout=10000)
                       raw_html = page.content()
-                  except Exception as nav_err:
+                  except Exception:
                       print(f"[NODO {node_id}] Navigazione instabile riavvisata, attendo assestamento...", flush=True)
                       time.sleep(4)
                       try:
@@ -225,3 +379,29 @@ import time
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
+
+      - name: Esecuzione Scraping Parallelo
+        run: |
+          echo "Avvio processi paralleli..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          
+          wait
+
+          echo "=== LOG NODO 1 ==="
+          cat node1.log || true
+          echo "=== LOG NODO 2 ==="
+          cat node2.log || true
+          echo "=== LOG NODO 3 ==="
+          cat node3.log || true
+          echo "=================="
+
+          touch output_node_1.txt output_node_2.txt output_node_3.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
