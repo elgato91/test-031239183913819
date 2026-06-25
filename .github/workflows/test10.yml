@@ -37,7 +37,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((3 + RANDOM % 2))
+              DELAY=$((5 + RANDOM % 4))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -53,7 +53,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((3 + RANDOM % 2))
+            DELAY=$((5 + RANDOM % 4))
             sleep $DELAY
 
             SUCCESS=false
@@ -144,10 +144,21 @@ jobs:
                   return text
               return text[:5000]
 
-          # Torniamo al vostro generatore di seed randomico nativo ed efficace
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
+          # Generazione seed randomico originale vostro
           random_seed = str(random.randint(100000, 999999))
 
-          # Le vostre regole DNS di inibizione leak locale infallibili (socks5:// delegato a Chromium)
+          # Vostre flag originali infallibili che prevengono il DNS leak locale su WARP
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
@@ -157,7 +168,7 @@ jobs:
 
           print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
-          # Launch standard (incognito) che ha garantito l'estrazione perfetta nei test positivi
+          # Launch standard originale (incognito)
           context = launch_context(
               headless=False,
               humanize=True,
@@ -170,20 +181,117 @@ jobs:
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
+              # ==========================================
+              # PREVENZIONE SHADOW-BAN BING (Localization Fix)
+              # Se l'URL è di Bing, forziamo l'indice geografico e la lingua in italiano.
+              # Questo impedisce a Bing di interpretare la query italiana "cosa" come acronimo USA
+              # ==========================================
+              if "bing.com/search" in url and "cc=" not in url:
+                  url = url + "&cc=it&setlang=it"
+
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               print(f"[NODO {node_id}] -> {url}", flush=True)
               page = None
               
               try:
                   page = context.new_page()
+                  query_to_search = get_query_from_url(url)
+
+                  # ==========================================
+                  # FUNZIONI SPECIFICHE (Vostre originali, ripristinate)
+                  # ==========================================
+                  if "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
+                      try:
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.keyboard.press("Enter")
+                          page.wait_for_load_state("domcontentloaded", timeout=10000)
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
+                      try:
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.keyboard.press("Enter")
+                          page.wait_for_load_state("domcontentloaded", timeout=10000)
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          
+                  else:
+                      # Navigazione dritta originale per tutti gli altri siti
+                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
-                  # Navigazione lineare diretta originale (quella che ha sempre estratto Google/Reddit)
-                  page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                  
-                  # Tempo di permanenza vostro originale
+                  # Attesa assestamento originale
                   time.sleep(6)
 
-                  # Tempistiche diagnostiche vostre originali
+                  # ==========================================
+                  # ASSICURAZIONE REDIRECT CLOUDFLARE (Turnstile)
+                  # Se rileva l'handshake di Cloudflare, attende l'auto-resolve nativo del C++
+                  # ==========================================
+                  content_preview = page.content()
+                  if "Just a moment" in content_preview or "security verification" in content_preview:
+                      print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
+                      time.sleep(12)
+
+                  # ==========================================
+                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
+                  # ==========================================
+                  if "google.com/search" in url:
+                      try:
+                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
+                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
+                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
+                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
+                              if checkbox.is_visible(timeout=3000):
+                                  checkbox.click()
+                                  time.sleep(6) 
+                      except Exception:
+                          pass
+
+                  # ==========================================
+                  # RIMOZIONE MURI DI COOKIE GENERICI
+                  # (Il selettore onetrust Accept Button è vitale per Yelp e Morningstar)
+                  # ==========================================
+                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
+                      try:
+                          consent_selectors = [
+                              "button#onetrust-accept-btn-handler",
+                              "button:has-text('Accetta tutto')", 
+                              "button:has-text('Accept all')",
+                              "button:has-text('Consenti')", 
+                              "button:has-text('I agree')"
+                          ]
+                          for selector in consent_selectors:
+                              btn = page.locator(selector).first
+                              if btn.is_visible(timeout=1000):
+                                  btn.click() 
+                                  break
+                      except Exception:
+                          pass
+
+                  # ==========================================
+                  # TRIGGER ESPLICITO PIXELSCAN (Vostro originale)
+                  # ==========================================
+                  if "pixelscan.net" in url:
+                      try:
+                          btn = page.locator("text=Scan My Browser Now").first
+                          if btn.is_visible(timeout=3000):
+                              btn.click()
+                      except Exception:
+                          pass
+                      
+                  # ==========================================
+                  # SCROLL UMANO SIMULATO (Vostro originale)
+                  # ==========================================
+                  try:
+                      for _ in range(3):
+                          page.mouse.wheel(0, random.randint(300, 600))
+                          time.sleep(random.uniform(0.8, 1.5))
+                  except Exception:
+                      pass
+
+                  # Tempistiche finali diagnostici originali
                   if "creepjs" in url:
                       time.sleep(12) 
                   elif "pixelscan" in url:
