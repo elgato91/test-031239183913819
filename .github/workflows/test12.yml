@@ -1,6 +1,7 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on: workflow_dispatch:
+on: 
+    workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
