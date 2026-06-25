@@ -43,7 +43,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 4))
+              DELAY=$((3 + RANDOM % 2))
               echo "Attesa scaglionata di $DELAY secondi prima del prossimo container..."
               sleep $DELAY
             fi
@@ -60,7 +60,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((5 + RANDOM % 4))
+            DELAY=$((2 + RANDOM % 2))
             echo "Attesa preventiva di $DELAY secondi prima di richiedere l'IP..."
             sleep $DELAY
 
