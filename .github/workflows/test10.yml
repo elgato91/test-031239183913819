@@ -24,62 +24,61 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 10 WARProxy Docker Containers (IPv6)
+      - name: Setup e Verifica 10 WARProxy Docker Containers (con auto-healing e anti-rate-limit)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
-
           NUM_NODES=10
+
           for i in $(seq 1 $NUM_NODES); do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            echo "=================================================="
+            echo "AVVIO E ABILITAZIONE NODO $i (PORTA $PORT)..."
+            echo "=================================================="
+
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
-            if [ $i -lt $NUM_NODES ]; then
-              echo "Attesa scaglionamento per evitare rate-limit Cloudflare..."
-              sleep 6
-            fi
-          done
 
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
-
-      - name: Verifica IP IPv6 con Auto-healing
-        run: |
-          NUM_NODES=10
-          for i in $(seq 1 $NUM_NODES); do
-            PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
             SUCCESS=false
             for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              
-              # L'operatore '|| true' impedisce a GitHub Actions di interrompere lo script in caso di fallimento di curl
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || true)
-              
+              # Aumentiamo progressivamente il tempo di attesa a ogni tentativo per mitigare il rate-limit
+              WAIT_TIME=$((5 + tentativo * 5))
+              echo "  [Nodo $i] Tentativo $tentativo/5: attesa di $WAIT_TIME secondi..."
+              sleep $WAIT_TIME
+
+              # L'operatore '|| true' impedisce l'arresto immediato dello script in caso di curl fallito
+              IP=$(curl -s --max-time 15 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || true)
+
               if echo "$IP" | grep -q '"ip"'; then
-                echo "Container $i pronto! IP: $IP"
+                echo "  [Nodo $i] Pronto! IP: $IP"
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde o bloccato (Risposta: $IP). Riavvio in corso..."
+                echo "  [Nodo $i] Non risponde o bloccato da Cloudflare 429 (Risposta: $IP)."
+                echo "  Riavvio del container per forzare una nuova registrazione..."
                 docker restart warproxy-$i
-                sleep 8
               fi
             done
-            
+
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              echo "ERRORE CRITICO: Il container $i non si è registrato correttamente dopo 5 tentativi."
+              echo "Visualizzazione log del container fallito per diagnostica:"
               docker logs warproxy-$i || true
               exit 1
             fi
+
+            # Pausa di scaglionamento tra le registrazioni di diversi nodi per non congestionare le API
+            if [ $i -lt $NUM_NODES ]; then
+              echo "Nodo $i pronto. Attesa precauzionale di 12 secondi prima del prossimo nodo..."
+              sleep 12
+            fi
           done
+
+          echo "=================================================="
+          echo "TUTTI I 10 NODI SONO OPERATIVI E CONFIGURATI CON SUCCESSO!"
           echo "=================================================="
           docker ps -a
 
@@ -138,7 +137,7 @@ jobs:
           num_nodes = int(sys.argv[2])
           ACTIVE_PORT = 40000 + node_id
 
-          # Suddivisione dinamica dei target basata sul numero totale di nodi (Round-Robin)
+          # Distribuzione dinamica dei target basata sul numero totale di nodi (Round-Robin)
           MY_TARGETS = [TARGETS[i] for i in range(len(TARGETS)) if i % num_nodes == (node_id - 1)]
 
           def extract_text(html_content, url):
