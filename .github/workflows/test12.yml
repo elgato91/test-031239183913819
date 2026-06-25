@@ -1,7 +1,6 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on: 
-    workflow_dispatch:
+on: workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
@@ -16,7 +15,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA FONDAMENTALE DEI FONT WINDOWS PER CLOAKBROWSER
+          # COPIA FONDAMENTALE DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per Linux)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -42,7 +41,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((3 + RANDOM % 2))
+              DELAY=$((5 + RANDOM % 4))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -58,7 +57,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((3 + RANDOM % 2))
+            DELAY=$((5 + RANDOM % 4))
             sleep $DELAY
 
             SUCCESS=false
@@ -160,14 +159,23 @@ jobs:
                   pass
               return default
 
-          # Generazione seed randomico
-          random_seed = str(random.randint(100000, 999999))
+          def get_safe_content(page, retries=3):
+              """Recupera l'HTML in modo sicuro gestendo l'errore di Navigating."""
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(2)
+                      else:
+                          return ""
+              return ""
 
-          # Path assoluto ai font copiati in precedenza dallo step Bash
+          random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # Args essenziali puliti - RIMOSSO HACK DNS E AGGIUNTA FONT DIR
+          # CONFIGURAZIONE BACK-TO-BASICS: Solo lo stretto necessario per funzionare in Docker/GHA
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
@@ -177,7 +185,7 @@ jobs:
 
           print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
 
-          # RIMOSSO VIEWPORT CUSTOM (per match perfetto con hardware spoofato)
+          # Nessun viewport manuale, nessuna regola DNS astrusa: lasciamo fare a CloakBrowser
           context = launch_context(
               headless=False,
               humanize=True,
@@ -220,8 +228,9 @@ jobs:
                   
                   time.sleep(6)
 
-                  # CLOUDFLARE TURNSTILE (Cloakbrowser lo risolve da solo)
-                  content_preview = page.content()
+                  content_preview = get_safe_content(page)
+
+                  # CLOUDFLARE TURNSTILE (Gestione invisibile)
                   if "Just a moment" in content_preview or "security verification" in content_preview:
                       print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Attesa auto-redirect...", flush=True)
                       time.sleep(12)
@@ -229,17 +238,46 @@ jobs:
                   # GOOGLE CAPTCHA 
                   if "google.com/search" in url:
                       try:
-                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
-                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
-                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
-                              if checkbox.is_visible(timeout=3000):
+                          if page.locator('form[action="/sorry/index"]').is_visible(timeout=2000):
+                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Tento click umano...", flush=True)
+                              recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA'], iframe[src*='recaptcha']").first
+                              checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border").first
+                              if checkbox.is_visible(timeout=5000):
                                   checkbox.click()
                                   time.sleep(6) 
                       except Exception:
                           pass
 
-                
+                  # REDDIT CAPTCHA 
+                  if "reddit.com" in url:
+                      try:
+                          if page.locator('text="Prove your humanity"').is_visible(timeout=2000) or page.locator('text="a real person"').is_visible(timeout=2000):
+                              print(f"[NODO {node_id}] Reddit CAPTCHA rilevato. Tento click umano...", flush=True)
+                              captcha_frame = page.frame_locator("iframe[title*='reCAPTCHA'], iframe[src*='recaptcha'], iframe[title*='hCaptcha'], iframe[src*='hcaptcha']").first
+                              checkbox = captcha_frame.locator(".recaptcha-checkbox-border, #checkbox").first
+                              if checkbox.is_visible(timeout=5000):
+                                  checkbox.click()
+                                  time.sleep(6)
+                      except Exception:
+                          pass
+
+                  # RIMOZIONE MURI DI COOKIE
+                  if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
+                      try:
+                          consent_selectors = [
+                              "button#onetrust-accept-btn-handler",
+                              "button:has-text('Accetta tutto')", 
+                              "button:has-text('Accept all')",
+                              "button:has-text('Consenti')", 
+                              "button:has-text('I agree')"
+                          ]
+                          for selector in consent_selectors:
+                              btn = page.locator(selector).first
+                              if btn.is_visible(timeout=1000):
+                                  btn.click() 
+                                  break
+                      except Exception:
+                          pass
 
                   if "pixelscan.net" in url:
                       try:
@@ -254,14 +292,15 @@ jobs:
                           page.mouse.wheel(0, random.randint(300, 600))
                           time.sleep(random.uniform(0.8, 1.5))
                   except Exception:
-                      pass
+                          pass
 
                   if "creepjs" in url:
                       time.sleep(12) 
                   elif "pixelscan" in url:
                       time.sleep(8)
 
-                  raw_html = page.content()
+                  # ESTRAZIONE TESTO SICURA
+                  raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
