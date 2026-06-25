@@ -36,30 +36,69 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avvio originale, pulito e senza spam di connessioni
+          # Avviamo i container uno alla volta con un delay strutturato per evitare rate-limit
           for i in 1 2 3; do
             PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
+            
+            if [ $i -lt 3 ]; then
+              echo "Attesa scaglionamento per il prossimo nodo..."
+              sleep 8
+            fi
           done
 
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 15
-          docker ps -a
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
 
-      - name: Verifica IP IPv6 di uscita sui 3 Proxy
+      - name: Verifica IP IPv6 con Auto-healing e Salvataggio IP
         run: |
+          # Per ogni container, verifichiamo la connessione, estraiamo l'IPv6 e lo salviamo per Python
+          IP_1=""
+          IP_2=""
+          IP_3=""
           for i in 1 2 3; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA IP CONTAINER $i ($PORT):"
-            curl --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json || echo "Proxy $i fallito!"
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5 per container $i..."
+              
+              IP_JSON=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP_JSON" ]; then
+                # Estraiamo l'IP pulito dal JSON
+                IP=$(echo "$IP_JSON" | grep -oE '"ip":"[^"]+"' | cut -d'"' -f4)
+                echo "Container $i pronto! IP: $IP"
+                eval "IP_$i=\$IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde o bloccato. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 8
+              fi
+            done
+            
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 tentativi."
+              docker logs warproxy-$i || true
+              exit 1
+            fi
           done
           echo "=================================================="
+          # Salviamo gli IP reali in file locali leggibili da Python
+          echo "$IP_1" > ip_node_1.txt
+          echo "$IP_2" > ip_node_2.txt
+          echo "$IP_3" > ip_node_3.txt
+          docker ps -a
 
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
@@ -80,7 +119,6 @@ jobs:
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
-          # Ripristinati tutti i "+" corretti che evitano il troncamento su Google/Bing
           TARGETS = [
               "https://api6.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
@@ -138,10 +176,17 @@ jobs:
                   pass
               return default
 
+          # Leggiamo l'IPv6 reale assegnato a questo nodo per allinearlo al WebRTC
+          ipv6_exit_ip = None
+          try:
+              with open(f"ip_node_{node_id}.txt", "r") as f:
+                  ipv6_exit_ip = f.read().strip()
+          except Exception:
+              pass
+
           random_seed = str(random.randint(100000, 999999))
           profile_dir = f"./profile_node_{node_id}"
 
-          # Configurazione Standard e Pulita originale (Rimosso definitivamente il noise=false)
           extra_args = [
               "--no-sandbox", 
               "--disable-dev-shm-usage",
@@ -149,6 +194,11 @@ jobs:
               "--fingerprint-storage-quota=5000",
               "--fingerprint-windows-font-metrics"
           ]
+
+          # Se abbiamo l'IPv6 esatto del proxy, forziamo il WebRTC a usarlo eliminando ogni incoerenza
+          if ipv6_exit_ip:
+              print(f"[NODO {node_id}] Spoofing WebRTC IP con IPv6 reale: {ipv6_exit_ip}", flush=True)
+              extra_args.append(f"--fingerprint-webrtc-ip={ipv6_exit_ip}")
 
           print(f"[NODO {node_id}] Avvio Context Standard (Seed: {random_seed})", flush=True)
 
