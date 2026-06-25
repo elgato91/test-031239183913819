@@ -12,12 +12,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Sincronizza Orologio di Sistema (NTP)
-        run: |
-          sudo apt-get update && sudo apt-get install -y ntpdate || true
-          sudo systemctl stop systemd-timesyncd.service || true
-          sudo ntpdate -s pool.ntp.org || true
-
       - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
@@ -32,11 +26,11 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 3 WARProxy Docker Containers (IPv6)
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          for i in 1 2 3; do
+          for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
@@ -46,26 +40,25 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            if [ $i -lt 3 ]; then
-              echo "Attesa scaglionamento per il prossimo nodo..."
-              sleep 8
+            if [ $i -lt 6 ]; then
+              echo "Attesa scaglionamento..."
+              sleep 4
             fi
           done
 
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
+          echo "Attesa finale inizializzazione tunnel..."
+          sleep 8
 
-      - name: Verifica IP IPv6 con Auto-healing
+      - name: Verifica IP IPv6 con Auto-healing (6 Nodi)
         run: |
-          for i in 1 2 3; do
+          for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
             
             SUCCESS=false
             for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              
+              echo "Tentativo $tentativo/5..."
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
@@ -73,14 +66,14 @@ jobs:
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde o bloccato. Riavvio in corso..."
+                echo "Riavvio container warproxy-$i..."
                 docker restart warproxy-$i
                 sleep 8
               fi
             done
             
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              echo "ERRORE: Nodo $i fallito."
               docker logs warproxy-$i || true
               exit 1
             fi
@@ -140,7 +133,10 @@ jobs:
 
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
-          MY_TARGETS = TARGETS[(node_id-1)*9 : node_id*9]
+
+          # Suddivisione dinamica delle URL su 6 nodi paralleli (circa 4 URL ciascuno)
+          chunk_size = (len(TARGETS) + 5) // 6
+          MY_TARGETS = TARGETS[(node_id-1)*chunk_size : node_id*chunk_size]
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -160,7 +156,6 @@ jobs:
                   pass
               return default
 
-          # Seed fisso per nodo per simulare un "returning visitor" credibile
           stable_seed = str(123450 + node_id)
           profile_dir = f"./profile_node_{node_id}"
 
@@ -168,21 +163,19 @@ jobs:
               "--no-sandbox", 
               "--disable-dev-shm-usage",
               f"--fingerprint={stable_seed}",
-              "--fingerprint-storage-quota=5000",       
-              "--fingerprint-windows-font-metrics",      
+              "--fingerprint-storage-quota=5000",
+              "--fingerprint-windows-font-metrics",
               "--fingerprint-noise=false"
-              # NOTA: Rimosso --disable-http2 per mantenere la corretta negoziazione ALPN/HTTP2 nativa di Chrome 146
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard (Stable Seed: {stable_seed})", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard (Seed: {stable_seed})", flush=True)
 
           context = launch_persistent_context(
               user_data_dir=profile_dir,
-              headless=False,                            
-              humanize=True,                             
-              human_preset="careful",                    
-              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}", 
-              geoip=True,                                
+              headless=False,
+              humanize=True,
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,
               viewport={"width": 1920, "height": 950},
               args=extra_args
           )
@@ -190,27 +183,20 @@ jobs:
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
+              # Bypass nativo di Facebook www -> mobile touch
+              if "facebook.com/groups" in url:
+                  url = url.replace("www.facebook.com", "m.facebook.com")
+
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               print(f"[NODO {node_id}] -> {url}", flush=True)
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
                   
-                  # ==========================================
-                  # WARM-UP YELP
-                  # ==========================================
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print(f"[NODO {node_id}] Esecuzione warm-up su Yelp...", flush=True)
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=30000)
-                      time.sleep(4)
-                  
-                  # ==========================================
-                  # WORKAROUND MOTORI DI RICERCA MINORI
-                  # ==========================================
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(60, 150), timeout=3000)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
@@ -219,125 +205,76 @@ jobs:
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(60, 150), timeout=3000)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                           page.wait_for_load_state("domcontentloaded", timeout=10000)
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=30000)
                           
                   else:
-                      # Navigazione diretta passiva
                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                   
-                  # Pausa per fare valutare gli script di rete e i cookie
                   time.sleep(6)
 
-                  # ======================================================================
-                  # BYPASS POPUP DI LOGIN DI FACEBOOK (PUNTO 4): JS DOM Injection
-                  # ======================================================================
-                  if "facebook.com/groups" in url:
+                  # Rimozione popup login su Facebook Mobile Touch
+                  if "m.facebook.com" in url:
                       try:
-                          print(f"[NODO {node_id}] Pagina di gruppo Facebook caricata. Rimozione del muro di login...", flush=True)
-                          time.sleep(3) # Diamo tempo al popup di rendering di attivarsi
                           page.evaluate("""() => {
-                              // Selezioniamo il dialog di login e gli elementi oscuranti correlati
-                              const dialogSelectors = [
-                                  'div[role="dialog"]', 
-                                  'div[id*="login"]', 
-                                  'div[class*="login"]',
-                                  '.generic_dialog',
-                                  '#login_popup'
-                              ];
-                              dialogSelectors.forEach(sel => {
+                              const targets = ['#header', '#footer', '[role="dialog"]', 'div[class*="login"]'];
+                              targets.forEach(sel => {
                                   document.querySelectorAll(sel).forEach(el => el.remove());
                               });
-                              // Rimuove eventuali fogli grigi o backdrop di blocco
-                              document.querySelectorAll('div').forEach(el => {
-                                  const style = window.getComputedStyle(el);
-                                  if (style.position === 'fixed' && (parseInt(style.zIndex) > 10 || style.backgroundColor.includes('rgba'))) {
-                                      if (!el.querySelector('article') && !el.querySelector('[role="feed"]')) {
-                                          el.remove();
-                                      }
-                                  }
-                              });
-                              // Sblocca lo scrolling
                               document.body.style.setProperty('overflow', 'auto', 'important');
                               document.documentElement.style.setProperty('overflow', 'auto', 'important');
                           }""")
-                          print(f"[NODO {node_id}] Muro di login Facebook eliminato con successo. Scrolling ripristinato.", flush=True)
-                      except Exception as fb_err:
-                          print(f"[NODO {node_id}] Errore durante il bypass Facebook: {fb_err}", flush=True)
+                      except Exception: pass
 
-                  # ==========================================
-                  # RISOLUTORE AUTOMATICO GOOGLE CAPTCHA
-                  # ==========================================
+                  # Rimozione barriera AdBlock su Canadian Insider (Risolve la sovrascrittura di visualizzazione)
+                  if "canadianinsider.com" in url:
+                      try:
+                          page.evaluate("""() => {
+                              const bad = ['modal', 'overlay', 'adblock', 'blocking'];
+                              document.querySelectorAll('*').forEach(el => {
+                                  if (badClasses.some(cls => el.className && typeof el.className === 'string' && el.className.toLowerCase().includes(cls)) || 
+                                      badClasses.some(id => el.id && typeof el.id === 'string' && el.id.toLowerCase().includes(id))) {
+                                      el.remove();
+                                  }
+                              });
+                              document.body.style.setProperty('overflow', 'auto', 'important');
+                              document.documentElement.style.setProperty('overflow', 'auto', 'important');
+                          }""")
+                      except Exception: pass
+
+                  # Risolutore Google CAPTCHA
                   if "google.com/search" in url:
                       try:
                           if page.locator('form[action="/sorry/index"]').is_visible(timeout=3000):
-                              print(f"[NODO {node_id}] Google CAPTCHA rilevato. Risolvo...", flush=True)
                               recaptcha_frame = page.frame_locator("iframe[title*='reCAPTCHA']")
                               checkbox = recaptcha_frame.locator(".recaptcha-checkbox-border")
                               if checkbox.is_visible(timeout=3000):
                                   checkbox.click()
-                                  time.sleep(7) 
+                                  time.sleep(6) 
                       except Exception: pass
 
-                  # ==========================================
-                  # RISOLUTORE AUTOMATICO CLOUDFLARE TURNSTILE (Reddit / Bloomberg / ecc.)
-                  # ==========================================
-                  try:
-                      turnstile_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']")
-                      checkbox = turnstile_frame.locator("input[type='checkbox'], #challenge-stage, .mark")
-                      if checkbox.first.is_visible(timeout=2000):
-                          print(f"[NODO {node_id}] Cloudflare Turnstile rilevato. Risolvo...", flush=True)
-                          checkbox.first.click()
-                          time.sleep(7)
-                  except Exception: pass
-
-                  # ==========================================
-                  # BYPASS DEL CONSENSO DI YAHOO (Yahoo Finance)
-                  # ==========================================
-                  if "consent.yahoo.com" in page.url:
-                      try:
-                          print(f"[NODO {node_id}] Risoluzione del consenso Yahoo...", flush=True)
-                          page.locator("button[name='agree']").click()
-                          time.sleep(4)
-                      except Exception: pass
-
-                  # ==========================================
-                  # RIMOZIONE MURI DI COOKIE E POPUP DI CONSENSO
-                  # ==========================================
+                  # Risoluzione Cookie generica
                   if not any(x in url for x in ["facebook.com", "reddit.com", "google", "bing"]):
                       try:
                           consent_selectors = [
                               "button#onetrust-accept-btn-handler",
-                              "#onetrust-accept-btn-handler",
-                              "button:has-text('Accept All')",
                               "button:has-text('Accetta tutto')", 
                               "button:has-text('Accept all')",
+                              "button:has-text('Accept All')",
                               "button:has-text('Consenti')", 
-                              "button:has-text('I agree')",
-                              "button[class*='accept']"
+                              "button:has-text('I agree')"
                           ]
                           for selector in consent_selectors:
                               btn = page.locator(selector).first
-                              if btn.is_visible(timeout=2000):
+                              if btn.is_visible(timeout=1000):
                                   btn.click() 
-                                  time.sleep(2)
                                   break
                       except Exception: pass
 
-                  # ==========================================
-                  # GESTIONE SPECIFICA YAHOO FINANCE
-                  # ==========================================
-                  if "finance.yahoo.com" in url:
-                      try:
-                          print(f"[NODO {node_id}] Attesa caricamento asincrono dati Yahoo Finance...", flush=True)
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=15000)
-                          time.sleep(2)
-                      except Exception: pass
-
-                  # Trigger esplicito per Pixelscan
+                  # Trigger Pixelscan
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
@@ -345,60 +282,22 @@ jobs:
                               btn.click()
                       except Exception: pass
                       
-                  # Scroll umano simulato
                   try:
                       for _ in range(3):
-                          page.mouse.wheel(0, random.randint(250, 500))
-                          time.sleep(random.uniform(1.0, 2.2))
+                          page.mouse.wheel(0, random.randint(300, 600))
+                          time.sleep(random.uniform(0.8, 1.5))
                   except Exception: pass
 
-                  # Tempistiche finali di calcolo per i siti più pesanti
-                  if "creepjs" in url: time.sleep(15) 
+                  if "creepjs" in url: time.sleep(12) 
                   elif "pixelscan" in url: time.sleep(8)
                   elif "reddit" in url: time.sleep(5)
 
-                  # ======================================================================
-                  # BYPASS OVERLAY ANTI-ADBLOCK (Canadian Insider): Rimozione via JS Injection
-                  # ======================================================================
-                  if "canadianinsider.com" in url:
-                      try:
-                          print(f"[NODO {node_id}] Rimozione dinamica del blocco AdBlock...", flush=True)
-                          page.evaluate("""() => {
-                              const badClasses = ['modal', 'overlay', 'adblock', 'blocking'];
-                              // Rimuove gli elementi di blocco ad alto contrasto
-                              document.querySelectorAll('*').forEach(el => {
-                                  if (badClasses.some(cls => el.className && typeof el.className === 'string' && el.className.toLowerCase().includes(cls)) || 
-                                      badClasses.some(id => el.id && typeof el.id === 'string' && el.id.toLowerCase().includes(id))) {
-                                      el.remove();
-                                  }
-                              });
-                              // Ripristina l'overflow per permettere lo scorrimento del corpo pagina
-                              document.body.style.setProperty('overflow', 'auto', 'important');
-                              document.documentElement.style.setProperty('overflow', 'auto', 'important');
-                          }""")
-                          time.sleep(1)
-                      except Exception: pass
-
-                  # ==========================================
-                  # PREVENZIONE CRASH NAVIGAZIONE (Katie Parla)
-                  # ==========================================
-                  raw_html = ""
-                  try:
-                      page.wait_for_load_state("load", timeout=10000)
-                      raw_html = page.content()
-                  except Exception:
-                      print(f"[NODO {node_id}] Navigazione instabile riavvisata, attendo assestamento...", flush=True)
-                      time.sleep(4)
-                      try:
-                          raw_html = page.content()
-                      except Exception:
-                          raw_html = "<h1>Errore: Impossibile recuperare il DOM stabilizzato</h1>"
-
+                  raw_html = page.content()
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
                   page.close()
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
                   try: page.close()
                   except Exception: pass
@@ -411,10 +310,13 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo
         run: |
-          echo "Avvio processi paralleli..."
+          echo "Avvio processi paralleli (6 Nodi)..."
           python -u m2_insocket.py 1 > node1.log 2>&1 &
           python -u m2_insocket.py 2 > node2.log 2>&1 &
           python -u m2_insocket.py 3 > node3.log 2>&1 &
+          python -u m2_insocket.py 4 > node4.log 2>&1 &
+          python -u m2_insocket.py 5 > node5.log 2>&1 &
+          python -u m2_insocket.py 6 > node6.log 2>&1 &
           
           wait
 
@@ -424,10 +326,16 @@ jobs:
           cat node2.log || true
           echo "=== LOG NODO 3 ==="
           cat node3.log || true
+          echo "=== LOG NODO 4 ==="
+          cat node4.log || true
+          echo "=== LOG NODO 5 ==="
+          cat node5.log || true
+          echo "=== LOG NODO 6 ==="
+          cat node6.log || true
           echo "=================="
 
-          touch output_node_1.txt output_node_2.txt output_node_3.txt
-          cat output_node_1.txt output_node_2.txt output_node_3.txt > output_macchina2_cdp.txt
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
