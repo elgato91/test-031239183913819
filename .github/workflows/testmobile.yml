@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -78,11 +78,20 @@ jobs:
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile."
               exit 1
             fi
           done
           echo "=================================================="
+
+      - name: Ripristino Cache Profili CloakBrowser
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cloak_profiles
+          key: cloak-profiles-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            cloak-profiles-${{ runner.os }}-
+            cloak-profiles-
 
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
@@ -93,7 +102,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Macchina 2 con Profile Warming)
+      - name: Creazione script Python (Integrazione link extractor, scorrimento e self-healing)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -101,7 +110,8 @@ jobs:
           import random
           import math
           import os
-          from cloakbrowser import launch_persistent_context  # Passaggio a profili persistenti
+          import shutil
+          from cloakbrowser import launch_persistent_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
@@ -132,12 +142,6 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          # Lista di query di warmup per generare cookie reali e cronologia plausibile
-          WARMUP_QUERIES = [
-              "weather tomorrow", "world news today", "how to cook pasta", 
-              "best movies 2026", "wikipedia space exploration", "historical events today"
-          ]
-
           if len(sys.argv) < 2:
               sys.exit(1)
 
@@ -155,63 +159,154 @@ jobs:
                   return text
               return text[:5000]
 
-          def get_query_from_url(url, default="migliore carbonara roma"):
-              try:
-                  parsed = urlparse(url)
-                  queries = parse_qs(parsed.query)
-                  for param in ['q', 'query', 'p']:
-                      if param in queries:
-                          return queries[param][0]
-              except Exception:
-                  pass
-              return default
+          def is_search_engine(url):
+              """Verifica se l'URL appartiene a un motore di ricerca."""
+              return any(x in url for x in ["google.com", "bing.com", "duckduckgo.com", "startpage.com", "yahoo.com"])
 
-          def get_safe_content(page, retries=3):
-              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
-              for attempt in range(retries):
-                  try:
-                      return page.content()
-                  except Exception as e:
-                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
-                          time.sleep(3)
-                      else:
-                          break
-              return ""
+          def parse_search_links(html_content, url):
+              """Estrae e pulisce i primi 40 link organici in base al motore di ricerca specifico."""
+              soup = BeautifulSoup(html_content, 'html.parser')
+              links = []
+              parsed_url = urlparse(url)
+              domain = parsed_url.netloc
 
-          def warmup_profile(context, node_id):
-              """Esegue una routine di riscaldamento simulando ricerche e letture per accumulare cookie reali."""
-              print(f"[NODO {node_id}] Avvio fase di Profile Warming...", flush=True)
+              if "google" in domain:
+                  # Selettori per risultati organici standard di Google
+                  for g in soup.select('div.g, .yuRUbf, .MjjYbeb'):
+                      for a in g.select('a[href]'):
+                          href = a['href']
+                          if href.startswith('http') and not any(x in href for x in ['google.', 'gstatic.', 'youtube.com', 'webcache']):
+                              links.append(href)
+                  # Fallback in caso di versione base (gbv=1)
+                  if not links:
+                      for a in soup.select('a[href]'):
+                          href = a['href']
+                          if '/url?q=' in href:
+                              qs = parse_qs(urlparse(href).query).get('q')
+                              if qs:
+                                  href = qs[0]
+                          if href.startswith('http') and not any(x in href for x in ['google.', 'gstatic.', 'youtube.com', 'support.google']):
+                              links.append(href)
+
+              elif "bing" in domain:
+                  for algo in soup.select('li.b_algo, .b_algo, .b_title'):
+                      for a in algo.select('a[href]'):
+                          href = a['href']
+                          if href.startswith('http') and not any(x in href for x in ['bing.com', 'microsoft.com', 'msn.com', 'live.com']):
+                              links.append(href)
+
+              elif "startpage" in domain:
+                  for result in soup.select('.w-gl__result, .result, .result-link'):
+                      for a in result.select('a[href]'):
+                          href = a['href']
+                          if href.startswith('http') and not any(x in href for x in ['startpage.com', 'ixquick.com']):
+                              links.append(href)
+
+              elif "yahoo" in domain:
+                  for title in soup.select('h3.title, .compTitle, .compText'):
+                      for a in title.select('a[href]'):
+                          href = a['href']
+                          if href.startswith('http') and not any(x in href for x in ['yahoo.com', 'yahoo.it', 'yimg.com', 'search.yahoo']):
+                              links.append(href)
+
+              elif "duckduckgo" in domain:
+                  for res in soup.select('.result__title, .result__url, .result__body'):
+                      for a in res.select('a[href]'):
+                          href = a['href']
+                          if href.startswith('http') and not any(x in href for x in ['duckduckgo.com', 'ddg.gg']):
+                              links.append(href)
+
+              # Fallback generale resiliente se nessun link è stato catturato dai selettori specifici
+              if not links:
+                  for a in soup.select('a[href]'):
+                      href = a['href']
+                      if href.startswith('http') and not any(x in href for x in ['google', 'bing.com', 'yahoo.com', 'duckduckgo', 'startpage', 'microsoft', 'yimg', 'gstatic', 'facebook.com', 'twitter.com', 'instagram.com']):
+                          links.append(href)
+
+              # Rimozione duplicati mantenendo l'ordine di apparizione
+              seen = set()
+              unique_links = []
+              for l in links:
+                  if l not in seen:
+                      seen.add(l)
+                      unique_links.append(l)
+
+              return unique_links[:40]
+
+          def human_scroll_to_bottom(page, scrolls=3):
+              """Esegue uno scorrimento fluido simulando un utente reale per attivare il caricamento degli elementi lazy-load."""
+              print("[Scorrimento] Avvio scorrimento fluido della pagina...", flush=True)
+              for _ in range(scrolls):
+                  scroll_amount = random.randint(450, 750)
+                  page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+                  # Attesa casuale tra i micro-scorrimenti per consentire il caricamento dinamico
+                  time.sleep(random.uniform(1.8, 3.2))
+
+          def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
+              """Riscaldamento del profilo in HTTP/1.1 limitato a Reddit (HTTP/1.1) e Wikipedia (Neutro). Google rimosso."""
+              print(f"[NODO {node_id}] [Warmup HTTP/1.1] Avvio...", flush=True)
+              warmup_args = extra_args_base + ["--disable-http2"]
+              
               try:
+                  context = launch_persistent_context(
+                      profile_dir,
+                      headless=False,
+                      humanize=True,
+                      human_config={
+                          "typing_delay": 120,
+                          "mistype_chance": 0.03,
+                          "idle_between_actions": True
+                      },
+                      proxy=f"socks5://127.0.0.1:{active_port}",
+                      geoip=True,
+                      viewport={"width": 1920, "height": 1080},
+                      args=warmup_args
+                  )
+                  
                   page = context.new_page()
                   
-            
+                  # 1. Reddit Home in HTTP/1.1
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Visita Reddit...", flush=True)
+                  try:
+                      page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(random.uniform(6, 10))
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore Reddit: {e}", flush=True)
                       
-                  # 2. Visita Wikipedia per accumulare cache e cookie stabili
-                  print(f"[NODO {node_id}] [Warmup] Lettura pagina Wikipedia...", flush=True)
-                  page.goto("https://en.wikipedia.org/wiki/Special:Random", wait_until="domcontentloaded", timeout=30000)
-                  time.sleep(random.uniform(6, 10))
-                  
-                  page.close()
-                  print(f"[NODO {node_id}] Fase di riscaldamento completata con successo.", flush=True)
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore durante il warmup: {e}. Procedo comunque.", flush=True)
+                  # 2. Wikipedia (Riscaldamento Neutro ad alta reputazione, no tracciamenti Google)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Visita Wikipedia...", flush=True)
+                  try:
+                      page.goto("https://en.wikipedia.org/wiki/Special:Random", wait_until="domcontentloaded", timeout=30000)
+                      time.sleep(random.uniform(5, 8))
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore Wikipedia: {e}", flush=True)
 
+                  page.close()
+                  context.close()
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Profilo riscaldato salvato.", flush=True)
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore warmup: {e}", flush=True)
+
+          # --- INIZIO SCRIPT NORMALE ---
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
           profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
 
-          # Mantenuto attivo il camuffamento del rumore (noise injection = True) eliminando --fingerprint-noise=false
-          extra_args = [
+          extra_args_base = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Persistente in: {profile_dir}", flush=True)
+          # Fase 1: Esecuzione del riscaldamento in HTTP/1.1
+          run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
 
-          # Inizializzazione con profilo persistente su disco per mantenere i cookie accumulati
+          time.sleep(3)
+
+          # Fase 2: Avvio dello Scraping principale in HTTP/2
+          print(f"[NODO {node_id}] [Scraping HTTP/2] Connessione...", flush=True)
           context = launch_persistent_context(
               profile_dir,
               headless=False,
@@ -223,14 +318,12 @@ jobs:
               },
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              viewport={"width": 1920, "height": 1080}, 
-              args=extra_args
+              viewport={"width": 1920, "height": 1080},
+              args=extra_args_base
           )
 
-          # Riscalda il profilo prima delle visite ai target reali
-          warmup_profile(context, node_id)
-
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+          flagged_as_bot = False
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
@@ -241,7 +334,6 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Navigazione e gestione ricerche usando i metodi nativi raccomandati dal wrapper
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
@@ -263,12 +355,14 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # ATTESA SULLA PAGINA CON DELAY RANDOMICO
+                  # Scrolling fluido automatico per caricare gli elementi dinamici (lazy-loading)
+                  human_scroll_to_bottom(page, scrolls=3)
+
+                  # Attesa passiva randomica
                   passive_wait = random.randint(12, 22)
-                  print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
+                  print(f"[NODO {node_id}] In attesa di assestamento per {passive_wait}s...", flush=True)
                   time.sleep(passive_wait)
 
-                  # Click specifico finalizzato unicamente a pixelscan (se presente)
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
@@ -278,13 +372,25 @@ jobs:
                       except Exception:
                           pass
                       
-                  # Assestamento per diagnostici lenti
                   if "creepjs" in url:
                       time.sleep(6) 
 
-                  # Estrazione sicura del sorgente pagina
                   raw_html = get_safe_content(page)
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                  
+                  # Verifico se siamo finiti in una schermata di blocco per il self-healing del profilo
+                  content_lower = raw_html.lower()
+                  if any(indicator in content_lower for indicator in ["prove your humanity", "security verification", "malicious bots", "enable javascript and cookies to continue", "bot verification"]):
+                      print(f"[NODO {node_id}] ATTENZIONE: Rilevato possibile blocco anti-bot su {url}. Marcatura del profilo per eliminazione.", flush=True)
+                      flagged_as_bot = True
+
+                  # ESTRAZIONE DIFFERENZIATA: Motori di ricerca vs Siti standard
+                  if is_search_engine(url):
+                      extracted_urls = parse_search_links(raw_html, url)
+                      results += f"MOTORE DI RICERCA RILEVATO. URL ESTRATTI (Totale: {len(extracted_urls)}):\n"
+                      for link_idx, link in enumerate(extracted_urls, 1):
+                          results += f"[{link_idx}] {link}\n"
+                  else:
+                      results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
                   print(f"[NODO {node_id}] Errore: {e}", flush=True)
@@ -296,12 +402,21 @@ jobs:
                       except Exception:
                           pass
                   
-                  # DELAY RANDOMICO TRA VISITE
                   visit_interval = random.uniform(4.0, 9.0)
                   print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s prima del prossimo target...", flush=True)
                   time.sleep(visit_interval)
 
           context.close()
+
+          # SELF-HEALING DEL PROFILO: Se il nodo è stato rilevato come bot, cancelliamo la cartella locale.
+          # In questo modo, il workflow di salvataggio cache non registrerà cookie compromessi.
+          if flagged_as_bot:
+              print(f"[NODO {node_id}] [Self-Healing] Cancellazione del profilo compromesso '{profile_dir}'...", flush=True)
+              try:
+                  shutil.rmtree(profile_dir)
+                  print(f"[NODO {node_id}] [Self-Healing] Profilo rimosso. Il prossimo avvio partirà pulito.", flush=True)
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore durante la pulizia del profilo: {e}", flush=True)
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
@@ -316,7 +431,7 @@ jobs:
             python -u m2_insocket.py $i > node$i.log 2>&1 &
             
             if [ $i -lt 6 ]; then
-              # Genera un delay casuale tra 5 e 15 secondi prima di far partire lo scraper successivo
+              # Delay casuale tra 5 e 15 secondi prima di far partire lo scraper successivo
               DELAY=$((5 + RANDOM % 11))
               echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
               sleep $DELAY
@@ -336,6 +451,13 @@ jobs:
 
           touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
           cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
+
+      - name: Salvataggio Cache Profili CloakBrowser
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.cloak_profiles
+          key: cloak-profiles-${{ runner.os }}-${{ github.run_id }}
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
