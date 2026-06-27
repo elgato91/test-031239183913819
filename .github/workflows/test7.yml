@@ -50,7 +50,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 2
+            sleep 1.5
           done
 
           echo "Attesa di 15 secondi per l'inizializzazione dei tunnel STEP 1..."
@@ -75,19 +75,18 @@ jobs:
               echo "Tentativo $tentativo/5..."
               
               for URL in "${ENDPOINTS[@]}"; do
-                echo "Test con endpoint: $URL"
                 IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL")
                 if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
                   echo "Container $i pronto via $URL! Risposta: $IP"
                   SUCCESS=true
                   break 2
                 fi
-                sleep 1
+                sleep 0.5
               done
               
               echo "Nessun endpoint ha risposto per il container $i. Riavvio e attesa..."
               docker restart warproxy-$i
-              sleep 10
+              sleep 8
             done
 
             if [ "$SUCCESS" = "false" ]; then
@@ -113,7 +112,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 2
+            sleep 1.5
           done
 
           echo "[BG STEP 2] Attesa di 15 secondi per consentire l'inizializzazione dei tunnel..."
@@ -139,12 +138,12 @@ jobs:
                   SUCCESS=true
                   break 2
                 fi
-                sleep 1
+                sleep 0.5
               done
               
               echo "[BG STEP 2] Fallimento al tentativo $tentativo per il container $i. Riavvio e attesa..."
               docker restart warproxy-$i
-              sleep 10
+              sleep 8
             done
 
             if [ "$SUCCESS" = "false" ]; then
@@ -254,11 +253,11 @@ jobs:
                   
               return True, ""
 
-          def gaussian_delay(mu=5.5, sigma=1.5):
-              """Implementa un ritardo basato su distribuzione normale (gaussiana)."""
+          def gaussian_delay(mu=1.5, sigma=0.4):
+              """Implementa un ritardo ottimizzato basato su distribuzione normale (gaussiana) veloce."""
               delay = random.gauss(mu, sigma)
-              actual_delay = max(1.5, min(delay, 12.0))
-              print(f"[NODO {node_id}] Pausa gaussiana di {actual_delay:.2f} secondi...", flush=True)
+              actual_delay = max(0.5, min(delay, 4.0))
+              print(f"[NODO {node_id}] Pausa gaussiana ultra-rapida di {actual_delay:.2f} secondi...", flush=True)
               time.sleep(actual_delay)
 
           def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
@@ -286,28 +285,28 @@ jobs:
                   page = context.new_page()
                   user_agent = page.evaluate("navigator.userAgent")
                   
-                  # 1. Visita la home page di Reddit in HTTP/1.1
+                  # 1. Visita la home page di Reddit in HTTP/1.1 (Velocizzato)
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Reddit Home...", flush=True)
                   try:
                       page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=35000)
-                      time.sleep(random.uniform(8, 12))
+                      time.sleep(random.uniform(3, 5))
                   except Exception as e:
                       print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Reddit: {e}", flush=True)
                       
-                  # 2. Visita Google in HTTP/1.1 ed esegue una query
+                  # 2. Visita Google in HTTP/1.1 ed esegue una query (Velocizzato)
                   query = random.choice(WARMUP_QUERIES)
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Ricerca Google: '{query}'", flush=True)
                   try:
                       page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=30000)
-                      time.sleep(random.uniform(2, 4))
+                      time.sleep(random.uniform(1.5, 3))
                       accept_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
                       if accept_btn.is_visible(timeout=2000):
                           accept_btn.click()
-                          time.sleep(2)
+                          time.sleep(1.5)
                       
                       page.type("textarea[name='q'], input[name='q']", query)
                       page.keyboard.press("Enter")
-                      time.sleep(random.uniform(5, 8))
+                      time.sleep(random.uniform(2, 4))
                   except Exception as e:
                       print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Google: {e}", flush=True)
 
@@ -316,7 +315,7 @@ jobs:
                   context.close()
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Completato. Cookie estratti.", flush=True)
               except Exception as e:
-                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore critico: {e}", flush=True)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore di inizializzazione: {e}", flush=True)
                   
               return cookies, user_agent
 
@@ -333,12 +332,10 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # Fase 1: Esecuzione del riscaldamento sessione (Playwright)
           cookies, user_agent = run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
 
-          time.sleep(3)
+          time.sleep(2)
 
-          # Fase 2: Scraping principale con curl_cffi (SOCKS5h)
           print(f"[NODO {node_id}] [Scraping curl_cffi] Configurazione sessione...", flush=True)
           session = requests.Session(impersonate="chrome120")
           session.proxies = {
@@ -371,7 +368,8 @@ jobs:
                   if url != MY_TARGETS[0]:
                       gaussian_delay()
                       
-                  resp = session.get(url, timeout=30)
+                  # Timeout ridotto a 12s per evitare di bloccare la coda se un proxy rallenta
+                  resp = session.get(url, timeout=12)
                   html_content = resp.text
                   
                   is_ok, err_msg = validate_html(html_content, url)
@@ -412,7 +410,7 @@ jobs:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40006 + node_id # Porte 40007-40012 per lo Step 2
+          ACTIVE_PORT = 40006 + node_id
 
           failed_file = f"failed_node_{node_id}.json"
           if not os.path.exists(failed_file):
@@ -491,7 +489,7 @@ jobs:
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Reddit Home...", flush=True)
                   try:
                       page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=35000)
-                      time.sleep(random.uniform(8, 12))
+                      time.sleep(random.uniform(3, 5))
                   except Exception as e:
                       print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Reddit: {e}", flush=True)
                       
@@ -499,15 +497,15 @@ jobs:
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Ricerca Google: '{query}'", flush=True)
                   try:
                       page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=30000)
-                      time.sleep(random.uniform(2, 4))
+                      time.sleep(random.uniform(1.5, 3))
                       accept_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
                       if accept_btn.is_visible(timeout=2000):
                           accept_btn.click()
-                          time.sleep(2)
+                          time.sleep(1.5)
                       
                       page.type("textarea[name='q'], input[name='q']", query)
                       page.keyboard.press("Enter")
-                      time.sleep(random.uniform(5, 8))
+                      time.sleep(random.uniform(2, 4))
                   except Exception as e:
                       print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Google: {e}", flush=True)
 
@@ -515,7 +513,7 @@ jobs:
                   context.close()
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Completato.", flush=True)
               except Exception as e:
-                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore critico: {e}", flush=True)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore: {e}", flush=True)
 
           # --- INIZIO SCRIPT RECUPERO ---
           random_seed = str(random.randint(100000, 999999))
@@ -532,7 +530,7 @@ jobs:
 
           run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
 
-          time.sleep(3)
+          time.sleep(2)
 
           print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale di recupero...", flush=True)
           context = launch_persistent_context(
@@ -563,7 +561,7 @@ jobs:
 
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                      time.sleep(3)
+                      time.sleep(2)
                       try:
                           page.type("input#q", query_to_search)
                           page.keyboard.press("Enter")
@@ -572,7 +570,7 @@ jobs:
                           
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                      time.sleep(3)
+                      time.sleep(2)
                       try:
                           page.type("input[name=q]", query_to_search)
                           page.keyboard.press("Enter")
@@ -582,7 +580,8 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  passive_wait = random.randint(12, 22)
+                  # Soste passive ridotte nello Step 2 per velocizzare l'esecuzione
+                  passive_wait = random.randint(4, 8)
                   print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
                   time.sleep(passive_wait)
 
@@ -591,12 +590,12 @@ jobs:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
                               btn.click() 
-                              time.sleep(8)
+                              time.sleep(5)
                       except Exception:
                           pass
                       
                   if "creepjs" in url:
-                      time.sleep(6) 
+                      time.sleep(3) 
 
                   raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO (Fallback):\n{extract_text(raw_html, url)}\n"
@@ -611,7 +610,7 @@ jobs:
                       except Exception:
                           pass
                   
-                  visit_interval = random.uniform(4.0, 9.0)
+                  visit_interval = random.uniform(2.0, 4.0)
                   print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s prima del prossimo target...", flush=True)
                   time.sleep(visit_interval)
 
@@ -625,28 +624,27 @@ jobs:
         run: |
           echo "Avvio processi paralleli per STEP 1..."
           
-          # Inizializza preventivamente i file per impedire crash del live tailing
           touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
           
-          # Avvio del live tailing asincrono in background per stampare l'output a console in tempo reale
           tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
           TAIL_PID=$!
           
+          PIDS=()
           for i in {1..6}; do
             echo "Inizializzazione Nodo $i (Step 1)..."
             python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
             
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 11))
-              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
-              sleep $DELAY
+              # Staggering compresso per avvio rapido in parallelo
+              sleep 2
             fi
           done
 
           echo "Tutti i nodi Step 1 istanziati. Attesa completamento..."
-          wait
+          # Attende SOLO i PID degli script Python di scraping, ignorando il tail asincrono
+          wait "${PIDS[@]}"
           
-          # Interruzione del live tailing asincrono dello Step 1
           kill $TAIL_PID || true
           
           echo "STEP 1 completato. Pulizia dei container dello Step 1 per liberare porte e risorse..."
@@ -687,28 +685,26 @@ jobs:
         run: |
           echo "Avvio processi paralleli per STEP 2 sui target falliti..."
           
-          # Inizializza preventivamente i file per impedire crash del live tailing
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           
-          # Avvio del live tailing asincrono in background per stampare l'output a console in tempo reale
           tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
           TAIL_PID=$!
           
+          PIDS=()
           for i in {1..6}; do
             echo "Inizializzazione Nodo $i (Step 2)..."
             python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            PIDS+=($!)
             
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 11))
-              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
-              sleep $DELAY
+              sleep 2
             fi
           done
 
           echo "Tutti i nodi Step 2 istanziati. Attesa completamento..."
-          wait
+          # Attende solo i nodi dello Step 2
+          wait "${PIDS[@]}"
           
-          # Interruzione del live tailing asincrono dello Step 2
           kill $TAIL_PID || true
           
           echo "STEP 2 completato. Rimozione dei container STEP 2..."
