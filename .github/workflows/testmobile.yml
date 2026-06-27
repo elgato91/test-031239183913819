@@ -184,26 +184,7 @@ jobs:
               try:
                   page = context.new_page()
                   
-                  # 1. Visita Google ed esegue una ricerca casuale
-                  query = random.choice(WARMUP_QUERIES)
-                  print(f"[NODO {node_id}] [Warmup] Ricerca su Google: '{query}'", flush=True)
-                  page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=30000)
-                  time.sleep(random.uniform(2, 4))
-                  try:
-                      accept_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                      if accept_btn.is_visible(timeout=2000):
-                          accept_btn.click()
-                          time.sleep(2)
-                  except Exception:
-                      pass
-                  
-                  try:
-                      page.type("textarea[name='q'], input[name='q']", query)
-                      page.keyboard.press("Enter")
-                      time.sleep(random.uniform(5, 8))
-                  except Exception:
-                      page.goto(f"https://www.google.com/search?q={query.replace(' ', '+')}", wait_until="domcontentloaded")
-                      time.sleep(5)
+            
                       
                   # 2. Visita Wikipedia per accumulare cache e cookie stabili
                   print(f"[NODO {node_id}] [Warmup] Lettura pagina Wikipedia...", flush=True)
