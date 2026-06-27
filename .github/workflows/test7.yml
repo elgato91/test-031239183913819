@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -40,7 +40,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avvio controllato dei primi 6 container dedicati allo Step 1 (Porte 40001-40006)
+          # Avvio controllato dei primi 6 container dello Step 1 (Porte 40001-40006)
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -52,6 +52,9 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
             sleep 2
           done
+
+          echo "Attesa di 15 secondi per l'inizializzazione dei tunnel STEP 1..."
+          sleep 15
 
           # Endpoint IPv6 per il fallback rotativo
           ENDPOINTS=(
@@ -71,24 +74,24 @@ jobs:
             for tentativo in {1..5}; do
               echo "Tentativo $tentativo/5..."
               
-              # Tenta la connessione provando i vari endpoint uno ad uno
               for URL in "${ENDPOINTS[@]}"; do
                 echo "Test con endpoint: $URL"
                 IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL")
                 if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                  echo "Container $i pronto! Risposta: $IP"
+                  echo "Container $i pronto via $URL! Risposta: $IP"
                   SUCCESS=true
                   break 2
                 fi
+                sleep 1
               done
               
-              echo "Tutti gli endpoint hanno fallito per il container $i. Riavvio e attesa..."
+              echo "Nessun endpoint ha risposto per il container $i. Riavvio e attesa..."
               docker restart warproxy-$i
-              sleep 5
+              sleep 10
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non risponde dopo tentativi multipli."
+              echo "ERRORE CRITICO: Il container $i non risponde."
               exit 1
             fi
           done
@@ -96,7 +99,7 @@ jobs:
 
       - name: Avvio Setup STEP 2 in Background
         run: |
-          # Creazione dello script di inizializzazione per i container 7-12
+          # Creazione dello script asincrono per i container dello Step 2 (Porte 40007-40012)
           cat << 'EOF' > setup_step2_bg.sh
           #!/bin/bash
           echo "[BG STEP 2] Avvio creazione container 7-12 in background..."
@@ -112,6 +115,9 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
             sleep 2
           done
+
+          echo "[BG STEP 2] Attesa di 15 secondi per consentire l'inizializzazione dei tunnel..."
+          sleep 15
 
           ENDPOINTS=(
             "https://api6.ipify.org?format=json"
@@ -133,15 +139,16 @@ jobs:
                   SUCCESS=true
                   break 2
                 fi
+                sleep 1
               done
               
-              echo "[BG STEP 2] Fallimento su tutti gli endpoint per container $i. Riavvio..."
+              echo "[BG STEP 2] Fallimento al tentativo $tentativo per il container $i. Riavvio e attesa..."
               docker restart warproxy-$i
-              sleep 5
+              sleep 10
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "[BG STEP 2] ERRORE: Impossibile avviare container $i" > /tmp/step2_status
+              echo "ERRORE" > /tmp/step2_status
               exit 1
             fi
           done
@@ -151,7 +158,6 @@ jobs:
           EOF
           
           chmod +x setup_step2_bg.sh
-          # Esecuzione asincrona reindirizzando l'output per non bloccare la pipeline
           ./setup_step2_bg.sh > step2_bg_setup.log 2>&1 &
           echo "Setup dello STEP 2 avviato in background."
 
@@ -619,6 +625,13 @@ jobs:
         run: |
           echo "Avvio processi paralleli per STEP 1..."
           
+          # Inizializza preventivamente i file per impedire crash del live tailing
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          
+          # Avvio del live tailing asincrono in background per stampare l'output a console in tempo reale
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
+          
           for i in {1..6}; do
             echo "Inizializzazione Nodo $i (Step 1)..."
             python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
@@ -632,23 +645,30 @@ jobs:
 
           echo "Tutti i nodi Step 1 istanziati. Attesa completamento..."
           wait
+          
+          # Interruzione del live tailing asincrono dello Step 1
+          kill $TAIL_PID || true
+          
+          echo "STEP 1 completato. Pulizia dei container dello Step 1 per liberare porte e risorse..."
+          for i in {1..6}; do
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
+          done
 
       - name: Sincronizzazione e Verifica Container STEP 2
         run: |
           echo "Verifica dello stato del setup dei container STEP 2 avviato precedentemente in background..."
           
-          # Stampa i log intermedi del setup asincrono per monitorare i progressi
           echo "=== LOG SETUP STEP 2 FINORA ==="
           cat step2_bg_setup.log || true
           echo "==============================="
           
-          # Attende finché il processo in background non ha completato la scrittura dello stato
           TENTATIVI=0
           while [ ! -f /tmp/step2_status ]; do
             echo "In attesa del file di stato dei container STEP 2 (Tempo trascorso: $((TENTATIVI * 5))s)..."
             sleep 5
             TENTATIVI=$((TENTATIVI + 1))
-            if [ $TENTATIVI -gt 60 ]; then # Timeout di sicurezza a 5 minuti
+            if [ $TENTATIVI -gt 60 ]; then
               echo "ERRORE CRITICO: Il processo asincrono dello STEP 2 non si è completato in tempo."
               exit 1
             fi
@@ -667,6 +687,13 @@ jobs:
         run: |
           echo "Avvio processi paralleli per STEP 2 sui target falliti..."
           
+          # Inizializza preventivamente i file per impedire crash del live tailing
+          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
+          
+          # Avvio del live tailing asincrono in background per stampare l'output a console in tempo reale
+          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
+          TAIL_PID=$!
+          
           for i in {1..6}; do
             echo "Inizializzazione Nodo $i (Step 2)..."
             python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
@@ -680,15 +707,14 @@ jobs:
 
           echo "Tutti i nodi Step 2 istanziati. Attesa completamento..."
           wait
-
-          echo "=== STAMPA LOG COMPLETI STEP 1 ==="
-          for i in {1..6}; do
-            echo "=== LOG NODO $i STEP 1 ===" && cat node${i}_step1.log || true
-          done
-
-          echo "=== STAMPA LOG COMPLETI STEP 2 ==="
-          for i in {1..6}; do
-            echo "=== LOG NODO $i STEP 2 ===" && cat node${i}_step2.log || true
+          
+          # Interruzione del live tailing asincrono dello Step 2
+          kill $TAIL_PID || true
+          
+          echo "STEP 2 completato. Rimozione dei container STEP 2..."
+          for i in {7..12}; do
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
           done
 
           # Aggregazione finale e unione di tutti i report
