@@ -102,7 +102,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Corretto get_safe_content e scrolling protetto)
+      - name: Creazione script Python (Corretto get_safe_content, get_query_from_url e indici globali)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -236,7 +236,7 @@ jobs:
               if not links:
                   for a in soup.select('a[href]'):
                       href = a['href']
-                      if href.startswith('http') and not any(x in href for x in ['google', 'bing.com', 'yahoo.com', 'duckduckgo', 'startpage', 'microsoft', 'yimg', 'gstatic', 'facebook.com', 'twitter.com', 'instagram.com']):
+                      if href.startswith('http' ) and not any(x in href for x in ['google', 'bing.com', 'yahoo.com', 'duckduckgo', 'startpage', 'microsoft', 'yimg', 'gstatic', 'facebook.com', 'twitter.com', 'instagram.com']):
                           links.append(href)
 
               seen = set()
@@ -249,7 +249,7 @@ jobs:
               return unique_links[:40]
 
           def human_scroll_to_bottom(page, scrolls=3):
-              """Esegue uno scorrimento fluido protetto da eccezioni di navigazione/distruzione del contesto."""
+              """Esegue uno scorrimento fluido simulando un utente reale per caricare gli elementi lazy-load."""
               print("[Scorrimento] Avvio scorrimento fluido della pagina...", flush=True)
               for _ in range(scrolls):
                   try:
@@ -305,7 +305,17 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore warmup: {e}", flush=True)
 
-          # --- INIZIO SCRIPT NORMALE ---
+          # --- INIZIO SCRIPT NORMALE (Rientro Zero Assoluto) ---
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          num_nodes = 6
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
+
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
