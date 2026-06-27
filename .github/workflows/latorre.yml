@@ -27,42 +27,19 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (IPv6 con chiavi WARP+ dinamiche)
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # 1. Recupera l'elenco di chiavi WARP+ gratuite e valide dalla community
-          KEYS_URL="https://raw.githubusercontent.com/ircfspace/warpkey/main/plus/lite"
-          KEYS_RAW=$(curl -s "$KEYS_URL")
-          
-          # 2. Converte la lista grezza in un array Bash (una chiave per riga)
-          readarray -t KEYS <<< "$KEYS_RAW"
-
-          # 3. Avvia i 6 container distribuendo una chiave diversa a ciascuno
           for i in {1..6}; do
             PORT=$((40000 + i))
-            
-            # Seleziona la chiave i-esima dall'array
-            CURRENT_KEY="${KEYS[$((i-1))]}"
-            
-            if [ -z "$CURRENT_KEY" ]; then
-              echo "Avvio container warproxy-$i sulla porta $PORT senza chiave custom (fallback su WARP base)..."
-              docker run --name warproxy-$i \
-                --network host \
-                -e SOCKS5_PORT=$PORT \
-                -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-                -e VERBOSE=true \
-                -d ghcr.io/kingcc/warproxy:latest
-            else
-              echo "Avvio container warproxy-$i sulla porta $PORT con chiave WARP+: $CURRENT_KEY"
-              docker run --name warproxy-$i \
-                --network host \
-                -e SOCKS5_PORT=$PORT \
-                -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-                -e WGCF_LICENSE_KEY="$CURRENT_KEY" \
-                -e VERBOSE=true \
-                -d ghcr.io/kingcc/warproxy:latest
-            fi
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
               DELAY=$((3 + RANDOM % 2))
@@ -199,23 +176,29 @@ jobs:
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # CONFIGURAZIONE MINIMALE: rimosso qualsiasi flag in conflitto con i protocolli standard di rete
+          # CONFIGURAZIONE STRUTTURATA PER EVASIONE SU BINARIO GRATUITO
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+              f"--fingerprint-fonts-dir={windows_fonts_dir}",
+              "--fingerprint-noise=false" # Disabilita l'iniezione sintetica di rumore per non essere rilevati da FingerprintJS/Pixelscan
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard con viewport allineato", flush=True)
 
-          # viewport=None permette al browser di usare la propria geometria coerente impostata a monte
+          # viewport impostato esplicitamente per evitare incongruenze geometriche rilevabili dai bot checker
           context = launch_context(
               headless=False,
               humanize=True,
+              human_config={
+                  "typing_delay": 100,       # Digitazione realistica standard
+                  "mistype_chance": 0.03,    # 3% di possibilità di piccoli errori con correzione automatica
+                  "idle_between_actions": True
+              },
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              viewport=None, 
+              viewport={"width": 1920, "height": 1080}, 
               args=extra_args
           )
 
@@ -230,12 +213,12 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Navigazione e gestione ricerche
+                  # Navigazione e gestione ricerche usando i metodi nativi raccomandati dal wrapper
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.type("input#q", query_to_search)
                           page.keyboard.press("Enter")
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -244,7 +227,7 @@ jobs:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.type("input[name=q]", query_to_search)
                           page.keyboard.press("Enter")
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -252,10 +235,11 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # SILENZIO ASSOLUTO CDP (15s): Cruciale per consentire a Cloudflare e reCAPTCHA 
-                  # di completare le verifiche senza rilevare interrogazioni continue sul DOM.
-                  print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
-                  time.sleep(15)
+                  # ATTESA SULLA PAGINA CON DELAY RANDOMICO (Modifica richiesta)
+                  # Un'attesa variabile tra 12 e 22 secondi simula una lettura reale e confonde i pattern dei bot checker
+                  passive_wait = random.randint(12, 22)
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
+                  time.sleep(passive_wait)
 
                   # Click specifico finalizzato unicamente a pixelscan (se presente)
                   if "pixelscan.net" in url:
@@ -284,6 +268,12 @@ jobs:
                           page.close()
                       except Exception:
                           pass
+                  
+                  # DELAY RANDOMICO TRA VISITE (Modifica richiesta)
+                  # Un intervallo casuale tra 4 e 9 secondi impedisce richieste con frequenze fisse
+                  visit_interval = random.uniform(4.0, 9.0)
+                  print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s prima del prossimo target...", flush=True)
+                  time.sleep(visit_interval)
 
           context.close()
 
@@ -291,21 +281,23 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (6 Nodi)
+      - name: Esecuzione Scraping Parallelo (6 Nodi con Staggered Delay)
         run: |
-          echo "Avvio processi paralleli su 6 nodi..."
-          python -u m2_insocket.py 1 > node1.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 2 > node2.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 3 > node3.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 4 > node4.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 5 > node5.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 6 > node6.log 2>&1 &
+          echo "Avvio processi paralleli su 6 nodi con avvio scaglionato casuale..."
+          
+          for i in {1..6}; do
+            echo "Inizializzazione del Nodo $i..."
+            python -u m2_insocket.py $i > node$i.log 2>&1 &
+            
+            if [ $i -lt 6 ]; then
+              # Genera un delay casuale tra 5 e 15 secondi prima di far partire lo scraper successivo
+              DELAY=$((5 + RANDOM % 11))
+              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
+              sleep $DELAY
+            fi
+          done
 
+          echo "Tutti i nodi sono stati instanziati. Attesa del completamento dello scraping..."
           wait
 
           echo "=== LOG NODO 1 ===" && cat node1.log || true
