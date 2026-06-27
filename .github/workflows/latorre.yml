@@ -181,8 +181,7 @@ jobs:
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}",
-              "--fingerprint-noise=false" # Disabilita l'iniezione sintetica di rumore per non essere rilevati da FingerprintJS/Pixelscan
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
           print(f"[NODO {node_id}] Avvio Context Standard con viewport allineato", flush=True)
