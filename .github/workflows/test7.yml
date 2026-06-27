@@ -50,11 +50,11 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 1.5
+            sleep 1
           done
 
-          echo "Attesa di 15 secondi per l'inizializzazione dei tunnel STEP 1..."
-          sleep 15
+          echo "Attesa di 12 secondi per l'inizializzazione dei tunnel STEP 1..."
+          sleep 12
 
           # Endpoint IPv6 per il fallback rotativo
           ENDPOINTS=(
@@ -95,70 +95,6 @@ jobs:
             fi
           done
           echo "=================================================="
-
-      - name: Avvio Setup STEP 2 in Background
-        run: |
-          # Creazione dello script asincrono per i container dello Step 2 (Porte 40007-40012)
-          cat << 'EOF' > setup_step2_bg.sh
-          #!/bin/bash
-          echo "[BG STEP 2] Avvio creazione container 7-12 in background..."
-          
-          for i in {7..12}; do
-            PORT=$((40000 + i))
-            echo "[BG STEP 2] Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 1.5
-          done
-
-          echo "[BG STEP 2] Attesa di 15 secondi per consentire l'inizializzazione dei tunnel..."
-          sleep 15
-
-          ENDPOINTS=(
-            "https://api6.ipify.org?format=json"
-            "https://v6.ident.me/.json"
-            "https://ifconfig.co/json"
-            "https://inet-ip.info/json"
-          )
-
-          for i in {7..12}; do
-            PORT=$((40000 + i))
-            echo "[BG STEP 2] Verifica container $i (PORTA $PORT)..."
-            SUCCESS=false
-            
-            for tentativo in {1..5}; do
-              for URL in "${ENDPOINTS[@]}"; do
-                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL")
-                if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                  echo "[BG STEP 2] Container $i pronto via $URL!"
-                  SUCCESS=true
-                  break 2
-                fi
-                sleep 0.5
-              done
-              
-              echo "[BG STEP 2] Fallimento al tentativo $tentativo per il container $i. Riavvio e attesa..."
-              docker restart warproxy-$i
-              sleep 8
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE" > /tmp/step2_status
-              exit 1
-            fi
-          done
-
-          echo "[BG STEP 2] Configurazione completata con successo."
-          echo "PRONTO" > /tmp/step2_status
-          EOF
-          
-          chmod +x setup_step2_bg.sh
-          ./setup_step2_bg.sh > step2_bg_setup.log 2>&1 &
-          echo "Setup dello STEP 2 avviato in background."
 
       - name: Creazione Script Python - STEP 1 (Cloakbrowser -> curl-cffi)
         run: |
@@ -368,7 +304,7 @@ jobs:
                   if url != MY_TARGETS[0]:
                       gaussian_delay()
                       
-                  # Timeout ridotto a 12s per evitare di bloccare la coda se un proxy rallenta
+                  # Timeout ridotto a 12s per evitare attese inutili
                   resp = session.get(url, timeout=12)
                   html_content = resp.text
                   
@@ -580,7 +516,6 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # Soste passive ridotte nello Step 2 per velocizzare l'esecuzione
                   passive_wait = random.randint(4, 8)
                   print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
                   time.sleep(passive_wait)
@@ -636,50 +571,77 @@ jobs:
             PIDS+=($!)
             
             if [ $i -lt 6 ]; then
-              # Staggering compresso per avvio rapido in parallelo
               sleep 2
             fi
           done
 
           echo "Tutti i nodi Step 1 istanziati. Attesa completamento..."
-          # Attende SOLO i PID degli script Python di scraping, ignorando il tail asincrono
+          # Attende SOLO i nodi Python dello Step 1 (evita blocchi infiniti)
           wait "${PIDS[@]}"
           
           kill $TAIL_PID || true
           
-          echo "STEP 1 completato. Pulizia dei container dello Step 1 per liberare porte e risorse..."
+          echo "STEP 1 completato. Pulizia totale dei container dello Step 1..."
           for i in {1..6}; do
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
           done
 
-      - name: Sincronizzazione e Verifica Container STEP 2
+      - name: Setup e Verifica Container STEP 2 (IPv6)
         run: |
-          echo "Verifica dello stato del setup dei container STEP 2 avviato precedentemente in background..."
-          
-          echo "=== LOG SETUP STEP 2 FINORA ==="
-          cat step2_bg_setup.log || true
-          echo "==============================="
-          
-          TENTATIVI=0
-          while [ ! -f /tmp/step2_status ]; do
-            echo "In attesa del file di stato dei container STEP 2 (Tempo trascorso: $((TENTATIVI * 5))s)..."
-            sleep 5
-            TENTATIVI=$((TENTATIVI + 1))
-            if [ $TENTATIVI -gt 60 ]; then
-              echo "ERRORE CRITICO: Il processo asincrono dello STEP 2 non si è completato in tempo."
+          echo "Avvio dei container dello Step 2 (Porte 40007-40012)..."
+          for i in {7..12}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 0.5
+          done
+
+          echo "Attesa di 12 secondi per l'inizializzazione dei tunnel STEP 2..."
+          sleep 12
+
+          ENDPOINTS=(
+            "https://api6.ipify.org?format=json"
+            "https://v6.ident.me/.json"
+            "https://ifconfig.co/json"
+            "https://inet-ip.info/json"
+          )
+
+          for i in {7..12}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            SUCCESS=false
+            
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5..."
+              
+              for URL in "${ENDPOINTS[@]}"; do
+                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL")
+                if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                  echo "Container $i pronto via $URL! Risposta: $IP"
+                  SUCCESS=true
+                  break 2
+                fi
+                sleep 0.5
+              done
+              
+              echo "Nessun endpoint ha risposto per il container $i. Riavvio e attesa..."
+              docker restart warproxy-$i
+              sleep 8
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non risponde."
               exit 1
             fi
           done
-          
-          STATUS=$(cat /tmp/step2_status)
-          if [ "$STATUS" != "PRONTO" ]; then
-            echo "ERRORE CRITICO: Il setup in background dello STEP 2 ha riscontrato un fallimento durante l'avvio."
-            cat step2_bg_setup.log || true
-            exit 1
-          else
-            echo "Successo: Tutti i container dello STEP 2 sono già attivi, verificati e pronti all'uso!"
-          fi
+          echo "=================================================="
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
