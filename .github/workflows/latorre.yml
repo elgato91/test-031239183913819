@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per metriche corrette)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -27,35 +27,24 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (Forzatura Strict IPv6)
+      - name: Setup 6 WARProxy Docker Containers (Versione Originale Sicura)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
-            
-            # Aggiunto --cap-add=NET_ADMIN per permettere modifiche di rete/routing interne
             docker run --name warproxy-$i \
               --network host \
-              --cap-add=NET_ADMIN \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
-            sleep 4
-
-            # FORZATURA 1: DNS IPv6 Preference tramite gai.conf
-            docker exec warproxy-$i sh -c "echo 'precedence ::ffff:0:0/96  10' >> /etc/gai.conf" || true
-            
-            # FORZATURA 2: Istruisce il demone WARP ad usare ESCLUSIVAMENTE la famiglia IPv6
-            # Testiamo entrambe le sintassi note di warp-cli per compatibilità
-            docker exec warproxy-$i warp-cli --accept-tos set-families-mode v6 || true
-            docker exec warproxy-$i warp-cli --accept-tos settings family v6 || true
-
             if [ $i -lt 6 ]; then
-              sleep $((3 + RANDOM % 3))
+              DELAY=$((5 + RANDOM % 4))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
             fi
           done
 
@@ -67,35 +56,35 @@ jobs:
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
+            DELAY=$((5 + RANDOM % 4))
+            sleep $DELAY
+
             SUCCESS=false
             for tentativo in {1..5}; do
-              # Chiamata di test strettamente su IPv6 per assicurarci che il tunnel funzioni
+              echo "Tentativo $tentativo/5 per container $i..."
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP IPv6: $IP"
+                echo "Container $i pronto! IP: $IP"
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde in IPv6. Riavvio in corso..."
+                echo "Container $i non risponde. Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 5
-                # Riapplica forzature post-riavvio
-                docker exec warproxy-$i warp-cli --accept-tos set-families-mode v6 || true
-                sleep 5
+                sleep 8
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Container $i inaccessibile in IPv6."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               exit 1
             fi
           done
           echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Avvio Xvfb (Virtual Display Headful 1920x1080)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -186,19 +175,20 @@ jobs:
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # CONFIGURAZIONE C++ STEALTH PURA
+          # I flag C++ nativi di CloakBrowser, senza script JS sporchi
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
               f"--fingerprint-fonts-dir={windows_fonts_dir}",
-              "--fingerprint-platform=windows",      # Maschera Linux come Windows
-              "--fingerprint-screen-width=1920",     # Allinea a Xvfb
+              "--fingerprint-noise=false",            # NIENTE RUMORE: FingerprintJS vede che l'impronta è legittima
+              "--fingerprint-platform=windows",       # Maschera Linux -> Windows
+              "--fingerprint-screen-width=1920",      # Allineamento con Xvfb
               "--fingerprint-screen-height=1080",
-              "--fingerprint-webrtc-ip=auto"         # Lascia gestire l'IP WebRTC nativamente
+              "--fingerprint-webrtc-ip=auto"          # Auto-rilevamento IP WebRTC
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Stealth (No JS Injection)", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Standard con CloakBrowser C++ Puro", flush=True)
 
           context = launch_context(
               headless=False,
@@ -206,8 +196,8 @@ jobs:
               human_preset="careful", 
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              stealth_args=False,  # <-- FONDAMENTALE: Disabilita l'iniezione JS rilevabile (risolve "azeaze")
-              viewport={"width": 1920, "height": 1080}, # Match perfetto con il sistema operativo spoofato
+              stealth_args=False, # <--- IL VERO FIX: Niente iniezione JS, zero tracce su "azeaze" e CreepJS
+              viewport={"width": 1920, "height": 1080}, # <--- IL VERO FIX: Niente warning "Virtual Machine"
               args=extra_args
           )
 
@@ -226,7 +216,7 @@ jobs:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(80, 200), timeout=3000)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(80, 150), timeout=3000)
                           page.keyboard.press("Enter")
                       except:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -235,7 +225,7 @@ jobs:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(80, 200), timeout=3000)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(80, 150), timeout=3000)
                           page.keyboard.press("Enter")
                       except:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -243,7 +233,7 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # Pausa passiva
+                  # SILENZIO ASSOLUTO CDP
                   print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
                   time.sleep(15)
 
@@ -303,7 +293,8 @@ jobs:
           echo "=== LOG NODO 6 ===" && cat node6.log || true
           echo "=================="
 
-          cat output_node_*.txt > output_macchina2_cdp.txt 2>/dev/null || true
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
