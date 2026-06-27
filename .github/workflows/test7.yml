@@ -1,76 +1,126 @@
-name: Test RAG Challenge 2026
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on:
+on: 
   workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          # Aggiorna la cache dei font di sistema
+          
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze
+      - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup Cloudflare WARP
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update && sudo apt-get install -y cloudflare-warp
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos connect
-          sleep 5
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-      - name: Avvio Xvfb (Virtual Display Stabile)
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+
+            if [ $i -lt 6 ]; then
+              DELAY=$((3 + RANDOM % 2))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
+            fi
+          done
+
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
+
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+        run: |
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            DELAY=$((3 + RANDOM % 2))
+            sleep $DELAY
+
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5 per container $i..."
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 5
+              fi
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non è hackerabile o raggiungibile dopo 5 riavvii."
+              exit 1
+            fi
+          done
+          echo "=================================================="
+
+      - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (Macchina 2)
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (Profile Warming HTTP/1.1 -> HTTP/2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
+          import sys
           import random
-          import requests
-          from cloakbrowser import launch_context
+          import math
+          import os
+          import re
+          from urllib.parse import urlparse, parse_qs, urlunparse, parse_qsl, urlencode, unquote
           from bs4 import BeautifulSoup
-          from urllib.parse import urlparse, parse_qs
+          from cloakbrowser import launch_persistent_context
 
           TARGETS = [
-              "https://api64.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
-              "https://guide.michelin.com/en/it/lazio/roma/restaurants",
-              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
-              "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
               "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
@@ -78,12 +128,20 @@ jobs:
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-          results = ""
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          num_nodes = 6
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -103,174 +161,404 @@ jobs:
                   pass
               return default
 
-          def handle_cookie_consent(page):
-              """Accetta i cookie ma solo con un timeout rigoroso di 1.5s per non bloccare mai la navigazione"""
-              try:
-                  consent_selectors = [
-                      "button:has-text('Accetta tutto')",
-                      "button:has-text('Accept all')",
-                      "button:has-text('Consenti')",
-                      "button:has-text('I agree')",
-                      "button:has-text('Accetto')",
-                      "button:has-text('Agree')",
-                      "button:has-text('Accept')",
-                      "button:has-text('OK')",
-                      "button:has-text('Allow all')",
-                      "button:has-text('Consenti l\\'uso dei cookie')",
-                      "#L2AGLb"
-                  ]
-                  for selector in consent_selectors:
-                      btn = page.locator(selector)
-                      if btn.is_visible():
-                          btn.click(timeout=1500)
-                          time.sleep(0.5)
-                          print(f"Cookie bypassato: {selector}", flush=True)
+          def get_safe_content(page, retries=3):
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(3)
+                      else:
                           break
+              return ""
+
+          def add_or_update_query_param(url, param_name, param_value):
+              """Utility per iniettare parametri di query come num=50 o count=50 nei motori di ricerca."""
+              parsed = urlparse(url)
+              qsl = parse_qsl(parsed.query)
+              qsl = [(k, v) for k, v in qsl if k.lower() != param_name.lower()]
+              qsl.append((param_name, param_value))
+              new_query = urlencode(qsl)
+              return urlunparse((
+                  parsed.scheme,
+                  parsed.netloc,
+                  parsed.path,
+                  parsed.params,
+                  new_query,
+                  parsed.fragment
+              ))
+
+          def detect_search_engine(url):
+              """Identifica il motore di ricerca escludendo specificamente Yahoo Finance."""
+              try:
+                  parsed = urlparse(url)
+                  domain = parsed.netloc.lower()
+                  path = parsed.path.lower()
+                  
+                  if "finance.yahoo.com" in domain:
+                      return None
+                  
+                  if "google." in domain and "/search" in path:
+                      return "google"
+                  elif "bing.com" in domain and "/search" in path:
+                      return "bing"
+                  elif "yahoo.com" in domain and "/search" in path:
+                      return "yahoo"
+                  elif "duckduckgo.com" in domain:
+                      return "duckduckgo"
+                  elif "startpage.com" in domain:
+                      return "startpage"
               except Exception:
                   pass
+              return None
 
-          # Allineamento parametri geografici
-          print("Rilevamento parametri geografici dell'IP di rete...", flush=True)
-          timezone = "UTC"
-          locale = "en-US"
+          def scroll_to_bottom(page, max_scrolls=6):
+              """Effettua uno scroll incrementale simulato per attivare lazy loading e infinite scroll."""
+              print(f"[Scroll] Avvio scorrimento dinamico della pagina...", flush=True)
+              last_height = page.evaluate("document.body.scrollHeight")
+              for i in range(max_scrolls):
+                  page.evaluate("window.scrollBy(0, window.innerHeight * 0.85);")
+                  time.sleep(random.uniform(1.2, 2.4))
+                  new_height = page.evaluate("document.body.scrollHeight")
+                  if new_height == last_height and i > 2:
+                      break
+                  last_height = new_height
 
-          geo_services = [
-              ("http://ip-api.com/json/", lambda d: (d.get("timezone"), d.get("countryCode", "US"))),
-              ("https://ipapi.co/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-              ("https://ipwho.is/", lambda d: (d.get("timezone"), d.get("country_code", "US")))
+          def parse_links_from_html(html_content, engine):
+              """Estrae e ripulisce i link organici escludendo pubblicità, tracking e link interni."""
+              soup = BeautifulSoup(html_content, 'html.parser')
+              links = []
+              
+              if engine == 'google':
+                  for a in soup.select('#search .g a[href], #rso .g a[href], div.g a[href]'):
+                      href = a.get('href', '')
+                      if href.startswith('http') and not any(x in href for x in ['google.com', 'webcache.googleusercontent.com', 'youtube.com/search', 'accounts.google.com']):
+                          if not '/search?' in href:
+                              links.append(href)
+                              
+              elif engine == 'bing':
+                  for a in soup.select('#b_results .b_algo h2 a[href], #b_results .b_algo a[href], .b_algo h2 a[href]'):
+                      href = a.get('href', '')
+                      if href.startswith('http') and not any(x in href for x in ['bing.com', 'microsoft.com', 'msn.com', 'go.microsoft.com']):
+                          links.append(href)
+                          
+              elif engine == 'yahoo':
+                  for a in soup.select('.algo a[href], .ac-algo[href], div.compTitle a[href], #web a[href]'):
+                      href = a.get('href', '')
+                      # Estrazione redirect nativo Yahoo
+                      if 'r.search.yahoo.com' in href or '/RU=' in href:
+                          match = re.search(r'/RU=([^/]+)', href)
+                          if match:
+                              href = unquote(match.group(1))
+                      if href.startswith('http') and not any(x in href for x in ['yahoo.com', 'search.yahoo.com', 'yahoo.co.jp', 'yimg.com', 'yimg.jp']):
+                          links.append(href)
+                          
+              elif engine == 'duckduckgo':
+                  for a in soup.select('a.result__a[href], a[data-testid="result-title-a"][href]'):
+                      href = a.get('href', '')
+                      # Estrazione redirect nativo DDG
+                      if '/l/?' in href or 'uddg=' in href:
+                          parsed = urlparse(href)
+                          qs = parse_qs(parsed.query)
+                          if 'uddg' in qs:
+                              href = qs['uddg'][0]
+                      if href.startswith('http') and not any(x in href for x in ['duckduckgo.com']):
+                          links.append(href)
+                          
+              elif engine == 'startpage':
+                  for a in soup.select('.w-gl__result-title-link[href], .w-gl__result-title[href], a.w-gl__result-link[href], .w-gl__result a[href]'):
+                      href = a.get('href', '')
+                      if href.startswith('http') and not any(x in href for x in ['startpage.com', 'google.com']):
+                          links.append(href)
+                          
+              # Fallback generico robusto nel caso i selettori specifici falliscano a causa di aggiornamenti dei motori
+              if not links:
+                  blacklist = ['privacy', 'terms', 'cookies', 'settings', 'help', 'about', 'advertising', 'feedback', 'login', 'signup', 'support', 'googleads', '/aclk', '/url?q=']
+                  for a in soup.find_all('a', href=True):
+                      href = a['href']
+                      if href.startswith('http'):
+                          if not any(b in href.lower() for b in blacklist):
+                              domain = urlparse(href).netloc.lower()
+                              if not any(se in domain for se in ['google.', 'bing.com', 'yahoo.com', 'duckduckgo.com', 'startpage.com']):
+                                  links.append(href)
+                                  
+              # Deduplica preservando l'ordine di apparizione
+              seen = set()
+              unique_links = []
+              for link in links:
+                  if link not in seen:
+                      seen.add(link)
+                      unique_links.append(link)
+                      
+              return unique_links
+
+          def scrape_search_results(page, url, engine, target_count=40):
+              """Naviga, ottimizza la query, effettua scroll e gestisce l'eventuale paginazione per raggiungere 40 risultati."""
+              unique_links = []
+              
+              # Ottimizzazione dei parametri URL ove supportato per estrarre 50 risultati al primo colpo
+              if engine == 'google':
+                  url = add_or_update_query_param(url, 'num', '50')
+              elif engine == 'bing':
+                  url = add_or_update_query_param(url, 'count', '50')
+              elif engine == 'yahoo':
+                  url = add_or_update_query_param(url, 'n', '50')
+                  
+              print(f"[{engine.upper()}] Navigazione verso: {url}", flush=True)
+              try:
+                  page.goto(url, wait_until="domcontentloaded", timeout=45000)
+              except Exception as e:
+                  print(f"Errore nel caricamento iniziale di {engine.upper()}: {e}", flush=True)
+                  return []
+                  
+              scroll_to_bottom(page, max_scrolls=4)
+              time.sleep(3)
+              
+              raw_html = get_safe_content(page)
+              unique_links = parse_links_from_html(raw_html, engine)
+              
+              # Paginazione interattiva di fallback nel caso in cui non si raggiungano i 40 link organici
+              page_num = 1
+              max_pages = 4
+              
+              while len(unique_links) < target_count and page_num < max_pages:
+                  print(f"[{engine.upper()}] Estratti {len(unique_links)}/{target_count} link. Tentativo di paginazione...", flush=True)
+                  next_button = None
+                  try:
+                      if engine == 'google':
+                          next_button = page.locator("#pnnext, a:has-text('Avanti'), a:has-text('Next')").first
+                      elif engine == 'bing':
+                          next_button = page.locator("a.sb_pagN, a[title='Pagina successiva'], a[title='Next page']").first
+                      elif engine == 'yahoo':
+                          next_button = page.locator("a.next, a:has-text('Next'), a:has-text('Avanti')").first
+                      elif engine == 'duckduckgo':
+                          next_button = page.locator("input[value='Next'], input[value='Avanti'], form[action='/html/'] input[type='submit']").first
+                      elif engine == 'startpage':
+                          next_button = page.locator("form.pagination__form button, form.pagination__form input[type='submit']").first
+                          
+                      if next_button:
+                          next_button.wait_for(state="visible", timeout=3000)
+                          next_button.click()
+                          page_num += 1
+                          try:
+                              page.wait_for_load_state("domcontentloaded", timeout=15000)
+                          except Exception:
+                              pass
+                          time.sleep(random.uniform(4.0, 7.0))
+                          scroll_to_bottom(page, max_scrolls=3)
+                          
+                          raw_html = get_safe_content(page)
+                          new_links = parse_links_from_html(raw_html, engine)
+                          for nl in new_links:
+                              if nl not in unique_links:
+                                  unique_links.append(nl)
+                      else:
+                          print(f"[{engine.upper()}] Pulsante di paginazione non trovato. Fine della scansione.", flush=True)
+                          break
+                  except Exception as ex:
+                      print(f"[{engine.upper()}] Impossibile procedere alla pagina successiva: {ex}", flush=True)
+                      break
+                      
+              return unique_links[:target_count]
+
+          def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
+              """Avvia temporaneamente il browser in HTTP/1.1 su siti sicuri non-Google per scaldare cookie e sessioni."""
+              print(f"[NODO {node_id}] [Warmup HTTP/1.1] Inizializzazione profilo su siti sicuri...", flush=True)
+              warmup_args = extra_args_base + ["--disable-http2"]
+              
+              try:
+                  context = launch_persistent_context(
+                      profile_dir,
+                      headless=False,
+                      humanize=True,
+                      human_config={
+                          "typing_delay": 120,
+                          "mistype_chance": 0.03,
+                          "idle_between_actions": True
+                      },
+                      proxy=f"socks5://127.0.0.1:{active_port}",
+                      geoip=True,
+                      viewport={"width": 1920, "height": 1080},
+                      args=warmup_args
+                  )
+                  
+                  page = context.new_page()
+                  
+                  # 1. Visita la home page di Reddit
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Reddit Home...", flush=True)
+                  try:
+                      page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(random.uniform(8, 12)) 
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Reddit: {e}", flush=True)
+                      
+                  # 2. Visita Wikipedia Pagina Casuale (Sicura, nessun rischio di blocco)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Wikipedia...", flush=True)
+                  try:
+                      page.goto("https://it.wikipedia.org/wiki/Speciale:PaginaCasuale", wait_until="domcontentloaded", timeout=25000)
+                      time.sleep(random.uniform(5, 8))
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Wikipedia: {e}", flush=True)
+
+                  page.close()
+                  context.close()
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Completato con successo.", flush=True)
+              except Exception as e:
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore critico nel warmup: {e}", flush=True)
+
+          # --- INIZIO SCRAPER PRINCIPALE ---
+          random_seed = str(random.randint(100000, 999999))
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
+
+          extra_args_base = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          for url, parse_func in geo_services:
-              try:
-                  print(f"Tentativo con {url}...", flush=True)
-                  response = requests.get(url, timeout=5)
-                  if response.status_code == 200:
-                      data = response.json()
-                      tz, loc = parse_func(data)
-                      if tz:
-                          timezone = tz
-                          locale = loc
-                          if len(locale) == 2:
-                              country_to_locale = {
-                                  "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                  "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                              }
-                              locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                          print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                          break
-              except Exception as e:
-                  print(f"Avviso: {url} non raggiungibile ({e}). Provo il servizio successivo...", flush=True)
+          # Fase 1: Riscaldamento protettivo e leggero in HTTP/1.1
+          run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
 
-          # Generazione seed hardware casuale e coerente
-          random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
+          time.sleep(3)
 
-          context = launch_context(
+          # Fase 2: Scraping principale in HTTP/2
+          print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale...", flush=True)
+          context = launch_persistent_context(
+              profile_dir,
               headless=False,
               humanize=True,
-              timezone=timezone,
-              locale=locale,
-              # Impostiamo l'altezza a 950 per evitare il paradosso matematico innerHeight > outerHeight
-              viewport={"width": 1920, "height": 950},
-              args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",
-                  f"--fingerprint-locale={locale}",
-                  f"--fingerprint={random_seed}"
-              ]
+              human_config={
+                  "typing_delay": 100,
+                  "mistype_chance": 0.03,
+                  "idle_between_actions": True
+              },
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,
+              viewport={"width": 1920, "height": 1080},
+              args=extra_args_base
           )
 
-          for url in TARGETS:
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
               try:
                   page = context.new_page()
-                  query_to_search = get_query_from_url(url)
-
-                  # GESTIONE SPECIFICA YELP (Nessuna rimozione cookie automatica per evitare blocchi sensibili)
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(3)
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                  engine = detect_search_engine(url)
                   
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          # Ripristinato il selettore ID pulito per evitare i campi di tracciamento nascosti
-                          search_input = page.locator("input#q")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
-                  
-                  # Navigazione simulata per DuckDuckGo HTML
-                  elif "html.duckduckgo.com/html" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input[name=q]")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
+                  if engine:
+                      # Se il target è un motore di ricerca, raccoglie e conta i link organici puliti
+                      print(f"[NODO {node_id}] Identificato motore di ricerca: {engine.upper()}", flush=True)
+                      search_links = scrape_search_results(page, url, engine, target_count=40)
                       
+                      results += f"TIPO TARGET: Motore di Ricerca ({engine.upper()})\n"
+                      results += f"NUMERO LINK TROVATI: {len(search_links)}\n"
+                      results += "LISTA URL ESTRATTI:\n"
+                      for idx, link in enumerate(search_links, 1):
+                          results += f"{idx}. {link}\n"
                   else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                      # Gestione cookie solo su siti non-WAF (Michelin, Eater, ecc.)
-                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
-                          handle_cookie_consent(page)
-                  
-                  # GESTIONE SPECIFICA YAHOO FINANCE
-                  if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
-                      try:
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
-                      except Exception:
-                          pass
-                      time.sleep(1)
+                      # Se il target è un sito standard o un portale finanziario (es. Yahoo Finance)
+                      query_to_search = get_query_from_url(url)
 
-                  # Scorrimento simulato
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, 300)
-                          time.sleep(1)
-                  except Exception:
-                      pass
+                      # Trattamento di fallback per URL di ricerca non filtrati a monte
+                      if "startpage.com" in url:
+                          page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                          time.sleep(3)
+                          try:
+                              page.type("input#q", query_to_search)
+                              page.keyboard.press("Enter")
+                          except Exception:
+                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              
+                      elif "html.duckduckgo.com" in url:
+                          page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                          time.sleep(3)
+                          try:
+                              page.type("input[name=q]", query_to_search)
+                              page.keyboard.press("Enter")
+                          except Exception:
+                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              
+                      else:
+                          page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                      
+                      # Attesa passiva randomica prima dello scroll
+                      passive_wait = random.randint(3, 7)
+                      time.sleep(passive_wait)
 
-                  # Tempi di attesa bilanciati
-                  if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
-                  else:
-                      time.sleep(4)
+                      # Scroll dinamico per forzare il caricamento di lazy elements e infinite scroll
+                      scroll_to_bottom(page, max_scrolls=8)
 
-                  raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
+                      if "pixelscan.net" in url:
+                          try:
+                              btn = page.locator("text=Scan My Browser Now").first
+                              if btn.is_visible(timeout=3000):
+                                  btn.click() 
+                                  time.sleep(8)
+                          except Exception:
+                              pass
+                          
+                      if "creepjs" in url:
+                          time.sleep(6) 
+
+                      raw_html = get_safe_content(page)
+                      results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except Exception:
-                      pass
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
+                  
+                  # Intervallo randomico prima della prossima risorsa
+                  visit_interval = random.uniform(4.0, 9.0)
+                  print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s...", flush=True)
+                  time.sleep(visit_interval)
 
           context.close()
 
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
+      - name: Esecuzione Scraping Parallelo (6 Nodi con Staggered Delay)
+        run: |
+          echo "Avvio processi paralleli su 6 nodi con avvio scaglionato..."
+          
+          for i in {1..6}; do
+            echo "Inizializzazione del Nodo $i..."
+            python -u m2_insocket.py $i > node$i.log 2>&1 &
+            
+            if [ $i -lt 6 ]; then
+              DELAY=$((5 + RANDOM % 11))
+              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
+              sleep $DELAY
+            fi
+          done
+
+          echo "Tutti i nodi sono stati instanziati. Attesa del completamento dello scraping..."
+          wait
+
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
+          echo "=================="
+
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
