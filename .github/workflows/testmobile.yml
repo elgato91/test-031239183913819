@@ -1,96 +1,125 @@
-name: Test RAG Challenge 2026
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on:
+on: 
   workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze
+      - name: Installazione Dipendenze Scraper
         run: |
-          # Installiamo requests[socks] e curl_cffi come richiesto dalla logica di attesa attiva dei tuoi amici
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl_cffi
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup Warproxy Docker Containers (Active & Idle in Network Host per IPv6)
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
         run: |
-          # Pull dell'immagine ufficiale
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Container Attivo in network host su porta locale 40001 (conserva l'IPv6 nativo del runner)
-          docker run --name warproxy-active \
-            --network host \
-            -e TZ=Europe/Rome \
-            -e SOCKS5_PORT=40001 \
-            -e VERBOSE=true \
-            -d ghcr.io/kingcc/warproxy:latest
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
 
-          # Container Idle/Inattivo (lasciato completamente vuoto) su porta locale 40002
-          docker run --name warproxy-idle \
-            --network host \
-            -e TZ=Europe/Rome \
-            -e SOCKS5_PORT=40002 \
-            -e VERBOSE=true \
-            -d ghcr.io/kingcc/warproxy:latest
+            if [ $i -lt 6 ]; then
+              DELAY=$((5 + RANDOM % 4))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
+            fi
+          done
 
-          # Attesa tecnica per consentire la negoziazione di WireGuard nei container
-          echo "In attesa dell'avvio dei proxy..."
-          sleep 12
-          docker ps -a
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
 
-      - name: Avvio Xvfb (Virtual Display Stabile)
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+        run: |
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            DELAY=$((5 + RANDOM % 4))
+            sleep $DELAY
+
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5 per container $i..."
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 8
+              fi
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
+              exit 1
+            fi
+          done
+          echo "=================================================="
+
+      - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
 
       - name: Creazione script Python (Macchina 2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
-          import asyncio
-          import threading
+          import sys
           import random
-          import requests
-          from curl_cffi import requests as curl_requests
+          import math
+          import os
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
           TARGETS = [
-              "https://api64.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.eater.com/rome",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
-              "https://guide.michelin.com/en/it/lazio/roma/restaurants",
-              "https://www.cntraveler.com/gallery/best-restaurants-in-rome",
-              "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
               "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
@@ -98,61 +127,20 @@ jobs:
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://newromantimes.substack.com/p/a-very-subjective-list-of-the-best",
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-          results = ""
 
-          def run_async_in_thread(coro):
-              result, exception = [None], [None]
-              def worker():
-                  try:
-                      loop = asyncio.new_event_loop()
-                      asyncio.set_event_loop(loop)
-                      result[0] = loop.run_until_complete(coro)
-                      loop.close()
-                  except Exception as e:
-                      exception[0] = e
-              t = threading.Thread(target=worker)
-              t.start()
-              t.join()
-              if exception[0]:
-                  raise exception[0]
-              return result[0]
+          if len(sys.argv) < 2:
+              sys.exit(1)
 
-          def wait_for_proxy(port, timeout=45):
-              start_time = time.time()
-              proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              while time.time() - start_time < timeout:
-                  try:
-                      r = curl_requests.get("https://ipv6.icanhazip.com", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and ":" in r.text:
-                          return True, "IPv6", r.text.strip()
-                  except Exception:
-                      pass
-                  try:
-                      r = curl_requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
-                      if r.status_code == 200 and "warp=" in r.text:
-                          ip_line = [line for line in r.text.split('\n') if line.startswith('ip=')]
-                          if ip_line:
-                              ip = ip_line[0].split('=')[1]
-                              ip_type = "IPv6" if ":" in ip else "IPv4"
-                              return True, ip_type, ip
-                  except Exception:
-                      pass
-                  time.sleep(2)
-              return False, None, None
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
 
-          def check_html_success(html, url, target_name, engine_name):
-              html_str = str(html) if html else ""
-              html_lower = html_str.lower()
-              block_indicators = ["captcha", "robot", "blocked", "denied", "forbidden", "challenge-platform", "cloudflare"]
-              if any(ind in html_lower for ind in block_indicators) and not any(diag in url for diag in DIAGNOSTIC_SITES):
-                  print(f"[BLOCCO RILEVATO] Potenziale blocco su {target_name} ({url}) via {engine_name}", flush=True)
-                  return False
-              return True
+          num_nodes = 6
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -172,235 +160,147 @@ jobs:
                   pass
               return default
 
-          def handle_cookie_consent(page):
-              try:
-                  consent_selectors = [
-                      "button:has-text('Accetta tutto')",
-                      "button:has-text('Accept all')",
-                      "button:has-text('Consenti')",
-                      "button:has-text('I agree')",
-                      "button:has-text('Accetto')",
-                      "button:has-text('Agree')",
-                      "button:has-text('Accept')",
-                      "button:has-text('OK')",
-                      "button:has-text('Allow all')",
-                      "button:has-text('Consenti l\\'uso dei cookie')",
-                      "#L2AGLb"
-                  ]
-                  for selector in consent_selectors:
-                      btn = page.locator(selector)
-                      if btn.is_visible():
-                          btn.click(timeout=1500)
-                          time.sleep(0.5)
-                          print(f"Cookie bypassato: {selector}", flush=True)
+          def get_safe_content(page, retries=3):
+              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(3)
+                      else:
                           break
-              except Exception:
-                  pass
+              return ""
 
-          # 1. Verifica ed attesa del proxy attivo su porta 40001
-          ACTIVE_PORT = 40001
-          print(f"Controllo connessione proxy SOCKS5H su porta {ACTIVE_PORT}...", flush=True)
-          success, ip_type, proxy_ip = wait_for_proxy(ACTIVE_PORT, timeout=60)
-
-          if not success:
-              raise RuntimeError(f"Errore: il proxy sulla porta {ACTIVE_PORT} non è pronto.")
-
-          print(f"Allineamento completato -> Connessione proxy attiva con IP {ip_type}: {proxy_ip}", flush=True)
-
-          timezone = "UTC"
-          locale = "en-US"
-
-          # 2. Geolocalizzazione basata sull'IP del proxy (usando le richieste proxate)
-          proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-          geo_services = [
-              (f"https://freeipapi.com/api/json/{proxy_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
-              (f"https://ipapi.co/{proxy_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-              (f"https://ipwho.is/{proxy_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-          ]
-          for url, parse_func in geo_services:
-              try:
-                  print(f"Geolocalizzazione IP su {url} tramite proxy...", flush=True)
-                  response = requests.get(url, proxies=proxies, timeout=5)
-                  if response.status_code == 200:
-                      data = response.json()
-                      tz, loc = parse_func(data)
-                      if tz:
-                          timezone = tz
-                          locale = loc
-                          if len(locale) == 2:
-                              country_to_locale = {
-                                  "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                  "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                              }
-                              locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                          print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                          break
-              except Exception as e:
-                  print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
-
-          # Generazione di un seed hardware dinamico coerente per ogni run
           random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # Avvio del contesto (Rimosso il flag --host-resolver-rules che bloccava il browser)
-          context = launch_context(
+          # CONFIGURAZIONE MINIMALE: rimosso qualsiasi flag in conflitto con i protocolli standard di rete
+          extra_args = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+          ]
+
+          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
+
+          # viewport=None permette al browser di usare la propria geometria coerente impostata a monte
+          from cloakbrowser import launch_persistent_context
+
+          # Cartella locale temporanea per salvare i cookie di questo specifico nodo
+          user_data_dir = f"./profile_node_{node_id}"
+
+          context = launch_persistent_context(
+              user_data_dir,
               headless=False,
               humanize=True,
-              timezone=timezone,
-              locale=locale,
-              viewport={"width": 1920, "height": 950},
-              proxy={
-                  "server": f"socks5://127.0.0.1:{ACTIVE_PORT}"
-              },
-              args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",
-                  f"--fingerprint-locale={locale}",
-                  f"--fingerprint={random_seed}",
-                  "--fingerprint-storage-quota=5000",   
-                  "--fingerprint-windows-font-metrics"  
-              ]
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,
+              viewport=None, 
+              args=extra_args
           )
 
-          for url in TARGETS:
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
               try:
                   page = context.new_page()
-                  
-                  # INIEZIONE ATTIVA DI POLYFILL
-                  page.add_init_script("""
-                      if (!('ContactsManager' in window)) {
-                          window.ContactsManager = class ContactsManager {
-                              async getProperties() { return ['name', 'email', 'tel', 'address', 'icon']; }
-                              async select() { return []; }
-                          };
-                          Object.defineProperty(navigator, 'contacts', {
-                              get: () => new window.ContactsManager(),
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-
-                      if (!('ContentIndex' in window)) {
-                          window.ContentIndex = class ContentIndex {
-                              async add() {}
-                              async delete() {}
-                              async getAll() { return []; }
-                          };
-                      }
-
-                      if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
-                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
-                              get: () => 10,
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-                      if (navigator.connection) {
-                          if (!('downlinkMax' in navigator.connection)) {
-                              Object.defineProperty(navigator.connection, 'downlinkMax', {
-                                  get: () => 10,
-                                  configurable: true,
-                                  enumerable: true
-                              });
-                          }
-                          Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100,
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-                  """)
-
                   query_to_search = get_query_from_url(url)
 
-                  # GESTIONE SPECIFICA YELP
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
+                  # Navigazione e gestione ricerche
+                  if "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
                       try:
-                          search_input = page.locator("input#q")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
-                  
-                  # Navigazione simulata per DuckDuckGo HTML
-                  elif "html.duckduckgo.com/html" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(3)
                       try:
-                          search_input = page.locator("input[name=q]")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
-                      
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
                   else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
-                          handle_cookie_consent(page)
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # GESTIONE SPECIFICA YAHOO FINANCE
-                  if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+                  # SILENZIO ASSOLUTO CDP (15s): Cruciale per consentire a Cloudflare e reCAPTCHA 
+                  # di completare le verifiche senza rilevare interrogazioni continue sul DOM.
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
+                  time.sleep(15)
+
+                  # Click specifico finalizzato unicamente a pixelscan (se presente)
+                  if "pixelscan.net" in url:
                       try:
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                          btn = page.locator("text=Scan My Browser Now").first
+                          if btn.is_visible(timeout=3000):
+                              btn.click() 
+                              time.sleep(8)
                       except Exception:
                           pass
-                      time.sleep(1)
-
-                  # Scorrimento simulato
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, 300)
-                          time.sleep(1)
-                  except Exception:
-                      pass
-
-                  # Tempi di attesa bilanciati
+                      
+                  # Assestamento per diagnostici lenti
                   if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
-                  else:
-                      time.sleep(4)
+                      time.sleep(6) 
 
-                  raw_html = page.content()
-                  
-                  # Verifica se la pagina caricata contiene indicazioni di blocco
-                  check_html_success(raw_html, url, urlparse(url).netloc, "CloakBrowser")
-                  
+                  # Estrazione sicura del sorgente pagina
+                  raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
 
               except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except Exception:
-                      pass
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
 
           context.close()
 
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
+      - name: Esecuzione Scraping Parallelo (6 Nodi)
+        run: |
+          echo "Avvio processi paralleli su 6 nodi..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 4 > node4.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 5 > node5.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 6 > node6.log 2>&1 &
+
+          wait
+
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
+          echo "=================="
+
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
