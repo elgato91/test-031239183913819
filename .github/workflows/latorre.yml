@@ -27,23 +27,52 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (IPv6 Standard Ultra-Stabile)
+      - name: Installazione e Inizializzazione Tor (Bypass Rate-Limit)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo systemctl start tor
+
+      - name: Setup 6 WARProxy Docker Containers (WARP+ Premium via Tor Chaining)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
+            
+            echo "=================================================="
+            echo "Rigenerazione circuito Tor per cambiare IP di registrazione..."
+            sudo systemctl restart tor
+            
+            # Attesa dinamica finché Tor non ha stabilito il circuito con il nuovo IP
+            TOR_READY=false
+            for attempt in {1..15}; do
+              if TOR_IP=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:9050 https://api6.ipify.org 2>/dev/null); then
+                echo "Tor pronto! IP di registrazione per nodo $i: $TOR_IP"
+                TOR_READY=true
+                break
+              fi
+              sleep 1
+            done
+
+            if [ "$TOR_READY" = "false" ]; then
+              echo "Tor non è riuscito a connettersi in tempo. Provo comunque l'avvio..."
+            fi
+
             echo "Avvio container warproxy-$i sulla porta $PORT..."
+            # Passiamo Tor come proxy di registrazione (HTTP_PROXY/HTTPS_PROXY)
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e WARP_PLUS=true \
+              -e HTTPS_PROXY="socks5://127.0.0.1:9050" \
+              -e HTTP_PROXY="socks5://127.0.0.1:9050" \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
-            # Jitter di avvio standard per evitare blocchi Cloudflare
             DELAY=$((4 + RANDOM % 3))
-            echo "Attesa di $DELAY secondi prima del prossimo container..."
+            echo "Attesa di sicurezza di $DELAY secondi..."
             sleep $DELAY
           done
 
