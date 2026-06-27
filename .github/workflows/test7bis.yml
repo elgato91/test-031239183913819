@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS
+          # COPIA DEI FONT WINDOWS FORZATA
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -40,7 +40,6 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Avvio immediato senza ritardi lunghi
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -53,6 +52,9 @@ jobs:
             sleep 0.5
           done
 
+          echo "Attesa iniziale allineamento tunnel STEP 1..."
+          sleep 5
+
           ENDPOINTS=(
             "https://api6.ipify.org?format=json"
             "https://v6.ident.me/.json"
@@ -60,24 +62,26 @@ jobs:
             "https://inet-ip.info/json"
           )
 
-          # Polling dinamico e aggressivo (Addio sleep statici)
+          # Polling dinamico per la massima velocità di boot dello Step 1
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
             echo "VERIFICA CONTAINER $i (PORTA $PORT):"
             SUCCESS=false
             
-            # 60 tentativi da 0.5 secondi (max 30s di attesa dinamica)
-            for r in {1..60}; do
+            for tentativo in {1..5}; do
               for URL in "${ENDPOINTS[@]}"; do
-                IP=$(curl -s --max-time 4 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null)
+                IP=$(curl -s --max-time 8 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null)
                 if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
                   echo "Container $i pronto via $URL! Risposta: $IP"
                   SUCCESS=true
                   break 2
                 fi
+                sleep 0.5
               done
-              sleep 0.5
+              echo "Tentativo fallito per il container $i. Riavvio..."
+              docker restart warproxy-$i
+              sleep 8
             done
 
             if [ "$SUCCESS" = "false" ]; then
@@ -87,64 +91,7 @@ jobs:
           done
           echo "=================================================="
 
-      - name: Avvio Setup STEP 2 in Background
-        run: |
-          # Creazione dello script asincrono per lo Step 2 con polling dinamico robusto
-          cat << 'EOF' > setup_step2_bg.sh
-          #!/bin/bash
-          echo "[BG STEP 2] Avvio creazione container 7-12 in background..."
-          
-          for i in {7..12}; do
-            PORT=$((40000 + i))
-            echo "[BG STEP 2] Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
-          done
-
-          ENDPOINTS=(
-            "https://api6.ipify.org?format=json"
-            "https://v6.ident.me/.json"
-            "https://ifconfig.co/json"
-            "https://inet-ip.info/json"
-          )
-
-          # Polling dinamico per impedire il loop di restart precoce sul container 8
-          for i in {7..12}; do
-            PORT=$((40000 + i))
-            echo "[BG STEP 2] Verifica container $i (PORTA $PORT)..."
-            SUCCESS=false
-            
-            for r in {1..60}; do
-              for URL in "${ENDPOINTS[@]}"; do
-                IP=$(curl -s --max-time 4 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null)
-                if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                  echo "[BG STEP 2] Container $i pronto via $URL! IP: $IP"
-                  SUCCESS=true
-                  break 2
-                fi
-              done
-              sleep 0.5
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE" > /tmp/step2_status
-              exit 1
-            fi
-          done
-
-          echo "PRONTO" > /tmp/step2_status
-          EOF
-          
-          chmod +x setup_step2_bg.sh
-          ./setup_step2_bg.sh > step2_bg_setup.log 2>&1 &
-          echo "Setup dello STEP 2 avviato in background asincrono."
-
-      - name: Creazione Script Python - STEP 1 (Pure curl-cffi Diretto e Ultra-Rapido)
+      - name: Creazione Script Python - STEP 1 (Pure curl-cffi Diretto e Ottimizzato)
         run: |
           cat << 'EOF' > m2_step1.py
           import time
@@ -191,7 +138,7 @@ jobs:
           ACTIVE_PORT = 40000 + node_id
 
           num_nodes = 6
-          # Slicing Round-Robin per distribuire equamente i siti protetti da WAF
+          # Ripartizione Round-Robin per bilanciare il carico dei WAF tra i nodi
           MY_TARGETS = [TARGETS[i] for i in range(len(TARGETS)) if i % num_nodes == (node_id - 1)]
 
           def extract_text(html_content, url):
@@ -202,7 +149,6 @@ jobs:
               return text[:5000]
 
           def validate_html(html, url):
-              """Verifica agnostica dell'esito dello scraping."""
               if not html or len(html.strip()) < 300:
                   return False, "Sorgente HTML vuota o estremamente ridotta"
               
@@ -232,7 +178,7 @@ jobs:
                   
               return True, ""
 
-          # --- INIZIO SCRAPING STEP 1 ---
+          # --- INIZIO SCRAPING ---
           print(f"[NODO {node_id}] [Scraping curl_cffi] Inizializzazione sessione...", flush=True)
           session = requests.Session(impersonate="chrome120")
           session.proxies = {
@@ -247,22 +193,23 @@ jobs:
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
               
-              # Delay intelligente: applicato solo se visitiamo di fila lo stesso dominio
               parsed_url = urlparse(url)
               current_domain = parsed_url.netloc
               if last_domain and current_domain == last_domain:
+                  # Applica il delay di sicurezza solo se interroghiamo lo stesso dominio di fila
                   delay = random.uniform(2.0, 4.0)
                   print(f"[NODO {node_id}] Stesso dominio rilevato ({current_domain}). Attesa di {delay:.2f}s...", flush=True)
                   time.sleep(delay)
               else:
-                  time.sleep(0.3) # Transizione rapida se il dominio è diverso
+                  time.sleep(0.3)
               
               last_domain = current_domain
               print(f"[NODO {node_id}] -> Richiesta curl-cffi: {url}", flush=True)
               
               try:
-                  # Richiesta diretta senza warmup inutile di cookie esterni
-                  resp = session.get(url, timeout=12)
+                  # Richiesta diretta senza GET di riscaldamento ridondanti sulla Home
+                  # Timeout innalzato a 20s per gestire le oscillazioni di latenza del tunnel IPv6
+                  resp = session.get(url, timeout=20)
                   html_content = resp.text
                   
                   is_ok, err_msg = validate_html(html_content, url)
@@ -302,7 +249,7 @@ jobs:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40006 + node_id # Porte separate 40007-40012
+          ACTIVE_PORT = 40006 + node_id
 
           failed_file = f"failed_node_{node_id}.json"
           if not os.path.exists(failed_file):
@@ -337,6 +284,17 @@ jobs:
               except Exception:
                   pass
               return default
+
+          def get_safe_content(page, retries=3):
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(2)
+                      else:
+                          break
+              return ""
 
           def run_warmup_phase_http2(profile_dir, active_port, extra_args_base, node_id):
               """Warmup leggero e moderno in HTTP/2 (nessun flag --disable-http2)."""
@@ -377,7 +335,6 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # Esecuzione del warmup rapido dello Step 2
           run_warmup_phase_http2(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
           time.sleep(1)
 
@@ -447,7 +404,8 @@ jobs:
                           "enable javascript" in content
                       )
                       
-                      if not is_challenge and len(content.strip()) > 1000:
+                      # Soglia di controllo ridotta a 150 per prevenire loop infiniti su pagine diagnostiche piccole ma valide
+                      if not is_challenge and len(content.strip()) > 150:
                           resolved = True
                           break
                           
@@ -520,33 +478,57 @@ jobs:
             docker rm warproxy-$i || true
           done
 
-      - name: Sincronizzazione e Verifica Container STEP 2
+      - name: Setup e Verifica Container STEP 2 (IPv6 Sequenziale)
         run: |
-          echo "Verifica dello stato del setup dei container STEP 2 avviato precedentemente in background..."
-          
-          echo "=== LOG SETUP STEP 2 FINORA ==="
-          cat step2_bg_setup.log || true
-          echo "==============================="
-          
-          TENTATIVI=0
-          while [ ! -f /tmp/step2_status ]; do
-            echo "In attesa del file di stato dei container STEP 2 (Tempo trascorso: $((TENTATIVI * 5))s)..."
-            sleep 5
-            TENTATIVI=$((TENTATIVI + 1))
-            if [ $TENTATIVI -gt 60 ]; then
-              echo "ERRORE CRITICO: Il processo asincrono dello STEP 2 non si è completato in tempo."
+          # Avvio sequenziale pulito sui nuovi IP per evitare conflitti e rate-limit di Cloudflare
+          echo "Avvio dei container dello Step 2 (Porte 40007-40012)..."
+          for i in {7..12}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 0.5
+          done
+
+          echo "Attesa per l'inizializzazione dei tunnel STEP 2..."
+          sleep 5
+
+          ENDPOINTS=(
+            "https://api6.ipify.org?format=json"
+            "https://v6.ident.me/.json"
+            "https://ifconfig.co/json"
+            "https://inet-ip.info/json"
+          )
+
+          # Polling dinamico per lo Step 2
+          for i in {7..12}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            SUCCESS=false
+            
+            for r in {1..60}; do
+              for URL in "${ENDPOINTS[@]}"; do
+                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null)
+                if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                  echo "Container $i pronto via $URL! Risposta: $IP"
+                  SUCCESS=true
+                  break 2
+                fi
+              done
+              sleep 0.5
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non risponde."
               exit 1
             fi
           done
-          
-          STATUS=$(cat /tmp/step2_status)
-          if [ "$STATUS" != "PRONTO" ]; then
-            echo "ERRORE CRITICO: Il setup in background dello STEP 2 ha riscontrato un fallimento durante l'avvio."
-            cat step2_bg_setup.log || true
-            exit 1
-          else
-            echo "Successo: Tutti i container dello STEP 2 sono già attivi, verificati e pronti all'uso!"
-          fi
+          echo "=================================================="
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
