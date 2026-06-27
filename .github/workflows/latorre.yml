@@ -236,7 +236,7 @@ jobs:
                   
                   # ATTESA SULLA PAGINA CON DELAY RANDOMICO (Modifica richiesta)
                   # Un'attesa variabile tra 12 e 22 secondi simula una lettura reale e confonde i pattern dei bot checker
-                  passive_wait = random.randint(12, 22)
+                  passive_wait = random.randint(12, 15)
                   print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
                   time.sleep(passive_wait)
 
