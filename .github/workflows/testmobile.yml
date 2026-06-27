@@ -42,7 +42,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 4))
+              DELAY=$((3 + RANDOM % 2))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -58,7 +58,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((5 + RANDOM % 4))
+            DELAY=$((3 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
@@ -73,7 +73,7 @@ jobs:
               else
                 echo "Container $i non risponde. Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 8
+                sleep 5
               fi
             done
 
@@ -93,7 +93,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Macchina 2)
+      - name: Creazione script Python (Macchina 2 con Profile Warming)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -101,7 +101,7 @@ jobs:
           import random
           import math
           import os
-          from cloakbrowser import launch_context
+          from cloakbrowser import launch_persistent_context  # Passaggio a profili persistenti
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
 
@@ -131,6 +131,12 @@ jobs:
           ]
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          # Lista di query di warmup per generare cookie reali e cronologia plausibile
+          WARMUP_QUERIES = [
+              "weather tomorrow", "world news today", "how to cook pasta", 
+              "best movies 2026", "wikipedia space exploration", "historical events today"
+          ]
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -172,11 +178,49 @@ jobs:
                           break
               return ""
 
+          def warmup_profile(context, node_id):
+              """Esegue una routine di riscaldamento simulando ricerche e letture per accumulare cookie reali."""
+              print(f"[NODO {node_id}] Avvio fase di Profile Warming...", flush=True)
+              try:
+                  page = context.new_page()
+                  
+                  # 1. Visita Google ed esegue una ricerca casuale
+                  query = random.choice(WARMUP_QUERIES)
+                  print(f"[NODO {node_id}] [Warmup] Ricerca su Google: '{query}'", flush=True)
+                  page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=30000)
+                  time.sleep(random.uniform(2, 4))
+                  try:
+                      accept_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
+                      if accept_btn.is_visible(timeout=2000):
+                          accept_btn.click()
+                          time.sleep(2)
+                  except Exception:
+                      pass
+                  
+                  try:
+                      page.type("textarea[name='q'], input[name='q']", query)
+                      page.keyboard.press("Enter")
+                      time.sleep(random.uniform(5, 8))
+                  except Exception:
+                      page.goto(f"https://www.google.com/search?q={query.replace(' ', '+')}", wait_until="domcontentloaded")
+                      time.sleep(5)
+                      
+                  # 2. Visita Wikipedia per accumulare cache e cookie stabili
+                  print(f"[NODO {node_id}] [Warmup] Lettura pagina Wikipedia...", flush=True)
+                  page.goto("https://en.wikipedia.org/wiki/Special:Random", wait_until="domcontentloaded", timeout=30000)
+                  time.sleep(random.uniform(6, 10))
+                  
+                  page.close()
+                  print(f"[NODO {node_id}] Fase di riscaldamento completata con successo.", flush=True)
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore durante il warmup: {e}. Procedo comunque.", flush=True)
+
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
 
-          # CONFIGURAZIONE MINIMALE: rimosso qualsiasi flag in conflitto con i protocolli standard di rete
+          # Mantenuto attivo il camuffamento del rumore (noise injection = True) eliminando --fingerprint-noise=false
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
@@ -184,23 +228,26 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Persistente in: {profile_dir}", flush=True)
 
-          # viewport=None permette al browser di usare la propria geometria coerente impostata a monte
-          from cloakbrowser import launch_persistent_context
-
-          # Cartella locale temporanea per salvare i cookie di questo specifico nodo
-          user_data_dir = f"./profile_node_{node_id}"
-
+          # Inizializzazione con profilo persistente su disco per mantenere i cookie accumulati
           context = launch_persistent_context(
-              user_data_dir,
+              profile_dir,
               headless=False,
               humanize=True,
+              human_config={
+                  "typing_delay": 100,
+                  "mistype_chance": 0.03,
+                  "idle_between_actions": True
+              },
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              viewport=None, 
+              viewport={"width": 1920, "height": 1080}, 
               args=extra_args
           )
+
+          # Riscalda il profilo prima delle visite ai target reali
+          warmup_profile(context, node_id)
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
@@ -213,12 +260,12 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Navigazione e gestione ricerche
+                  # Navigazione e gestione ricerche usando i metodi nativi raccomandati dal wrapper
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.type("input#q", query_to_search)
                           page.keyboard.press("Enter")
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -227,7 +274,7 @@ jobs:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.type("input[name=q]", query_to_search)
                           page.keyboard.press("Enter")
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -235,10 +282,10 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # SILENZIO ASSOLUTO CDP (15s): Cruciale per consentire a Cloudflare e reCAPTCHA 
-                  # di completare le verifiche senza rilevare interrogazioni continue sul DOM.
-                  print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
-                  time.sleep(15)
+                  # ATTESA SULLA PAGINA CON DELAY RANDOMICO
+                  passive_wait = random.randint(12, 22)
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
+                  time.sleep(passive_wait)
 
                   # Click specifico finalizzato unicamente a pixelscan (se presente)
                   if "pixelscan.net" in url:
@@ -267,6 +314,11 @@ jobs:
                           page.close()
                       except Exception:
                           pass
+                  
+                  # DELAY RANDOMICO TRA VISITE
+                  visit_interval = random.uniform(4.0, 9.0)
+                  print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s prima del prossimo target...", flush=True)
+                  time.sleep(visit_interval)
 
           context.close()
 
@@ -274,21 +326,23 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (6 Nodi)
+      - name: Esecuzione Scraping Parallelo (6 Nodi con Staggered Delay)
         run: |
-          echo "Avvio processi paralleli su 6 nodi..."
-          python -u m2_insocket.py 1 > node1.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 2 > node2.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 3 > node3.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 4 > node4.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 5 > node5.log 2>&1 &
-          sleep 2
-          python -u m2_insocket.py 6 > node6.log 2>&1 &
+          echo "Avvio processi paralleli su 6 nodi con avvio scaglionato casuale..."
+          
+          for i in {1..6}; do
+            echo "Inizializzazione del Nodo $i..."
+            python -u m2_insocket.py $i > node$i.log 2>&1 &
+            
+            if [ $i -lt 6 ]; then
+              # Genera un delay casuale tra 5 e 15 secondi prima di far partire lo scraper successivo
+              DELAY=$((5 + RANDOM % 11))
+              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
+              sleep $DELAY
+            fi
+          done
 
+          echo "Tutti i nodi sono stati instanziati. Attesa del completamento dello scraping..."
           wait
 
           echo "=== LOG NODO 1 ===" && cat node1.log || true
