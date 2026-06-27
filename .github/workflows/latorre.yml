@@ -8,12 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Spoofing TCP/IP OS Fingerprint (Windows 11)
-        run: |
-          echo "Forzatura del TTL/HL a 128 per simulare lo stack di rete Windows..."
-          sudo iptables -t mangle -A POSTROUTING -j TTL --ttl-set 128
-          sudo ip6tables -t mangle -A POSTROUTING -j HL --hl-set 128 || true
-
       - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
@@ -22,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -33,62 +27,53 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (IPv6)
+      - name: Setup 6 WARProxy Docker Containers (WARP+ Premium Attivo)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            echo "Avvio container warproxy-$i sulla porta $PORT con licenza WARP+..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e WARP_PLUS=true \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
-            if [ $i -lt 6 ]; then
-              DELAY=$((3 + RANDOM % 2))
-              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
-              sleep $DELAY
-            fi
+            # Jitter di avvio per non sovraccaricare la generazione delle chiavi premium
+            DELAY=$((6 + RANDOM % 4))
+            echo "Attesa di $DELAY secondi..."
+            sleep $DELAY
           done
 
           echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
+          sleep 12
 
       - name: Verifica IP IPv6 con Auto-healing (socks5h)
         run: |
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
-            DELAY=$((3 + RANDOM % 2))
+            DELAY=$((3 + RANDOM % 3))
             sleep $DELAY
 
             SUCCESS=false
             for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP: $IP"
                 SUCCESS=true
                 break
               else
-                echo "Container $i non risponde. Riavvio in corso..."
                 docker restart warproxy-$i
                 sleep 8
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               exit 1
             fi
           done
-          echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
@@ -167,7 +152,6 @@ jobs:
               return default
 
           def get_safe_content(page, retries=3):
-              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
               for attempt in range(retries):
                   try:
                       return page.content()
@@ -178,62 +162,27 @@ jobs:
                           break
               return ""
 
-          def human_sleep(page, seconds):
-              """Simula l'attesa di un umano che legge la pagina, con micro-movimenti del mouse e scroll."""
-              start = time.time()
-              while time.time() - start < seconds:
-                  try:
-                      x = random.randint(100, 800)
-                      y = random.randint(100, 600)
-                      page.mouse.move(x, y, steps=10)
-                      
-                      if random.random() < 0.2:
-                          scroll_y = random.randint(100, 400)
-                          page.mouse.wheel(0, scroll_y)
-                          
-                      time.sleep(random.uniform(1.0, 3.5))
-                  except Exception:
-                      break
-
-          def type_like_human(page, selector, text):
-              """Digita con curva Gaussiana e probabilità realistica di errore/correzione."""
-              page.locator(selector).click(timeout=5000)
-              for char in text:
-                  delay = max(20, random.gauss(100, 40)) / 1000.0
-                  page.keyboard.type(char)
-                  time.sleep(delay)
-                  
-                  if random.random() < 0.02:
-                      wrong_char = random.choice('abcdefghijklmnopqrstuvwxyz')
-                      page.keyboard.type(wrong_char)
-                      time.sleep(0.1)
-                      page.keyboard.press("Backspace")
-                      time.sleep(0.15)
-
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # CONFIGURAZIONE MASSIMA EVASIONE: Start-maximized e Fake Media Devices aggiunti
+          # SUPREME: Disattivazione Blink Automation + Forzatura DNS Over HTTPS Criptato su Cloudflare
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
-              "--start-maximized",
-              "--use-fake-ui-for-media-stream",
-              "--use-fake-device-for-media-stream",
+              "--disable-blink-features=AutomationControlled",
+              "--enable-features=DnsOverHttps",
+              "--dns-over-https-templates=https://chrome.cloudflare-dns.com/dns-query",
               f"--fingerprint={random_seed}",
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
-
-          # no_viewport=True permette a --start-maximized di ereditare la risoluzione reale (1920x1080 da Xvfb)
           context = launch_context(
               headless=False,
               humanize=True,
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              no_viewport=True, 
+              viewport=None, 
               args=extra_args
           )
 
@@ -241,28 +190,26 @@ jobs:
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[NODO {node_id}] -> {url}", flush=True)
               page = None
               
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Navigazione e gestione ricerche (utilizzando le nuove funzioni umane)
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                      human_sleep(page, 3)
+                      time.sleep(3)
                       try:
-                          type_like_human(page, "input#q", query_to_search)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                   elif "html.duckduckgo.com" in url:
                       page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                      human_sleep(page, 3)
+                      time.sleep(3)
                       try:
-                          type_like_human(page, "input[name=q]", query_to_search)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
                           page.keyboard.press("Enter")
                       except Exception:
                           page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -270,30 +217,25 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # ANSIA UMANA (15s): micro-interazioni durante i controlli passivi di Cloudflare/reCAPTCHA
-                  print(f"[NODO {node_id}] In attesa di risoluzione passiva (comportamento umano)...", flush=True)
-                  human_sleep(page, 15)
+                  # SILENZIO ASSOLUTO CDP (15s) per lasciar passare le verifiche
+                  time.sleep(15)
 
-                  # Click specifico finalizzato unicamente a pixelscan (se presente)
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
                               btn.click() 
-                              human_sleep(page, 8)
+                              time.sleep(8)
                       except Exception:
                           pass
                       
-                  # Assestamento per diagnostici lenti
                   if "creepjs" in url:
-                      human_sleep(page, 6) 
+                      time.sleep(6) 
 
-                  # Estrazione sicura del sorgente pagina
                   raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
               finally:
                   if page:
@@ -308,30 +250,28 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (6 Nodi)
+      - name: Esecuzione Scraping Parallelo (6 Nodi con Jitter Casuale)
         run: |
-          echo "Avvio processi paralleli su 6 nodi..."
+          echo "Avvio processi paralleli con Jitter temporale..."
+          
           python -u m2_insocket.py 1 > node1.log 2>&1 &
-          sleep 2
+          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
+          
           python -u m2_insocket.py 2 > node2.log 2>&1 &
-          sleep 2
+          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
+          
           python -u m2_insocket.py 3 > node3.log 2>&1 &
-          sleep 2
+          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
+          
           python -u m2_insocket.py 4 > node4.log 2>&1 &
-          sleep 2
+          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
+          
           python -u m2_insocket.py 5 > node5.log 2>&1 &
-          sleep 2
+          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
+          
           python -u m2_insocket.py 6 > node6.log 2>&1 &
 
           wait
-
-          echo "=== LOG NODO 1 ===" && cat node1.log || true
-          echo "=== LOG NODO 2 ===" && cat node2.log || true
-          echo "=== LOG NODO 3 ===" && cat node3.log || true
-          echo "=== LOG NODO 4 ===" && cat node4.log || true
-          echo "=== LOG NODO 5 ===" && cat node5.log || true
-          echo "=== LOG NODO 6 ===" && cat node6.log || true
-          echo "=================="
 
           touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
           cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
