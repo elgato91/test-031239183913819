@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per metriche font esatte)
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -27,30 +27,35 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (Forzatura IPv6)
+      - name: Setup 6 WARProxy Docker Containers (Forzatura Strict IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
+            
+            # Aggiunto --cap-add=NET_ADMIN per permettere modifiche di rete/routing interne
             docker run --name warproxy-$i \
               --network host \
+              --cap-add=NET_ADMIN \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
-            # ATTESA INIZIALE PER FAR PARTIRE IL DEMONE
-            sleep 3
+            sleep 4
 
-            # FORZATURA PRECEDENZA IPv6 NEL CONTAINER (RFC 3484)
-            # Questo obbliga il demone SOCKS5 a preferire AAAA (IPv6) ad A (IPv4) quando risolve i domini
+            # FORZATURA 1: DNS IPv6 Preference tramite gai.conf
             docker exec warproxy-$i sh -c "echo 'precedence ::ffff:0:0/96  10' >> /etc/gai.conf" || true
+            
+            # FORZATURA 2: Istruisce il demone WARP ad usare ESCLUSIVAMENTE la famiglia IPv6
+            # Testiamo entrambe le sintassi note di warp-cli per compatibilità
+            docker exec warproxy-$i warp-cli --accept-tos set-families-mode v6 || true
+            docker exec warproxy-$i warp-cli --accept-tos settings family v6 || true
 
             if [ $i -lt 6 ]; then
-              DELAY=$((3 + RANDOM % 3))
-              sleep $DELAY
+              sleep $((3 + RANDOM % 3))
             fi
           done
 
@@ -62,11 +67,11 @@ jobs:
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
             
             SUCCESS=false
             for tentativo in {1..5}; do
-              # Usiamo api6.ipify.org per assicurarci che l'uscita in IPv6 sia funzionante
+              # Chiamata di test strettamente su IPv6 per assicurarci che il tunnel funzioni
               IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
               if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
@@ -77,18 +82,20 @@ jobs:
                 echo "Container $i non risponde in IPv6. Riavvio in corso..."
                 docker restart warproxy-$i
                 sleep 5
-                docker exec warproxy-$i sh -c "echo 'precedence ::ffff:0:0/96  10' >> /etc/gai.conf" || true
+                # Riapplica forzature post-riavvio
+                docker exec warproxy-$i warp-cli --accept-tos set-families-mode v6 || true
                 sleep 5
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile in IPv6 dopo 5 riavvii."
+              echo "ERRORE CRITICO: Container $i inaccessibile in IPv6."
               exit 1
             fi
           done
+          echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful 1920x1080)
+      - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -105,7 +112,6 @@ jobs:
           import random
           import math
           import os
-          import requests
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -180,40 +186,28 @@ jobs:
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
+          # CONFIGURAZIONE C++ STEALTH PURA
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
               f"--fingerprint-fonts-dir={windows_fonts_dir}",
-              "--fingerprint-windows-font-metrics",  # Fondamentale per FingerprintJS
-              "--fingerprint-noise=false",           # Evita il flag "Browser Tampering"
-              "--fingerprint-platform=windows",      # Coerenza con i font installati
-              "--fingerprint-screen-width=1920",     # Match esatto con Xvfb e viewport
-              "--fingerprint-screen-height=1080"
+              "--fingerprint-platform=windows",      # Maschera Linux come Windows
+              "--fingerprint-screen-width=1920",     # Allinea a Xvfb
+              "--fingerprint-screen-height=1080",
+              "--fingerprint-webrtc-ip=auto"         # Lascia gestire l'IP WebRTC nativamente
           ]
 
-          # RECUPERO FORZATO IPv6 PER WEBRTC (Evita leak IPv4 di WARP)
-          try:
-              proxies = {
-                  "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
-                  "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
-              }
-              ip_resp = requests.get("https://api6.ipify.org", proxies=proxies, timeout=10).text.strip()
-              extra_args.append(f"--fingerprint-webrtc-ip={ip_resp}")
-              print(f"[NODO {node_id}] IPv6 Webrtc forzato: {ip_resp}", flush=True)
-          except Exception as e:
-              print(f"[NODO {node_id}] Warning IPv6 Fetch: {e}", flush=True)
-              # geoip=True gestirà il fallback, sperando prevalga ipv6
-
-          print(f"[NODO {node_id}] Avvio Context Standard (Stealth Configurazione Perfetta)", flush=True)
+          print(f"[NODO {node_id}] Avvio Context Stealth (No JS Injection)", flush=True)
 
           context = launch_context(
               headless=False,
               humanize=True,
-              human_preset="careful", # Rende le interazioni più lente e realistiche per GitHub Actions
+              human_preset="careful", 
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              viewport={"width": 1920, "height": 1080}, # Match perfetto con flag e Xvfb
+              stealth_args=False,  # <-- FONDAMENTALE: Disabilita l'iniezione JS rilevabile (risolve "azeaze")
+              viewport={"width": 1920, "height": 1080}, # Match perfetto con il sistema operativo spoofato
               args=extra_args
           )
 
@@ -249,6 +243,7 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
+                  # Pausa passiva
                   print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
                   time.sleep(15)
 
@@ -308,8 +303,7 @@ jobs:
           echo "=== LOG NODO 6 ===" && cat node6.log || true
           echo "=================="
 
-          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
-          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
+          cat output_node_*.txt > output_macchina2_cdp.txt 2>/dev/null || true
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
