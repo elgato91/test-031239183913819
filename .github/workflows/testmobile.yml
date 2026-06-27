@@ -102,7 +102,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Integrazione link extractor, scorrimento e self-healing)
+      - name: Creazione script Python (Corretto get_query_from_url)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -142,6 +142,11 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
+          WARMUP_QUERIES = [
+              "weather tomorrow", "world news today", "how to cook pasta", 
+              "best movies 2026", "wikipedia space exploration", "historical events today"
+          ]
+
           if len(sys.argv) < 2:
               sys.exit(1)
 
@@ -159,6 +164,18 @@ jobs:
                   return text
               return text[:5000]
 
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              """Estrae i parametri di query per simulare la ricerca reale."""
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
           def is_search_engine(url):
               """Verifica se l'URL appartiene a un motore di ricerca."""
               return any(x in url for x in ["google.com", "bing.com", "duckduckgo.com", "startpage.com", "yahoo.com"])
@@ -171,13 +188,11 @@ jobs:
               domain = parsed_url.netloc
 
               if "google" in domain:
-                  # Selettori per risultati organici standard di Google
                   for g in soup.select('div.g, .yuRUbf, .MjjYbeb'):
                       for a in g.select('a[href]'):
                           href = a['href']
                           if href.startswith('http') and not any(x in href for x in ['google.', 'gstatic.', 'youtube.com', 'webcache']):
                               links.append(href)
-                  # Fallback in caso di versione base (gbv=1)
                   if not links:
                       for a in soup.select('a[href]'):
                           href = a['href']
@@ -216,14 +231,12 @@ jobs:
                           if href.startswith('http') and not any(x in href for x in ['duckduckgo.com', 'ddg.gg']):
                               links.append(href)
 
-              # Fallback generale resiliente se nessun link è stato catturato dai selettori specifici
               if not links:
                   for a in soup.select('a[href]'):
                       href = a['href']
                       if href.startswith('http') and not any(x in href for x in ['google', 'bing.com', 'yahoo.com', 'duckduckgo', 'startpage', 'microsoft', 'yimg', 'gstatic', 'facebook.com', 'twitter.com', 'instagram.com']):
                           links.append(href)
 
-              # Rimozione duplicati mantenendo l'ordine di apparizione
               seen = set()
               unique_links = []
               for l in links:
@@ -234,12 +247,11 @@ jobs:
               return unique_links[:40]
 
           def human_scroll_to_bottom(page, scrolls=3):
-              """Esegue uno scorrimento fluido simulando un utente reale per attivare il caricamento degli elementi lazy-load."""
+              """Esegue uno scorrimento fluido simulando un utente reale per caricare gli elementi lazy-load."""
               print("[Scorrimento] Avvio scorrimento fluido della pagina...", flush=True)
               for _ in range(scrolls):
                   scroll_amount = random.randint(450, 750)
                   page.evaluate(f"window.scrollBy(0, {scroll_amount})")
-                  # Attesa casuale tra i micro-scorrimenti per consentire il caricamento dinamico
                   time.sleep(random.uniform(1.8, 3.2))
 
           def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
@@ -377,7 +389,6 @@ jobs:
 
                   raw_html = get_safe_content(page)
                   
-                  # Verifico se siamo finiti in una schermata di blocco per il self-healing del profilo
                   content_lower = raw_html.lower()
                   if any(indicator in content_lower for indicator in ["prove your humanity", "security verification", "malicious bots", "enable javascript and cookies to continue", "bot verification"]):
                       print(f"[NODO {node_id}] ATTENZIONE: Rilevato possibile blocco anti-bot su {url}. Marcatura del profilo per eliminazione.", flush=True)
@@ -408,8 +419,7 @@ jobs:
 
           context.close()
 
-          # SELF-HEALING DEL PROFILO: Se il nodo è stato rilevato come bot, cancelliamo la cartella locale.
-          # In questo modo, il workflow di salvataggio cache non registrerà cookie compromessi.
+          # SELF-HEALING DEL PROFILO: Se rilevato come bot, cancella la cartella locale
           if flagged_as_bot:
               print(f"[NODO {node_id}] [Self-Healing] Cancellazione del profilo compromesso '{profile_dir}'...", flush=True)
               try:
