@@ -187,7 +187,7 @@ jobs:
               
               for indicator in blocking_indicators:
                   if indicator in low_html:
-                      return False, f"Rilevato blocco anti-bot o errore di rete: '{indicator}'"
+                      return False, f"Rilevato blocco anti-bot o errore di rete: {indicator}"
                           
               try:
                   soup = BeautifulSoup(html, 'html.parser')
@@ -514,7 +514,7 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo - STEP 1 (curl-cffi)
         run: |
-          echo "Avvio processi paralleli per STEP 1..."
+          echo 'Avvio processi paralleli per STEP 1...'
           
           touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
           
@@ -532,13 +532,12 @@ jobs:
             fi
           done
 
-          echo "Tutti i nodi Step 1 istanziati. Attesa completamento..."
-          # Attende unicamente i nodi Python dello Step 1
+          echo 'Tutti i nodi Step 1 istanziati. Attesa completamento...'
           wait "${PIDS[@]}"
           
           kill $TAIL_PID || true
           
-          echo "STEP 1 completato. Pulizia totale dei container dello Step 1..."
+          echo 'STEP 1 completato. Pulizia totale dei container dello Step 1...'
           for i in {1..6}; do
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
@@ -547,7 +546,7 @@ jobs:
       - name: Setup Container STEP 2 (IPv6 Sequenziale)
         run: |
           # Avvio sequenziale con ritardo "sleep 3" per scaglionare le registrazioni concorrenti a Cloudflare
-          echo "Avvio dei container dello Step 2 (Porte 40007-40012)..."
+          echo 'Avvio dei container dello Step 2 (Porte 40007-40012)...'
           for i in {7..12}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -591,7 +590,7 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
-          echo "Avvio processi paralleli per STEP 2 sui target falliti..."
+          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
           
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           
@@ -609,4 +608,33 @@ jobs:
             fi
           done
 
-          echo "Tutti i nodi Step 2 istanziati. Attesa com
+          echo 'Tutti i nodi Step 2 istanziati. Attesa completamento...'
+          wait "${PIDS[@]}"
+          
+          kill $TAIL_PID || true
+          
+          echo 'STEP 2 completato. Rimozione dei container STEP 2...'
+          for i in {7..12}; do
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
+          done
+
+          touch output_node_1_step1.txt output_node_1_step2.txt \
+                output_node_2_step1.txt output_node_2_step2.txt \
+                output_node_3_step1.txt output_node_3_step2.txt \
+                output_node_4_step1.txt output_node_4_step2.txt \
+                output_node_5_step1.txt output_node_5_step2.txt \
+                output_node_6_step1.txt output_node_6_step2.txt
+
+          cat output_node_1_step1.txt output_node_1_step2.txt \
+              output_node_2_step1.txt output_node_2_step2.txt \
+              output_node_3_step1.txt output_node_3_step2.txt \
+              output_node_4_step1.txt output_node_4_step2.txt \
+              output_node_5_step1.txt output_node_5_step2.txt \
+              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
