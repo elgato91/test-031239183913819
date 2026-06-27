@@ -8,7 +8,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Font di Sistema (Essenziale per CloakBrowser)
+      - name: Spoofing TCP/IP OS Fingerprint (Windows 11)
+        run: |
+          echo "Forzatura del TTL/HL a 128 per simulare lo stack di rete Windows..."
+          sudo iptables -t mangle -A POSTROUTING -j TTL --ttl-set 128
+          sudo ip6tables -t mangle -A POSTROUTING -j HL --hl-set 128 || true
+
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -16,6 +22,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -26,7 +33,7 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -41,22 +48,31 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              sleep $((5 + RANDOM % 4))
+              DELAY=$((5 + RANDOM % 4))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
             fi
           done
 
           echo "Attesa finale inizializzazione dei tunnel..."
           sleep 10
 
-      - name: Verifica Connessioni Proxy
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
         run: |
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Verifica connessione su porta $PORT..."
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            DELAY=$((5 + RANDOM % 4))
+            sleep $DELAY
+
             SUCCESS=false
             for tentativo in {1..5}; do
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api.ipify.org || true)
-              if [ ! -z "$IP" ]; then
+              echo "Tentativo $tentativo/5 per container $i..."
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
                 echo "Container $i pronto! IP: $IP"
                 SUCCESS=true
                 break
@@ -66,18 +82,24 @@ jobs:
                 sleep 8
               fi
             done
+
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               exit 1
             fi
           done
+          echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful 1920x1080)
+      - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (Playwright Puro + Binario CloakBrowser)
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (Macchina 2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -85,13 +107,9 @@ jobs:
           import random
           import math
           import os
-          import requests
+          from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
-
-          # USIAMO L'API STANDARD DI PLAYWRIGHT, NON IL WRAPPER DI CLOAKBROWSER!
-          from playwright.sync_api import sync_playwright
-          from cloakbrowser.download import ensure_binary
 
           TARGETS = [
               "https://tls.browserleaks.com/json",
@@ -120,6 +138,9 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
@@ -141,130 +162,147 @@ jobs:
                   for param in ['q', 'query', 'p']:
                       if param in queries:
                           return queries[param][0]
-              except:
+              except Exception:
                   pass
               return default
 
-          # 1. OTTIENI IL PATH AL BROWSER C++ STEALTH
-          binary_path = ensure_binary()
+          def get_safe_content(page, retries=3):
+              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(3)
+                      else:
+                          break
+              return ""
 
-          # 2. RISOLVI IP PER WEBRTC (Maschera il leak di WARP)
-          proxy_str = f"socks5h://127.0.0.1:{ACTIVE_PORT}"
-          my_ip = ""
-          try:
-              # Tenta prima IPv6, se WARP lo passa
-              my_ip = requests.get("https://api6.ipify.org", proxies={"http": proxy_str, "https": proxy_str}, timeout=5).text.strip()
-          except:
-              try:
-                  my_ip = requests.get("https://api.ipify.org", proxies={"http": proxy_str, "https": proxy_str}, timeout=5).text.strip()
-              except:
-                  my_ip = "127.0.0.1"
+          def human_sleep(page, seconds):
+              """Simula l'attesa di un umano che legge la pagina, con micro-movimenti del mouse e scroll."""
+              start = time.time()
+              while time.time() - start < seconds:
+                  try:
+                      x = random.randint(100, 800)
+                      y = random.randint(100, 600)
+                      page.mouse.move(x, y, steps=10)
+                      
+                      if random.random() < 0.2:
+                          scroll_y = random.randint(100, 400)
+                          page.mouse.wheel(0, scroll_y)
+                          
+                      time.sleep(random.uniform(1.0, 3.5))
+                  except Exception:
+                      break
+
+          def type_like_human(page, selector, text):
+              """Digita con curva Gaussiana e probabilità realistica di errore/correzione."""
+              page.locator(selector).click(timeout=5000)
+              for char in text:
+                  delay = max(20, random.gauss(100, 40)) / 1000.0
+                  page.keyboard.type(char)
+                  time.sleep(delay)
+                  
+                  if random.random() < 0.02:
+                      wrong_char = random.choice('abcdefghijklmnopqrstuvwxyz')
+                      page.keyboard.type(wrong_char)
+                      time.sleep(0.1)
+                      page.keyboard.press("Backspace")
+                      time.sleep(0.15)
 
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
+          # CONFIGURAZIONE MASSIMA EVASIONE: Start-maximized e Fake Media Devices aggiunti
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
+              "--start-maximized",
+              "--use-fake-ui-for-media-stream",
+              "--use-fake-device-for-media-stream",
               f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}",
-              "--fingerprint-platform=windows",
-              "--fingerprint-screen-width=1920",
-              "--fingerprint-screen-height=1080",
-              "--fingerprint-noise=false" # Rimuove l'alterazione matematica del Canvas (vitale)
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # Imposta l'IP risolto per WebRTC
-          if my_ip != "127.0.0.1":
-              extra_args.append(f"--fingerprint-webrtc-ip={my_ip}")
+          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
+
+          # no_viewport=True permette a --start-maximized di ereditare la risoluzione reale (1920x1080 da Xvfb)
+          context = launch_context(
+              headless=False,
+              humanize=True,
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,
+              no_viewport=True, 
+              args=extra_args
+          )
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
-          # 3. AVVIA PLAYWRIGHT STANDARD SENZA INIEZIONI JS
-          with sync_playwright() as p:
-              print(f"[NODO {node_id}] Avvio Playwright su {binary_path}", flush=True)
-              browser = p.chromium.launch(
-                  executable_path=binary_path,
-                  headless=False,
-                  proxy={"server": proxy_str},
-                  args=extra_args
-              )
+          for url in MY_TARGETS:
+              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
+              try:
+                  page = context.new_page()
+                  query_to_search = get_query_from_url(url)
 
-              # Contesto blindato 1920x1080
-              context = browser.new_context(
-                  viewport={"width": 1920, "height": 1080},
-                  locale="en-US",
-                  timezone_id="America/New_York"
-              )
-
-              for url in MY_TARGETS:
-                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-                  print(f"[NODO {node_id}] -> {url}", flush=True)
-                  page = None
-                  
-                  try:
-                      page = context.new_page()
-                      query_to_search = get_query_from_url(url)
-
-                      if "startpage.com" in url:
-                          page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                          time.sleep(2)
-                          try:
-                              page.locator("input#q").fill(query_to_search)
-                              page.keyboard.press("Enter")
-                          except:
-                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                              
-                      elif "html.duckduckgo.com" in url:
-                          page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                          time.sleep(2)
-                          try:
-                              page.locator("input[name=q]").fill(query_to_search)
-                              page.keyboard.press("Enter")
-                          except:
-                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                              
-                      else:
-                          page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                      
-                      print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
-                      time.sleep(12)
-
-                      if "pixelscan.net" in url:
-                          try:
-                              btn = page.locator("text=Scan My Browser Now").first
-                              if btn.is_visible(timeout=3000):
-                                  btn.click() 
-                                  time.sleep(8)
-                          except:
-                              pass
+                  # Navigazione e gestione ricerche (utilizzando le nuove funzioni umane)
+                  if "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                      human_sleep(page, 3)
+                      try:
+                          type_like_human(page, "input#q", query_to_search)
+                          page.keyboard.press("Enter")
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
-                      if "creepjs" in url:
-                          time.sleep(6) 
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                      human_sleep(page, 3)
+                      try:
+                          type_like_human(page, "input[name=q]", query_to_search)
+                          page.keyboard.press("Enter")
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                  
+                  # ANSIA UMANA (15s): micro-interazioni durante i controlli passivi di Cloudflare/reCAPTCHA
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva (comportamento umano)...", flush=True)
+                  human_sleep(page, 15)
 
-                      raw_html = ""
-                      for attempt in range(3):
-                          try:
-                              raw_html = page.content()
-                              break
-                          except:
-                              time.sleep(2)
+                  # Click specifico finalizzato unicamente a pixelscan (se presente)
+                  if "pixelscan.net" in url:
+                      try:
+                          btn = page.locator("text=Scan My Browser Now").first
+                          if btn.is_visible(timeout=3000):
+                              btn.click() 
+                              human_sleep(page, 8)
+                      except Exception:
+                          pass
+                      
+                  # Assestamento per diagnostici lenti
+                  if "creepjs" in url:
+                      human_sleep(page, 6) 
 
-                      results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+                  # Estrazione sicura del sorgente pagina
+                  raw_html = get_safe_content(page)
+                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore: {e}", flush=True)
-                      results += f"ERRORE GLOBALE: {str(e)}\n"
-                  finally:
-                      if page:
-                          try:
-                              page.close()
-                          except:
-                              pass
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  results += f"ERRORE GLOBALE: {str(e)}\n"
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
 
-              context.close()
-              browser.close()
+          context.close()
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
@@ -295,7 +333,8 @@ jobs:
           echo "=== LOG NODO 6 ===" && cat node6.log || true
           echo "=================="
 
-          cat output_node_*.txt > output_macchina2_cdp.txt 2>/dev/null || true
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
