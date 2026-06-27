@@ -1,0 +1,295 @@
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  machine2_cdp_insocket_tor:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
+
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
+
+      - name: Installazione e Avvio di 10 Istanze Tor (IPv6 abilitato)
+        run: |
+          sudo apt-get update && sudo apt-get install -y tor
+          
+          echo "Inizializzazione di 10 circuiti Tor indipendenti..."
+          for i in {1..10}; do
+            PORT=$((40000 + i))
+            DIR="/tmp/tor$i"
+            mkdir -p $DIR
+            sudo chown -R $USER:$USER $DIR
+            
+            # Lanciamo Tor come demone. ClientUseIPv6 abilita richieste IPv6 ai relay.
+            tor --RunAsDaemon 1 \
+                --SocksPort $PORT \
+                --DataDirectory $DIR \
+                --PidFile $DIR/tor.pid \
+                --Log "notice file $DIR/tor.log" \
+                --ClientUseIPv6 1
+            
+            # Pausa di scaglionamento per non sovraffollare la rete del runner
+            sleep 3
+          done
+          
+          echo "Attesa inizializzazione dei circuiti Tor (20 secondi)..."
+          sleep 20
+
+      - name: Verifica IP (IPv6/IPv4) con Tor Auto-Healing
+        run: |
+          for i in {1..10}; do
+            PORT=$((40000 + i))
+            DIR="/tmp/tor$i"
+            echo "=================================================="
+            echo "VERIFICA NODO TOR $i (PORTA $PORT):"
+            
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5..."
+              
+              # api64 prova prima IPv6, se non va usa IPv4. Fondamentale per i nodi Tor misti.
+              IP=$(curl -s --max-time 15 --proxy socks5h://127.0.0.1:$PORT https://api64.ipify.org?format=json | grep -o '"ip":"[^"]*' | cut -d'"' -f4 || true)
+              
+              if [ ! -z "$IP" ]; then
+                echo "Nodo $i pronto e funzionante! IP di uscita: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Nodo $i lento o morto. Generazione di un nuovo IP e Circuito Tor..."
+                # Uccide la singola istanza bloccata e la ricrea con un IP totalmente nuovo
+                kill -9 $(cat $DIR/tor.pid) 2>/dev/null || true
+                sleep 2
+                tor --RunAsDaemon 1 --SocksPort $PORT --DataDirectory $DIR --PidFile $DIR/tor.pid --ClientUseIPv6 1
+                sleep 15 # Attende il bootstrap del nuovo nodo
+              fi
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il Nodo Tor $i non è riuscito a stabilire un circuito dopo 5 tentativi."
+              exit 1
+            fi
+          done
+          echo "=================================================="
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (Macchina 2 - Versione Tor a 10 Nodi)
+        run: |
+          cat << 'EOF' > m2_insocket.py
+          import time
+          import sys
+          import random
+          import math
+          import os
+          from cloakbrowser import launch_context
+          from bs4 import BeautifulSoup
+          from urllib.parse import urlparse, parse_qs
+
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          num_nodes = 10 # <-- ADATTATO PER 10 NODI TOR
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
+
+          def extract_text(html_content, url):
+              soup = BeautifulSoup(html_content, 'html.parser')
+              text = soup.get_text(separator=' ', strip=True)
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return text
+              return text[:5000]
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
+          def get_safe_content(page, retries=3):
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(3)
+                      else:
+                          break
+              return ""
+
+          random_seed = str(random.randint(100000, 999999))
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+
+          extra_args = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+          ]
+
+          print(f"[NODO {node_id}] Avvio Context Tor (Porta {ACTIVE_PORT})", flush=True)
+
+          context = launch_context(
+              headless=False,
+              humanize=True,
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,
+              viewport=None, 
+              args=extra_args
+          )
+
+          results = f"\n{'#'*60}\nREPORT NODO TOR {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          for url in MY_TARGETS:
+              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
+              try:
+                  page = context.new_page()
+                  query_to_search = get_query_from_url(url)
+
+                  # Aumento del timeout: Tor è fisiologicamente più lento
+                  if "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=60000)
+                      time.sleep(3)
+                      try:
+                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.keyboard.press("Enter")
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                          
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=60000)
+                      time.sleep(3)
+                      try:
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.keyboard.press("Enter")
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                          
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                  
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
+                  time.sleep(15)
+
+                  if "pixelscan.net" in url:
+                      try:
+                          btn = page.locator("text=Scan My Browser Now").first
+                          if btn.is_visible(timeout=3000):
+                              btn.click() 
+                              time.sleep(8)
+                      except Exception:
+                          pass
+                      
+                  if "creepjs" in url:
+                      time.sleep(6) 
+
+                  raw_html = get_safe_content(page)
+                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  results += f"ERRORE GLOBALE: {str(e)}\n"
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
+
+          context.close()
+
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
+              f.write(results)
+          EOF
+
+      - name: Esecuzione Scraping Parallelo (10 Nodi Tor)
+        run: |
+          echo "Avvio processi paralleli su 10 nodi..."
+          
+          # Lancio dinamico di tutti i 10 script
+          for i in {1..10}; do
+            python -u m2_insocket.py $i > node$i.log 2>&1 &
+            sleep 2
+          done
+
+          # Attende che tutti i processi in background finiscano
+          wait
+
+          echo "=== STAMPA LOG NODI ==="
+          for i in {1..10}; do
+            echo "--- LOG NODO $i ---"
+            cat node$i.log || true
+          done
+          echo "======================="
+
+          # Aggrega i risultati
+          touch $(for i in {1..10}; do echo "output_node_$i.txt "; done)
+          cat output_node_*.txt > output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2_Tor
+          path: output_macchina2_cdp.txt
