@@ -279,7 +279,7 @@ jobs:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          INITIAL_PORT = 40006 + node_id
+          INITIAL_PORT = 40000 + node_id # Porte 40001-40006 riutilizzate
 
           def verify_proxy_active(port, node_id, max_retries=5, delay=5):
               """Verifica attiva del proxy per lo Step 2."""
@@ -355,7 +355,7 @@ jobs:
 
           def scrape_with_failover(url, profile_dir, extra_args_base, node_id, initial_port):
               """Esegue lo scraping implementando la rotazione automatica dei proxy e il riscaldamento integrato."""
-              all_ports = [40007, 40008, 40009, 40010, 40011, 40012]
+              all_ports = [40001, 40002, 40003, 40004, 40005, 40006]
               ports_to_try = [initial_port] + [p for p in all_ports if p != initial_port]
               
               for attempt, port in enumerate(ports_to_try):
@@ -536,29 +536,47 @@ jobs:
           wait "${PIDS[@]}"
           
           kill $TAIL_PID || true
-          
-          echo 'STEP 1 completato. Pulizia totale dei container dello Step 1...'
-          for i in {1..6}; do
-            docker stop warproxy-$i || true
-            docker rm warproxy-$i || true
-          done
 
-      - name: Setup Container STEP 2 (IPv6 Sequenziale)
+      - name: Refresh IP Container per lo STEP 2 (IPv6)
         run: |
-          # Avvio sequenziale con ritardo "sleep 3" per scaglionare le registrazioni concorrenti a Cloudflare
-          echo 'Avvio dei container dello Step 2 (Porte 40007-40012)...'
-          for i in {7..12}; do
+          # Semplicemente riavvia i container già esistenti per fargli ottenere un IP fresco senza rieseguire la registrazione
+          echo 'Riavvio dei container dello Step 1 per rinegoziare la connessione e cambiare IP...'
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          
+          echo 'Attesa per l inizializzazione dei tunnel...'
+          sleep 5
+
+          ENDPOINTS=(
+            "https://api6.ipify.org?format=json"
+            "https://v6.ident.me/.json"
+            "https://ifconfig.co/json"
+            "https://inet-ip.info/json"
+          )
+
+          # Polling dinamico per lo Step 2 (Verifica non bloccante per appoggiarsi alla rotazione proxy dello script Python)
+          for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
+            echo "=================================================="
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            SUCCESS=false
             
-            sleep 3.0
+            for r in {1..30}; do
+              for URL in "${ENDPOINTS[@]}"; do
+                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null || echo "")
+                if [ ! -z "$IP" ]; then
+                  echo "Container $i pronto via $URL! Risposta: $IP"
+                  SUCCESS=true
+                  break 2
+                fi
+              done
+              sleep 0.5
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo 'ATTENZIONE: Il container non risponde. Lo Step 2 si affiderà alla rotazione proxy.'
+            fi
           done
+          echo "=================================================="
 
       - name: Inizializzazione Coda Globale STEP 2 (Unione e Fusione Fallimenti)
         run: |
@@ -613,8 +631,8 @@ jobs:
           
           kill $TAIL_PID || true
           
-          echo 'STEP 2 completato. Rimozione dei container STEP 2...'
-          for i in {7..12}; do
+          echo 'STEP 2 completato. Rimozione dei container...'
+          for i in {1..6}; do
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
           done
