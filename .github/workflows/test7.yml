@@ -144,6 +144,7 @@ jobs:
           MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
 
           def extract_text(html_content, url):
+              """Estrae il testo dall'HTML sul lato Python (nessun impatto o rilevamento sul browser)."""
               soup = BeautifulSoup(html_content, 'html.parser')
               text = soup.get_text(separator=' ', strip=True)
               if any(site in url for site in DIAGNOSTIC_SITES):
@@ -173,7 +174,7 @@ jobs:
               return ""
 
           def add_or_update_query_param(url, param_name, param_value):
-              """Utility per iniettare parametri di query come num=50 o count=50 nei motori di ricerca."""
+              """Utility offline per inserire i parametri di conteggio risultati nell'URL prima di navigare."""
               parsed = urlparse(url)
               qsl = parse_qsl(parsed.query)
               qsl = [(k, v) for k, v in qsl if k.lower() != param_name.lower()]
@@ -189,7 +190,7 @@ jobs:
               ))
 
           def detect_search_engine(url):
-              """Identifica il motore di ricerca escludendo specificamente Yahoo Finance."""
+              """Rileva se si tratta di uno dei motori di ricerca target (escludendo Yahoo Finance)."""
               try:
                   parsed = urlparse(url)
                   domain = parsed.netloc.lower()
@@ -212,20 +213,25 @@ jobs:
                   pass
               return None
 
-          def scroll_to_bottom(page, max_scrolls=6):
-              """Effettua uno scroll incrementale simulato per attivare lazy loading e infinite scroll."""
-              print(f"[Scroll] Avvio scorrimento dinamico della pagina...", flush=True)
-              last_height = page.evaluate("document.body.scrollHeight")
-              for i in range(max_scrolls):
-                  page.evaluate("window.scrollBy(0, window.innerHeight * 0.85);")
-                  time.sleep(random.uniform(1.2, 2.4))
-                  new_height = page.evaluate("document.body.scrollHeight")
-                  if new_height == last_height and i > 2:
-                      break
-                  last_height = new_height
+          def trigger_scroll_and_get_html(page):
+              """
+              Effettua scorrimenti passivi distanziati per attivare Intersection Observers e caricare elementi asincroni,
+              quindi preleva l'HTML intero ed esce immediatamente.
+              """
+              try:
+                  # Primo scorrimento parziale (circa metà pagina)
+                  page.evaluate("window.scrollBy(0, window.innerHeight * 1.5);")
+                  time.sleep(random.uniform(1.5, 2.5))
+                  
+                  # Secondo scorrimento verso la fine del documento
+                  page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                  time.sleep(random.uniform(2.0, 3.0))
+              except Exception as e:
+                  print(f"[Scroll] Eccezione passiva: {e}", flush=True)
+              return get_safe_content(page)
 
           def parse_links_from_html(html_content, engine):
-              """Estrae e ripulisce i link organici escludendo pubblicità, tracking e link interni."""
+              """Analizza l'HTML ed estrae i link organici unicamente sul lato Python (0 chiamate verso il browser)."""
               soup = BeautifulSoup(html_content, 'html.parser')
               links = []
               
@@ -245,7 +251,7 @@ jobs:
               elif engine == 'yahoo':
                   for a in soup.select('.algo a[href], .ac-algo[href], div.compTitle a[href], #web a[href]'):
                       href = a.get('href', '')
-                      # Estrazione redirect nativo Yahoo
+                      # Rimozione del sistema di redirect interno di Yahoo
                       if 'r.search.yahoo.com' in href or '/RU=' in href:
                           match = re.search(r'/RU=([^/]+)', href)
                           if match:
@@ -256,7 +262,7 @@ jobs:
               elif engine == 'duckduckgo':
                   for a in soup.select('a.result__a[href], a[data-testid="result-title-a"][href]'):
                       href = a.get('href', '')
-                      # Estrazione redirect nativo DDG
+                      # Rimozione del sistema di redirect interno di DuckDuckGo
                       if '/l/?' in href or 'uddg=' in href:
                           parsed = urlparse(href)
                           qs = parse_qs(parsed.query)
@@ -271,7 +277,7 @@ jobs:
                       if href.startswith('http') and not any(x in href for x in ['startpage.com', 'google.com']):
                           links.append(href)
                           
-              # Fallback generico robusto nel caso i selettori specifici falliscano a causa di aggiornamenti dei motori
+              # Fallback robusto di sicurezza qualora la struttura HTML originale subisca modifiche repentine
               if not links:
                   blacklist = ['privacy', 'terms', 'cookies', 'settings', 'help', 'about', 'advertising', 'feedback', 'login', 'signup', 'support', 'googleads', '/aclk', '/url?q=']
                   for a in soup.find_all('a', href=True):
@@ -282,7 +288,7 @@ jobs:
                               if not any(se in domain for se in ['google.', 'bing.com', 'yahoo.com', 'duckduckgo.com', 'startpage.com']):
                                   links.append(href)
                                   
-              # Deduplica preservando l'ordine di apparizione
+              # Deduplica preservando l'ordine
               seen = set()
               unique_links = []
               for link in links:
@@ -292,78 +298,9 @@ jobs:
                       
               return unique_links
 
-          def scrape_search_results(page, url, engine, target_count=40):
-              """Naviga, ottimizza la query, effettua scroll e gestisce l'eventuale paginazione per raggiungere 40 risultati."""
-              unique_links = []
-              
-              # Ottimizzazione dei parametri URL ove supportato per estrarre 50 risultati al primo colpo
-              if engine == 'google':
-                  url = add_or_update_query_param(url, 'num', '50')
-              elif engine == 'bing':
-                  url = add_or_update_query_param(url, 'count', '50')
-              elif engine == 'yahoo':
-                  url = add_or_update_query_param(url, 'n', '50')
-                  
-              print(f"[{engine.upper()}] Navigazione verso: {url}", flush=True)
-              try:
-                  page.goto(url, wait_until="domcontentloaded", timeout=45000)
-              except Exception as e:
-                  print(f"Errore nel caricamento iniziale di {engine.upper()}: {e}", flush=True)
-                  return []
-                  
-              scroll_to_bottom(page, max_scrolls=4)
-              time.sleep(3)
-              
-              raw_html = get_safe_content(page)
-              unique_links = parse_links_from_html(raw_html, engine)
-              
-              # Paginazione interattiva di fallback nel caso in cui non si raggiungano i 40 link organici
-              page_num = 1
-              max_pages = 4
-              
-              while len(unique_links) < target_count and page_num < max_pages:
-                  print(f"[{engine.upper()}] Estratti {len(unique_links)}/{target_count} link. Tentativo di paginazione...", flush=True)
-                  next_button = None
-                  try:
-                      if engine == 'google':
-                          next_button = page.locator("#pnnext, a:has-text('Avanti'), a:has-text('Next')").first
-                      elif engine == 'bing':
-                          next_button = page.locator("a.sb_pagN, a[title='Pagina successiva'], a[title='Next page']").first
-                      elif engine == 'yahoo':
-                          next_button = page.locator("a.next, a:has-text('Next'), a:has-text('Avanti')").first
-                      elif engine == 'duckduckgo':
-                          next_button = page.locator("input[value='Next'], input[value='Avanti'], form[action='/html/'] input[type='submit']").first
-                      elif engine == 'startpage':
-                          next_button = page.locator("form.pagination__form button, form.pagination__form input[type='submit']").first
-                          
-                      if next_button:
-                          next_button.wait_for(state="visible", timeout=3000)
-                          next_button.click()
-                          page_num += 1
-                          try:
-                              page.wait_for_load_state("domcontentloaded", timeout=15000)
-                          except Exception:
-                              pass
-                          time.sleep(random.uniform(4.0, 7.0))
-                          scroll_to_bottom(page, max_scrolls=3)
-                          
-                          raw_html = get_safe_content(page)
-                          new_links = parse_links_from_html(raw_html, engine)
-                          for nl in new_links:
-                              if nl not in unique_links:
-                                  unique_links.append(nl)
-                      else:
-                          print(f"[{engine.upper()}] Pulsante di paginazione non trovato. Fine della scansione.", flush=True)
-                          break
-                  except Exception as ex:
-                      print(f"[{engine.upper()}] Impossibile procedere alla pagina successiva: {ex}", flush=True)
-                      break
-                      
-              return unique_links[:target_count]
-
           def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
-              """Avvia temporaneamente il browser in HTTP/1.1 su siti sicuri non-Google per scaldare cookie e sessioni."""
-              print(f"[NODO {node_id}] [Warmup HTTP/1.1] Inizializzazione profilo su siti sicuri...", flush=True)
+              """Fase di warmup veloce in HTTP/1.1 per l'acquisizione iniziale dei cookie (eseguita solo su Reddit)."""
+              print(f"[NODO {node_id}] [Warmup HTTP/1.1] Avvio warmup preliminare...", flush=True)
               warmup_args = extra_args_base + ["--disable-http2"]
               
               try:
@@ -383,48 +320,40 @@ jobs:
                   )
                   
                   page = context.new_page()
-                  
-                  # 1. Visita la home page di Reddit
-                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Reddit Home...", flush=True)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Connessione a Reddit...", flush=True)
                   try:
                       page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=35000)
-                      time.sleep(random.uniform(8, 12)) 
+                      time.sleep(10) 
                   except Exception as e:
-                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Reddit: {e}", flush=True)
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Avviso: {e}", flush=True)
                       
-                  # 2. Visita Wikipedia Pagina Casuale (Sicura, nessun rischio di blocco)
-                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Wikipedia...", flush=True)
-                  try:
-                      page.goto("https://it.wikipedia.org/wiki/Speciale:PaginaCasuale", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(random.uniform(5, 8))
-                  except Exception as e:
-                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Wikipedia: {e}", flush=True)
-
                   page.close()
                   context.close()
-                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Completato con successo.", flush=True)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Warmup completato.", flush=True)
               except Exception as e:
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore critico nel warmup: {e}", flush=True)
 
-          # --- INIZIO SCRAPER PRINCIPALE ---
+          # --- CONFIGURAZIONE PROFILO E ARGOMENTI STEALTH ---
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
           profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
 
+          # NOTA: Rimossa l'opzione --fingerprint-windows-font-metrics poiché esclusiva della versione Pro (148+)
           extra_args_base = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+              f"--fingerprint-fonts-dir={windows_fonts_dir}",
+              "--fingerprint-storage-quota=5000"     # Normalizza la storage quota per nascondere lo stato Incognito (Best Practice Cloak)
           ]
 
-          # Fase 1: Riscaldamento protettivo e leggero in HTTP/1.1
+          # Esecuzione Riscaldamento in HTTP/1.1
           run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
 
           time.sleep(3)
 
-          # Fase 2: Scraping principale in HTTP/2
+          # Scraping in HTTP/2 (Sessione Principale)
           print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale...", flush=True)
           context = launch_persistent_context(
               profile_dir,
@@ -453,9 +382,23 @@ jobs:
                   engine = detect_search_engine(url)
                   
                   if engine:
-                      # Se il target è un motore di ricerca, raccoglie e conta i link organici puliti
-                      print(f"[NODO {node_id}] Identificato motore di ricerca: {engine.upper()}", flush=True)
-                      search_links = scrape_search_results(page, url, engine, target_count=40)
+                      # Se è un motore di ricerca, ottimizziamo l'URL prima di caricare la pagina
+                      target_url = url
+                      if engine == 'google':
+                          target_url = add_or_update_query_param(url, 'num', '50')
+                      elif engine == 'bing':
+                          target_url = add_or_update_query_param(url, 'count', '50')
+                      elif engine == 'yahoo':
+                          target_url = add_or_update_query_param(url, 'n', '50')
+                          
+                      print(f"[NODO {node_id}] Caricamento motore di ricerca ({engine.upper()}): {target_url}", flush=True)
+                      page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+                      
+                      # Scorrimento minimo passivo per popolare eventuali elementi dinamici e grab dell'HTML
+                      raw_html = trigger_scroll_and_get_html(page)
+                      
+                      # Parsing e pulizia eseguiti in locale (Python-side)
+                      search_links = parse_links_from_html(raw_html, engine)[:40]
                       
                       results += f"TIPO TARGET: Motore di Ricerca ({engine.upper()})\n"
                       results += f"NUMERO LINK TROVATI: {len(search_links)}\n"
@@ -463,15 +406,14 @@ jobs:
                       for idx, link in enumerate(search_links, 1):
                           results += f"{idx}. {link}\n"
                   else:
-                      # Se il target è un sito standard o un portale finanziario (es. Yahoo Finance)
+                      # Trattamento per siti standard o sezioni finanziarie
                       query_to_search = get_query_from_url(url)
 
-                      # Trattamento di fallback per URL di ricerca non filtrati a monte
                       if "startpage.com" in url:
                           page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                           time.sleep(3)
                           try:
-                              page.type("input#q", query_to_search)
+                              page.locator("input#q").type(query_to_search)
                               page.keyboard.press("Enter")
                           except Exception:
                               page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -480,7 +422,7 @@ jobs:
                           page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                           time.sleep(3)
                           try:
-                              page.type("input[name=q]", query_to_search)
+                              page.locator("input[name=q]").type(query_to_search)
                               page.keyboard.press("Enter")
                           except Exception:
                               page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -488,12 +430,10 @@ jobs:
                       else:
                           page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
-                      # Attesa passiva randomica prima dello scroll
-                      passive_wait = random.randint(3, 7)
-                      time.sleep(passive_wait)
+                      time.sleep(random.uniform(2.0, 4.0))
 
-                      # Scroll dinamico per forzare il caricamento di lazy elements e infinite scroll
-                      scroll_to_bottom(page, max_scrolls=8)
+                      # Scorrimento per forzare il caricamento del testo asincrono e grab immediato
+                      raw_html = trigger_scroll_and_get_html(page)
 
                       if "pixelscan.net" in url:
                           try:
@@ -501,17 +441,19 @@ jobs:
                               if btn.is_visible(timeout=3000):
                                   btn.click() 
                                   time.sleep(8)
+                                  raw_html = get_safe_content(page)
                           except Exception:
                               pass
                           
                       if "creepjs" in url:
                           time.sleep(6) 
+                          raw_html = get_safe_content(page)
 
-                      raw_html = get_safe_content(page)
+                      # Elaborazione offline del testo estratto (Python-side)
                       results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
               finally:
                   if page:
@@ -520,9 +462,8 @@ jobs:
                       except Exception:
                           pass
                   
-                  # Intervallo randomico prima della prossima risorsa
                   visit_interval = random.uniform(4.0, 9.0)
-                  print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s...", flush=True)
+                  print(f"[NODO {node_id}] Attesa di {visit_interval:.2f}s...", flush=True)
                   time.sleep(visit_interval)
 
           context.close()
