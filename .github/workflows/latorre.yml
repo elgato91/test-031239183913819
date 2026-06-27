@@ -27,7 +27,7 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (WARP+ Premium Attivo)
+      - name: Setup 6 WARProxy Docker Containers (WARP+ Premium Gratis Attivo)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -42,9 +42,9 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
-            # Jitter di avvio per non sovraccaricare la generazione delle chiavi premium
+            # Jitter di avvio per non accavallare la generazione delle chiavi premium
             DELAY=$((6 + RANDOM % 4))
-            echo "Attesa di $DELAY secondi..."
+            echo "Attesa di $DELAY secondi prima del prossimo container..."
             sleep $DELAY
           done
 
@@ -60,17 +60,24 @@ jobs:
 
             SUCCESS=false
             for tentativo in {1..5}; do
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                SUCCESS=true
-                break
-              else
-                docker restart warproxy-$i
-                sleep 8
+              echo "Verifica container $i (tentativo $tentativo/5)..."
+              
+              # L'uso dell'if impedisce l'uscita immediata di GitHub Actions su fallimento curl
+              if IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "https://api6.ipify.org?format=json" 2>/dev/null); then
+                if [ ! -z "$IP" ]; then
+                  echo "Container $i pronto! IP: $IP"
+                  SUCCESS=true
+                  break
+                fi
               fi
+              
+              echo "Socks5 non ancora pronto. Riavvio container $i e attesa di 8 secondi..."
+              docker restart warproxy-$i
+              sleep 8
             done
 
             if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non si è inizializzato correttamente dopo 5 tentativi."
               exit 1
             fi
           done
@@ -166,7 +173,7 @@ jobs:
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # SUPREME: Disattivazione Blink Automation + Forzatura DNS Over HTTPS Criptato su Cloudflare
+          # Blink Automation Disattivato + DNS Over HTTPS Criptato su Cloudflare
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
@@ -188,8 +195,15 @@ jobs:
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
-          for url in MY_TARGETS:
+          for idx, url in enumerate(MY_TARGETS):
+              # PAUSA CASUALE TRA UN TARGET E L'ALTRO (Da 4 a 8 secondi) - Esclude la prima iterazione
+              if idx > 0:
+                  pause_time = random.uniform(4.0, 8.0)
+                  print(f"[NODO {node_id}] Pausa tra i target di {pause_time:.2f} secondi...", flush=True)
+                  time.sleep(pause_time)
+
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"[NODO {node_id}] -> Navigo su: {url}", flush=True)
               page = None
               
               try:
@@ -217,25 +231,28 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # SILENZIO ASSOLUTO CDP (15s) per lasciar passare le verifiche
-                  time.sleep(15)
+                  # SILENZIO ASSOLUTO CDP RANDOM (da 11 a 16 secondi)
+                  site_wait = random.uniform(11.0, 16.0)
+                  print(f"[NODO {node_id}] Silenzio CDP attivo per {site_wait:.2f} secondi...", flush=True)
+                  time.sleep(site_wait)
 
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
                               btn.click() 
-                              time.sleep(8)
+                              time.sleep(random.uniform(6.0, 9.0))
                       except Exception:
                           pass
                       
                   if "creepjs" in url:
-                      time.sleep(6) 
+                      time.sleep(random.uniform(5.0, 7.0)) 
 
                   raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
+                  print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
               finally:
                   if page:
