@@ -36,7 +36,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup e Verifica Container STEP 1 (IPv6)
+      - name: Setup Container STEP 1 (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -52,56 +52,10 @@ jobs:
             sleep 0.5
           done
 
-          echo "Attesa iniziale allineamento tunnel STEP 1..."
-          sleep 5
-
-          ENDPOINTS=(
-            "https://api6.ipify.org?format=json"
-            "https://v6.ident.me/.json"
-            "https://ifconfig.co/json"
-            "https://inet-ip.info/json"
-          )
-
-          # Polling dinamico protetto contro i fallimenti prematuri di curl (errore 28)
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
-            SUCCESS=false
-            
-            for r in {1..60}; do
-              for URL in "${ENDPOINTS[@]}"; do
-                # L'aggiunta di "|| echo """ previene l'uscita anticipata della shell a causa di timeout di curl
-                IP=$(curl -s --max-time 6 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null || echo "")
-                if [ ! -z "$IP" ]; then
-                  echo "Container $i pronto via $URL! Risposta: $IP"
-                  SUCCESS=true
-                  break 2
-                fi
-              done
-              sleep 0.5
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non si è allineato."
-              exit 1
-            fi
-          done
-          echo "=================================================="
-
-      - name: Creazione Script Python - STEP 1 (Pure curl-cffi Diretto e Ultra-Rapido)
+      - name: Inizializzazione Coda Globale STEP 1
         run: |
-          cat << 'EOF' > m2_step1.py
-          import time
-          import sys
-          import random
-          import math
-          import os
+          python -u -c '
           import json
-          from bs4 import BeautifulSoup
-          from curl_cffi import requests
-          from urllib.parse import urlparse
-
           TARGETS = [
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
@@ -126,8 +80,27 @@ jobs:
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
+          with open("/tmp/step1_queue.json", "w") as f:
+              json.dump(TARGETS, f)
+          print("Coda globale dello Step 1 creata con successo.")
+          '
+
+      - name: Creazione Script Python - STEP 1 (Pure curl-cffi con Coda Dinamica e Autoverifica)
+        run: |
+          cat << 'EOF' > m2_step1.py
+          import time
+          import sys
+          import random
+          import os
+          import json
+          import fcntl
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests
+          from urllib.parse import urlparse
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+          QUEUE_FILE = "/tmp/step1_queue.json"
+          LOCK_FILE = "/tmp/step1_queue.lock"
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -135,8 +108,57 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          num_nodes = 6
-          MY_TARGETS = [TARGETS[i] for i in range(len(TARGETS)) if i % num_nodes == (node_id - 1)]
+          def verify_proxy_active(port, node_id, max_retries=5, delay=5):
+              """Verifica attiva del proxy direttamente dentro Python."""
+              print(f"[NODO {node_id}] Verifica attività proxy sulla porta {port}...", flush=True)
+              test_session = requests.Session(impersonate="chrome120")
+              test_session.proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              endpoints = [
+                  "https://api6.ipify.org?format=json",
+                  "https://v6.ident.me/.json",
+                  "https://ifconfig.co/json"
+              ]
+              for r in range(1, max_retries + 1):
+                  url = endpoints[(r - 1) % len(endpoints)]
+                  try:
+                      resp = test_session.get(url, timeout=6)
+                      if resp.status_code == 200 and len(resp.text) > 0:
+                          print(f"[NODO {node_id}] Proxy allineato! Risposta: {resp.text.strip()}", flush=True)
+                          return True
+                  except Exception as e:
+                      print(f"[NODO {node_id}] Tentativo {r}/{max_retries} fallito per il proxy {port}: {e}", flush=True)
+                  if r < max_retries:
+                      time.sleep(delay)
+              return False
+
+          def get_next_target(queue_path, lock_path):
+              """Estrae in modo sicuro (process-safe) il prossimo URL disponibile dalla coda globale."""
+              if not os.path.exists(queue_path):
+                  return None
+              with open(lock_path, "w") as lock_f:
+                  try:
+                      fcntl.flock(lock_f, fcntl.LOCK_EX)
+                      if not os.path.exists(queue_path) or os.path.getsize(queue_path) == 0:
+                          return None
+                      with open(queue_path, "r") as q_f:
+                          try:
+                              queue = json.load(q_f)
+                          except Exception:
+                              return None
+                      if not queue:
+                          return None
+                      next_url = queue.pop(0)
+                      with open(queue_path, "w") as q_f:
+                          json.dump(queue, q_f)
+                      return next_url
+                  except Exception as e:
+                      print(f"Errore lock: {e}", flush=True)
+                      return None
+                  finally:
+                      fcntl.flock(lock_f, fcntl.LOCK_UN)
 
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
@@ -176,7 +198,11 @@ jobs:
               return True, ""
 
           # --- INIZIO SCRAPING STEP 1 ---
-          print(f"[NODO {node_id}] [Scraping curl_cffi] Inizializzazione sessione...", flush=True)
+          if not verify_proxy_active(ACTIVE_PORT, node_id):
+              print(f"[NODO {node_id}] ERRORE: Proxy offline. Spegnimento. Il carico verrà assorbito dagli altri nodi.", flush=True)
+              sys.exit(0)
+
+          print(f"[NODO {node_id}] [Scraping curl_cffi] Avvio sessione...", flush=True)
           session = requests.Session(impersonate="chrome120")
           session.proxies = {
               "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
@@ -187,9 +213,12 @@ jobs:
           failed_targets = []
           last_domain = ""
 
-          for url in MY_TARGETS:
+          while True:
+              url = get_next_target(QUEUE_FILE, LOCK_FILE)
+              if not url:
+                  break
+                  
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              
               parsed_url = urlparse(url)
               current_domain = parsed_url.netloc
               if last_domain and current_domain == last_domain:
@@ -227,7 +256,7 @@ jobs:
               json.dump(failed_targets, f)
           EOF
 
-      - name: Creazione Script Python - STEP 2 (CloakBrowser con Rotazione Proxy e Warmup H2)
+      - name: Creazione Script Python - STEP 2 (CloakBrowser con Rotazione Proxy e Warmup H2 Integrato)
         run: |
           cat << 'EOF' > m2_step2.py
           import time
@@ -235,9 +264,14 @@ jobs:
           import random
           import os
           import json
+          import fcntl
           from cloakbrowser import launch_persistent_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
+          from curl_cffi import requests
+
+          QUEUE_FILE = "/tmp/step2_queue.json"
+          LOCK_FILE = "/tmp/step2_queue.lock"
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -245,19 +279,57 @@ jobs:
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40006 + node_id
 
-          failed_file = f"failed_node_{node_id}.json"
-          if not os.path.exists(failed_file):
-              sys.exit(0)
+          def verify_proxy_active(port, node_id, max_retries=5, delay=5):
+              """Verifica attiva del proxy per lo Step 2."""
+              print(f"[NODO {node_id}] Verifica attività proxy sulla porta {port}...", flush=True)
+              test_session = requests.Session(impersonate="chrome120")
+              test_session.proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              endpoints = [
+                  "https://api6.ipify.org?format=json",
+                  "https://v6.ident.me/.json",
+                  "https://ifconfig.co/json"
+              ]
+              for r in range(1, max_retries + 1):
+                  url = endpoints[(r - 1) % len(endpoints)]
+                  try:
+                      resp = test_session.get(url, timeout=6)
+                      if resp.status_code == 200 and len(resp.text) > 0:
+                          print(f"[NODO {node_id}] Proxy allineato! Risposta: {resp.text.strip()}", flush=True)
+                          return True
+                  except Exception as e:
+                      print(f"[NODO {node_id}] Tentativo {r}/{max_retries} fallito per il proxy {port}: {e}", flush=True)
+                  if r < max_retries:
+                      time.sleep(delay)
+              return False
 
-          with open(failed_file, "r", encoding="utf-8") as f:
-              MY_TARGETS = json.load(f)
-
-          if not MY_TARGETS:
-              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                  f.write(f"Nessun URL da recuperare per il nodo {node_id}.\n")
-              sys.exit(0)
-
-          print(f"[NODO {node_id}] [STEP 2] Esecuzione fallback per {len(MY_TARGETS)} URL.", flush=True)
+          def get_next_target(queue_path, lock_path):
+              """Estrae in modo sicuro il prossimo URL disponibile dalla coda globale di fallback."""
+              if not os.path.exists(queue_path):
+                  return None
+              with open(lock_path, "w") as lock_f:
+                  try:
+                      fcntl.flock(lock_f, fcntl.LOCK_EX)
+                      if not os.path.exists(queue_path) or os.path.getsize(queue_path) == 0:
+                          return None
+                      with open(queue_path, "r") as q_f:
+                          try:
+                              queue = json.load(q_f)
+                          except Exception:
+                              return None
+                      if not queue:
+                          return None
+                      next_url = queue.pop(0)
+                      with open(queue_path, "w") as q_f:
+                          json.dump(queue, q_f)
+                      return next_url
+                  except Exception as e:
+                      print(f"Errore lock: {e}", flush=True)
+                      return None
+                  finally:
+                      fcntl.flock(lock_f, fcntl.LOCK_UN)
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -279,49 +351,13 @@ jobs:
                   pass
               return default
 
-          def run_warmup_phase_http2(profile_dir, active_port, extra_args_base, node_id):
-              """Warmup ad alta affidabilità su HTTP/2 per generare cookies, cache e cronologia reali."""
-              print(f"[NODO {node_id}] [Warmup HTTP/2] Avvio riscaldamento profilo...", flush=True)
-              try:
-                  context = launch_persistent_context(
-                      profile_dir,
-                      headless=False,
-                      humanize=True,
-                      human_config={"idle_between_actions": True},
-                      proxy=f"socks5://127.0.0.1:{active_port}",
-                      geoip=True,
-                      viewport={"width": 1920, "height": 1080},
-                      args=extra_args_base # HTTP/2 abilitato
-                  )
-                  page = context.new_page()
-                  
-                  # 1. Visita passiva su Reddit Home
-                  try:
-                      page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=20000)
-                      time.sleep(4)
-                  except Exception:
-                      pass
-                      
-                  # 2. Visita passiva su Google Home
-                  try:
-                      page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
-                      time.sleep(3)
-                  except Exception:
-                      pass
-                      
-                  page.close()
-                  context.close()
-                  print(f"[NODO {node_id}] [Warmup HTTP/2] Completato.", flush=True)
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore warmup: {e}", flush=True)
-
           def scrape_with_failover(url, profile_dir, extra_args_base, node_id, initial_port):
-              """Esegue lo scraping implementando la rotazione automatica e attiva dei proxy (Failover)."""
+              """Esegue lo scraping implementando la rotazione attiva dei proxy e il riscaldamento integrato."""
               all_ports = [40007, 40008, 40009, 40010, 40011, 40012]
               ports_to_try = [initial_port] + [p for p in all_ports if p != initial_port]
               
               for attempt, port in enumerate(ports_to_try):
-                  print(f"[NODO {node_id}] [Porta {port}] [Tentativo {attempt+1}/{len(ports_to_try)}] Scraping {url}...", flush=True)
+                  print(f"[NODO {node_id}] [Porta {port}] [Tentativo {attempt+1}/{len(ports_to_try)}] Connessione per {url}...", flush=True)
                   context = None
                   page = None
                   try:
@@ -340,6 +376,21 @@ jobs:
                           args=extra_args_base
                       )
                       page = context.new_page()
+                      
+                      # RISCALDAMENTO INTEGRATO ED EFFICIENTE (Solo una volta per profilo su porta funzionante)
+                      warmup_done_file = os.path.join(profile_dir, "warmup_done.flag")
+                      if not os.path.exists(warmup_done_file):
+                          print(f"[NODO {node_id}] [Porta {port}] Riscaldamento del profilo al volo (Reddit & Google)...", flush=True)
+                          try:
+                              page.goto("https://www.reddit.com", wait_until="commit", timeout=15000)
+                              time.sleep(3)
+                              page.goto("https://www.google.com", wait_until="commit", timeout=15000)
+                              time.sleep(2)
+                              with open(warmup_done_file, "w") as wf:
+                                  wf.write("OK")
+                          except Exception as we:
+                              print(f"[NODO {node_id}] [Porta {port}] Avviso durante il riscaldamento: {we}", flush=True)
+
                       query_to_search = get_query_from_url(url)
 
                       if "startpage.com" in url:
@@ -366,7 +417,6 @@ jobs:
                       # POLLING ATTIVO DI MONITORAGGIO RISOLUZIONE WAF / CLOUDFLARE
                       print(f"[NODO {node_id}] [Porta {port}] Analisi presenza barriere di sicurezza...", flush=True)
                       start_poll = time.time()
-                      resolved = False
                       
                       while time.time() - start_poll < 15: # Attesa dinamica max 15 secondi
                           content = page.content().lower()
@@ -381,16 +431,12 @@ jobs:
                               "captcha" in content
                           )
                           
-                          # Se non ci sono sfide attive e la pagina ha un DOM valido, usciamo dal polling
                           if not is_challenge and len(content.strip()) > 150:
-                              resolved = True
                               break
                           time.sleep(1.0)
                           
-                      # Assestamento asincrono finale
                       time.sleep(3.0)
 
-                      # Validazione finale del contenuto per forzare la rotazione proxy in caso di fallimento latente
                       raw_html = page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
                       page_text = soup.get_text(separator=' ', strip=True).lower()
@@ -399,10 +445,10 @@ jobs:
                       is_blocked = any(kw in page_text for kw in blocking_keywords)
                       
                       if is_blocked or len(page_text.strip()) < 150:
-                          print(f"[NODO {node_id}] [Porta {port}] Rilevato blocco o contenuto incompleto. Cambio proxy...", flush=True)
+                          print(f"[NODO {node_id}] [Porta {port}] Contenuto bloccato o incompleto. Attivazione Failover...", flush=True)
                           page.close()
                           context.close()
-                          continue # Passa al prossimo proxy nel ciclo
+                          continue # Ruota sul prossimo proxy
                       
                       # Successo riscontrato
                       print(f"[NODO {node_id}] [Porta {port}] Scraping completato con successo!", flush=True)
@@ -423,6 +469,12 @@ jobs:
               return "", False
 
           # --- INIZIO SCRIPT RECUPERO ---
+          if not verify_proxy_active(INITIAL_PORT, node_id):
+              print(f"[NODO {node_id}] ERRORE: Proxy offline. Spegnimento. Il carico verrà assorbito dagli altri nodi.", flush=True)
+              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                  f.write(f"Proxy offline per il nodo {node_id}. Carico delegato ad altri nodi.\n")
+              sys.exit(0)
+
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
@@ -435,13 +487,13 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # Esecuzione della fase di warmup H2
-          run_warmup_phase_http2(profile_dir, INITIAL_PORT, extra_args_base, node_id)
-          time.sleep(1.0)
-
           results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Cloakbrowser) (PORTA INIZIALE {INITIAL_PORT})\n{'#'*60}\n"
 
-          for url in MY_TARGETS:
+          while True:
+              url = get_next_target(QUEUE_FILE, LOCK_FILE)
+              if not url:
+                  break
+                  
               results += f"\n{'='*50}\nTARGET FALLBACK: {url}\n{'='*50}\n"
               raw_html, success = scrape_with_failover(url, profile_dir, extra_args_base, node_id, INITIAL_PORT)
               
@@ -490,9 +542,9 @@ jobs:
             docker rm warproxy-$i || true
           done
 
-      - name: Setup e Verifica Container STEP 2 (IPv6 Sequenziale)
+      - name: Setup Container STEP 2 (IPv6 Sequenziale)
         run: |
-          # Avvio sequenziale pulito sui nuovi IP per evitare conflitti e rate-limit di Cloudflare
+          # Avvio sequenziale con ritardo "sleep 3" per scaglionare le registrazioni concorrenti a Cloudflare
           echo "Avvio dei container dello Step 2 (Porte 40007-40012)..."
           for i in {7..12}; do
             PORT=$((40000 + i))
@@ -503,44 +555,35 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
-          done
-
-          echo "Attesa per l'inizializzazione dei tunnel STEP 2..."
-          sleep 5
-
-          ENDPOINTS=(
-            "https://api6.ipify.org?format=json"
-            "https://v6.ident.me/.json"
-            "https://ifconfig.co/json"
-            "https://inet-ip.info/json"
-          )
-
-          # Polling dinamico per lo Step 2 (protetto contro errori irreversibili di curl via "|| echo")
-          for i in {7..12}; do
-            PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
-            SUCCESS=false
             
-            for r in {1..60}; do
-              for URL in "${ENDPOINTS[@]}"; do
-                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL" 2>/dev/null || echo "")
-                if [ ! -z "$IP" ]; then
-                  echo "Container $i pronto via $URL! Risposta: $IP"
-                  SUCCESS=true
-                  break 2
-                fi
-              done
-              sleep 0.5
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non risponde."
-              exit 1
-            fi
+            sleep 3.0
           done
-          echo "=================================================="
+
+      - name: Inizializzazione Coda Globale STEP 2 (Unione e Fusione Fallimenti)
+        run: |
+          python -u -c '
+          import json
+          import os
+
+          merged_failed = []
+          for i in range(1, 7):
+              filename = f"failed_node_{i}.json"
+              if os.path.exists(filename):
+                  with open(filename, "r", encoding="utf-8") as f:
+                      try:
+                          failed = json.load(f)
+                          merged_failed.extend(failed)
+                      except Exception:
+                          pass
+          
+          # Rimozione duplicati preservando l'ordine originale
+          unique_failed = list(dict.fromkeys(merged_failed))
+          
+          with open("/tmp/step2_queue.json", "w") as f:
+              json.dump(unique_failed, f)
+              
+          print(f"Coda globale dello Step 2 creata con {len(unique_failed)} target da recuperare.")
+          '
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
