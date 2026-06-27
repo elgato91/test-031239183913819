@@ -16,7 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -27,88 +27,85 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Installazione e Inizializzazione Tor (Bypass Rate-Limit)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor
-          sudo systemctl start tor
-
-      - name: Setup 6 WARProxy Docker Containers (WARP+ Premium via Tor Chaining)
+      - name: Setup 6 WARProxy Docker Containers (IPv6 con chiavi WARP+ dinamiche)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
+          # 1. Recupera l'elenco di chiavi WARP+ gratuite e valide dalla community
+          KEYS_URL="https://raw.githubusercontent.com/ircfspace/warpkey/main/plus/lite"
+          KEYS_RAW=$(curl -s "$KEYS_URL")
+          
+          # 2. Converte la lista grezza in un array Bash (una chiave per riga)
+          readarray -t KEYS <<< "$KEYS_RAW"
+
+          # 3. Avvia i 6 container distribuendo una chiave diversa a ciascuno
           for i in {1..6}; do
             PORT=$((40000 + i))
             
-            echo "=================================================="
-            echo "Rigenerazione circuito Tor per cambiare IP di registrazione..."
-            sudo systemctl restart tor
+            # Seleziona la chiave i-esima dall'array
+            CURRENT_KEY="${KEYS[$((i-1))]}"
             
-            # Attesa dinamica finché Tor non ha stabilito il circuito con il nuovo IP
-            TOR_READY=false
-            for attempt in {1..15}; do
-              if TOR_IP=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:9050 https://api6.ipify.org 2>/dev/null); then
-                echo "Tor pronto! IP di registrazione per nodo $i: $TOR_IP"
-                TOR_READY=true
-                break
-              fi
-              sleep 1
-            done
-
-            if [ "$TOR_READY" = "false" ]; then
-              echo "Tor non è riuscito a connettersi in tempo. Provo comunque l'avvio..."
+            if [ -z "$CURRENT_KEY" ]; then
+              echo "Avvio container warproxy-$i sulla porta $PORT senza chiave custom (fallback su WARP base)..."
+              docker run --name warproxy-$i \
+                --network host \
+                -e SOCKS5_PORT=$PORT \
+                -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+                -e VERBOSE=true \
+                -d ghcr.io/kingcc/warproxy:latest
+            else
+              echo "Avvio container warproxy-$i sulla porta $PORT con chiave WARP+: $CURRENT_KEY"
+              docker run --name warproxy-$i \
+                --network host \
+                -e SOCKS5_PORT=$PORT \
+                -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+                -e WGCF_LICENSE_KEY="$CURRENT_KEY" \
+                -e VERBOSE=true \
+                -d ghcr.io/kingcc/warproxy:latest
             fi
 
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            # Passiamo Tor come proxy di registrazione (HTTP_PROXY/HTTPS_PROXY)
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e WARP_PLUS=true \
-              -e HTTPS_PROXY="socks5://127.0.0.1:9050" \
-              -e HTTP_PROXY="socks5://127.0.0.1:9050" \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-
-            DELAY=$((4 + RANDOM % 3))
-            echo "Attesa di sicurezza di $DELAY secondi..."
-            sleep $DELAY
+            if [ $i -lt 6 ]; then
+              DELAY=$((3 + RANDOM % 2))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
+            fi
           done
 
           echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 12
+          sleep 10
 
       - name: Verifica IP IPv6 con Auto-healing (socks5h)
         run: |
           for i in {1..6}; do
             PORT=$((40000 + i))
-            DELAY=$((3 + RANDOM % 3))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            DELAY=$((3 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
             for tentativo in {1..5}; do
-              echo "Verifica container $i (tentativo $tentativo/5)..."
+              echo "Tentativo $tentativo/5 per container $i..."
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
-              # L'uso dell'if impedisce l'uscita immediata di GitHub Actions su fallimento curl
-              if IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "https://api6.ipify.org?format=json" 2>/dev/null); then
-                if [ ! -z "$IP" ]; then
-                  echo "Container $i pronto! IP: $IP"
-                  SUCCESS=true
-                  break
-                fi
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 5
               fi
-              
-              echo "Socks5 non ancora pronto. Riavvio container $i e attesa di 8 secondi..."
-              docker restart warproxy-$i
-              sleep 8
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non si è inizializzato correttamente dopo 5 tentativi."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
               exit 1
             fi
           done
+          echo "=================================================="
 
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
@@ -187,6 +184,7 @@ jobs:
               return default
 
           def get_safe_content(page, retries=3):
+              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
               for attempt in range(retries):
                   try:
                       return page.content()
@@ -201,17 +199,17 @@ jobs:
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # SUPREME: Disattivazione Blink Automation + Forzatura DNS Over HTTPS Criptato su Cloudflare
+          # CONFIGURAZIONE MINIMALE: rimosso qualsiasi flag in conflitto con i protocolli standard di rete
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
-              "--disable-blink-features=AutomationControlled",
-              "--enable-features=DnsOverHttps",
-              "--dns-over-https-templates=https://chrome.cloudflare-dns.com/dns-query",
               f"--fingerprint={random_seed}",
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
+          print(f"[NODO {node_id}] Avvio Context Standard", flush=True)
+
+          # viewport=None permette al browser di usare la propria geometria coerente impostata a monte
           context = launch_context(
               headless=False,
               humanize=True,
@@ -223,21 +221,16 @@ jobs:
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
-          for idx, url in enumerate(MY_TARGETS):
-              # PAUSA CASUALE TRA UN TARGET E L'ALTRO (Da 4 a 8 secondi) - Esclude la prima iterazione
-              if idx > 0:
-                  pause_time = random.uniform(4.0, 8.0)
-                  print(f"[NODO {node_id}] Pausa tra i target di {pause_time:.2f} secondi...", flush=True)
-                  time.sleep(pause_time)
-
+          for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"[NODO {node_id}] -> Navigo su: {url}", flush=True)
+              print(f"[NODO {node_id}] -> {url}", flush=True)
               page = None
               
               try:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
+                  # Navigazione e gestione ricerche
                   if "startpage.com" in url:
                       page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
@@ -259,28 +252,31 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # SILENZIO ASSOLUTO CDP RANDOM (da 11 a 16 secondi)
-                  site_wait = random.uniform(11.0, 16.0)
-                  print(f"[NODO {node_id}] Silenzio CDP attivo per {site_wait:.2f} secondi...", flush=True)
-                  time.sleep(site_wait)
+                  # SILENZIO ASSOLUTO CDP (15s): Cruciale per consentire a Cloudflare e reCAPTCHA 
+                  # di completare le verifiche senza rilevare interrogazioni continue sul DOM.
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
+                  time.sleep(15)
 
+                  # Click specifico finalizzato unicamente a pixelscan (se presente)
                   if "pixelscan.net" in url:
                       try:
                           btn = page.locator("text=Scan My Browser Now").first
                           if btn.is_visible(timeout=3000):
                               btn.click() 
-                              time.sleep(random.uniform(6.0, 9.0))
+                              time.sleep(8)
                       except Exception:
                           pass
                       
+                  # Assestamento per diagnostici lenti
                   if "creepjs" in url:
-                      time.sleep(random.uniform(5.0, 7.0)) 
+                      time.sleep(6) 
 
+                  # Estrazione sicura del sorgente pagina
                   raw_html = get_safe_content(page)
                   results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
 
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore su {url}: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
                   results += f"ERRORE GLOBALE: {str(e)}\n"
               finally:
                   if page:
@@ -295,28 +291,30 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (6 Nodi con Jitter Casuale)
+      - name: Esecuzione Scraping Parallelo (6 Nodi)
         run: |
-          echo "Avvio processi paralleli con Jitter temporale..."
-          
+          echo "Avvio processi paralleli su 6 nodi..."
           python -u m2_insocket.py 1 > node1.log 2>&1 &
-          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
-          
+          sleep 2
           python -u m2_insocket.py 2 > node2.log 2>&1 &
-          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
-          
+          sleep 2
           python -u m2_insocket.py 3 > node3.log 2>&1 &
-          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
-          
+          sleep 2
           python -u m2_insocket.py 4 > node4.log 2>&1 &
-          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
-          
+          sleep 2
           python -u m2_insocket.py 5 > node5.log 2>&1 &
-          sleep $(python3 -c "import random; print(round(random.uniform(1.5, 4.0), 2))")
-          
+          sleep 2
           python -u m2_insocket.py 6 > node6.log 2>&1 &
 
           wait
+
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
+          echo "=================="
 
           touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
           cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
