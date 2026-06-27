@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  machine2_cdp_insocket_tor:
+  machine2_cdp_insocket:
     runs-on: ubuntu-latest
     steps:
 
@@ -16,6 +16,7 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per metriche font esatte)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -26,69 +27,68 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Installazione e Avvio di 10 Istanze Tor (IPv6 abilitato)
+      - name: Setup 6 WARProxy Docker Containers (Forzatura IPv6)
         run: |
-          sudo apt-get update && sudo apt-get install -y tor
-          
-          echo "Inizializzazione di 10 circuiti Tor indipendenti..."
-          for i in {1..10}; do
-            PORT=$((40000 + i))
-            DIR="/tmp/tor$i"
-            mkdir -p $DIR
-            sudo chown -R $USER:$USER $DIR
-            
-            # Lanciamo Tor come demone. ClientUseIPv6 abilita richieste IPv6 ai relay.
-            tor --RunAsDaemon 1 \
-                --SocksPort $PORT \
-                --DataDirectory $DIR \
-                --PidFile $DIR/tor.pid \
-                --Log "notice file $DIR/tor.log" \
-                --ClientUseIPv6 1
-            
-            # Pausa di scaglionamento per non sovraffollare la rete del runner
-            sleep 3
-          done
-          
-          echo "Attesa inizializzazione dei circuiti Tor (20 secondi)..."
-          sleep 20
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-      - name: Verifica IP (IPv6/IPv4) con Tor Auto-Healing
-        run: |
-          for i in {1..10}; do
+          for i in {1..6}; do
             PORT=$((40000 + i))
-            DIR="/tmp/tor$i"
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+
+            # ATTESA INIZIALE PER FAR PARTIRE IL DEMONE
+            sleep 3
+
+            # FORZATURA PRECEDENZA IPv6 NEL CONTAINER (RFC 3484)
+            # Questo obbliga il demone SOCKS5 a preferire AAAA (IPv6) ad A (IPv4) quando risolve i domini
+            docker exec warproxy-$i sh -c "echo 'precedence ::ffff:0:0/96  10' >> /etc/gai.conf" || true
+
+            if [ $i -lt 6 ]; then
+              DELAY=$((3 + RANDOM % 3))
+              sleep $DELAY
+            fi
+          done
+
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
+
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+        run: |
+          for i in {1..6}; do
+            PORT=$((40000 + i))
             echo "=================================================="
-            echo "VERIFICA NODO TOR $i (PORTA $PORT):"
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
             SUCCESS=false
             for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5..."
+              # Usiamo api6.ipify.org per assicurarci che l'uscita in IPv6 sia funzionante
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
               
-              # api64 prova prima IPv6, se non va usa IPv4. Fondamentale per i nodi Tor misti.
-              IP=$(curl -s --max-time 15 --proxy socks5h://127.0.0.1:$PORT https://api64.ipify.org?format=json | grep -o '"ip":"[^"]*' | cut -d'"' -f4 || true)
-              
-              if [ ! -z "$IP" ]; then
-                echo "Nodo $i pronto e funzionante! IP di uscita: $IP"
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP IPv6: $IP"
                 SUCCESS=true
                 break
               else
-                echo "Nodo $i lento o morto. Generazione di un nuovo IP e Circuito Tor..."
-                # Uccide la singola istanza bloccata e la ricrea con un IP totalmente nuovo
-                kill -9 $(cat $DIR/tor.pid) 2>/dev/null || true
-                sleep 2
-                tor --RunAsDaemon 1 --SocksPort $PORT --DataDirectory $DIR --PidFile $DIR/tor.pid --ClientUseIPv6 1
-                sleep 15 # Attende il bootstrap del nuovo nodo
+                echo "Container $i non risponde in IPv6. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 5
+                docker exec warproxy-$i sh -c "echo 'precedence ::ffff:0:0/96  10' >> /etc/gai.conf" || true
+                sleep 5
               fi
             done
 
             if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il Nodo Tor $i non è riuscito a stabilire un circuito dopo 5 tentativi."
+              echo "ERRORE CRITICO: Il container $i non è raggiungibile in IPv6 dopo 5 riavvii."
               exit 1
             fi
           done
-          echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Avvio Xvfb (Virtual Display Headful 1920x1080)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -97,7 +97,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Macchina 2 - Versione Tor a 10 Nodi)
+      - name: Creazione script Python (Macchina 2)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -105,6 +105,7 @@ jobs:
           import random
           import math
           import os
+          import requests
           from cloakbrowser import launch_context
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
@@ -142,7 +143,7 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          num_nodes = 10 # <-- ADATTATO PER 10 NODI TOR
+          num_nodes = 6
           slice_size = math.ceil(len(TARGETS) / num_nodes)
           MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
 
@@ -183,21 +184,40 @@ jobs:
               "--no-sandbox",
               "--disable-dev-shm-usage",
               f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+              f"--fingerprint-fonts-dir={windows_fonts_dir}",
+              "--fingerprint-windows-font-metrics",  # Fondamentale per FingerprintJS
+              "--fingerprint-noise=false",           # Evita il flag "Browser Tampering"
+              "--fingerprint-platform=windows",      # Coerenza con i font installati
+              "--fingerprint-screen-width=1920",     # Match esatto con Xvfb e viewport
+              "--fingerprint-screen-height=1080"
           ]
 
-          print(f"[NODO {node_id}] Avvio Context Tor (Porta {ACTIVE_PORT})", flush=True)
+          # RECUPERO FORZATO IPv6 PER WEBRTC (Evita leak IPv4 di WARP)
+          try:
+              proxies = {
+                  "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
+                  "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
+              }
+              ip_resp = requests.get("https://api6.ipify.org", proxies=proxies, timeout=10).text.strip()
+              extra_args.append(f"--fingerprint-webrtc-ip={ip_resp}")
+              print(f"[NODO {node_id}] IPv6 Webrtc forzato: {ip_resp}", flush=True)
+          except Exception as e:
+              print(f"[NODO {node_id}] Warning IPv6 Fetch: {e}", flush=True)
+              # geoip=True gestirà il fallback, sperando prevalga ipv6
+
+          print(f"[NODO {node_id}] Avvio Context Standard (Stealth Configurazione Perfetta)", flush=True)
 
           context = launch_context(
               headless=False,
               humanize=True,
+              human_preset="careful", # Rende le interazioni più lente e realistiche per GitHub Actions
               proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
               geoip=True,
-              viewport=None, 
+              viewport={"width": 1920, "height": 1080}, # Match perfetto con flag e Xvfb
               args=extra_args
           )
 
-          results = f"\n{'#'*60}\nREPORT NODO TOR {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
 
           for url in MY_TARGETS:
               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
@@ -208,27 +228,26 @@ jobs:
                   page = context.new_page()
                   query_to_search = get_query_from_url(url)
 
-                  # Aumento del timeout: Tor è fisiologicamente più lento
                   if "startpage.com" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=60000)
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input#q").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.locator("input#q").type(query_to_search, delay=random.randint(80, 200), timeout=3000)
                           page.keyboard.press("Enter")
-                      except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                      except:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                   elif "html.duckduckgo.com" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=60000)
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                       time.sleep(3)
                       try:
-                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(50, 150), timeout=3000)
+                          page.locator("input[name=q]").type(query_to_search, delay=random.randint(80, 200), timeout=3000)
                           page.keyboard.press("Enter")
-                      except Exception:
-                          page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                      except:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                   else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
                   print(f"[NODO {node_id}] In attesa di risoluzione passiva...", flush=True)
                   time.sleep(15)
@@ -239,7 +258,7 @@ jobs:
                           if btn.is_visible(timeout=3000):
                               btn.click() 
                               time.sleep(8)
-                      except Exception:
+                      except:
                           pass
                       
                   if "creepjs" in url:
@@ -255,7 +274,7 @@ jobs:
                   if page:
                       try:
                           page.close()
-                      except Exception:
+                      except:
                           pass
 
           context.close()
@@ -264,32 +283,36 @@ jobs:
               f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (10 Nodi Tor)
+      - name: Esecuzione Scraping Parallelo (6 Nodi)
         run: |
-          echo "Avvio processi paralleli su 10 nodi..."
-          
-          # Lancio dinamico di tutti i 10 script
-          for i in {1..10}; do
-            python -u m2_insocket.py $i > node$i.log 2>&1 &
-            sleep 2
-          done
+          echo "Avvio processi paralleli su 6 nodi..."
+          python -u m2_insocket.py 1 > node1.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 2 > node2.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 3 > node3.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 4 > node4.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 5 > node5.log 2>&1 &
+          sleep 2
+          python -u m2_insocket.py 6 > node6.log 2>&1 &
 
-          # Attende che tutti i processi in background finiscano
           wait
 
-          echo "=== STAMPA LOG NODI ==="
-          for i in {1..10}; do
-            echo "--- LOG NODO $i ---"
-            cat node$i.log || true
-          done
-          echo "======================="
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
+          echo "=================="
 
-          # Aggrega i risultati
-          touch $(for i in {1..10}; do echo "output_node_$i.txt "; done)
-          cat output_node_*.txt > output_macchina2_cdp.txt
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Macchina2_Tor
+          name: Risultati_Macchina2
           path: output_macchina2_cdp.txt
