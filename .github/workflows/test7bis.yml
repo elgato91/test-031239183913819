@@ -54,7 +54,8 @@ jobs:
 
       - name: Inizializzazione Coda Globale STEP 1
         run: |
-          python -u -c '
+          # Scrittura protetta tramite Heredoc (Previene errori di apici di Bash)
+          cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
               "https://tls.browserleaks.com/json",
@@ -83,7 +84,8 @@ jobs:
           with open("/tmp/step1_queue.json", "w") as f:
               json.dump(TARGETS, f)
           print("Coda globale dello Step 1 creata con successo.")
-          '
+          EOF
+          python -u m2_step1_setup.py
 
       - name: Creazione Script Python - STEP 1 (Pure curl-cffi con Coda Dinamica e Autoverifica)
         run: |
@@ -352,7 +354,7 @@ jobs:
               return default
 
           def scrape_with_failover(url, profile_dir, extra_args_base, node_id, initial_port):
-              """Esegue lo scraping implementando la rotazione attiva dei proxy e il riscaldamento integrato."""
+              """Esegue lo scraping implementando la rotazione automatica dei proxy e il riscaldamento integrato."""
               all_ports = [40007, 40008, 40009, 40010, 40011, 40012]
               ports_to_try = [initial_port] + [p for p in all_ports if p != initial_port]
               
@@ -380,7 +382,7 @@ jobs:
                       # RISCALDAMENTO INTEGRATO ED EFFICIENTE (Solo una volta per profilo su porta funzionante)
                       warmup_done_file = os.path.join(profile_dir, "warmup_done.flag")
                       if not os.path.exists(warmup_done_file):
-                          print(f"[NODO {node_id}] [Porta {port}] Riscaldamento del profilo al volo (Reddit & Google)...", flush=True)
+                          print(f"[NODO {node_id}] [Porta {port}] Riscaldamento del profilo (Reddit & Google)...", flush=True)
                           try:
                               page.goto("https://www.reddit.com", wait_until="commit", timeout=15000)
                               time.sleep(3)
@@ -441,6 +443,7 @@ jobs:
                       soup = BeautifulSoup(raw_html, 'html.parser')
                       page_text = soup.get_text(separator=' ', strip=True).lower()
                       
+                      # Trigger della rotazione proxy in caso di contenuto bloccato o insufficiente
                       blocking_keywords = ["captcha", "recaptcha", "cloudflare", "challenge-platform", "forbidden", "access denied", "blocked"]
                       is_blocked = any(kw in page_text for kw in blocking_keywords)
                       
@@ -509,130 +512,3 @@ jobs:
           with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
               f.write(results)
           EOF
-
-      - name: Esecuzione Scraping Parallelo - STEP 1 (curl-cffi)
-        run: |
-          echo "Avvio processi paralleli per STEP 1..."
-          
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            echo "Inizializzazione Nodo $i (Step 1)..."
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            
-            if [ $i -lt 6 ]; then
-              sleep 1.5
-            fi
-          done
-
-          echo "Tutti i nodi Step 1 istanziati. Attesa completamento..."
-          # Attende unicamente i nodi Python dello Step 1
-          wait "${PIDS[@]}"
-          
-          kill $TAIL_PID || true
-          
-          echo "STEP 1 completato. Pulizia totale dei container dello Step 1..."
-          for i in {1..6}; do
-            docker stop warproxy-$i || true
-            docker rm warproxy-$i || true
-          done
-
-      - name: Setup Container STEP 2 (IPv6 Sequenziale)
-        run: |
-          # Avvio sequenziale con ritardo "sleep 3" per scaglionare le registrazioni concorrenti a Cloudflare
-          echo "Avvio dei container dello Step 2 (Porte 40007-40012)..."
-          for i in {7..12}; do
-            PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            
-            sleep 3.0
-          done
-
-      - name: Inizializzazione Coda Globale STEP 2 (Unione e Fusione Fallimenti)
-        run: |
-          python -u -c '
-          import json
-          import os
-
-          merged_failed = []
-          for i in range(1, 7):
-              filename = f"failed_node_{i}.json"
-              if os.path.exists(filename):
-                  with open(filename, "r", encoding="utf-8") as f:
-                      try:
-                          failed = json.load(f)
-                          merged_failed.extend(failed)
-                      except Exception:
-                          pass
-          
-          # Rimozione duplicati preservando l'ordine originale
-          unique_failed = list(dict.fromkeys(merged_failed))
-          
-          with open("/tmp/step2_queue.json", "w") as f:
-              json.dump(unique_failed, f)
-              
-          print(f"Coda globale dello Step 2 creata con {len(unique_failed)} target da recuperare.")
-          '
-
-      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
-        run: |
-          echo "Avvio processi paralleli per STEP 2 sui target falliti..."
-          
-          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
-          
-          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            echo "Inizializzazione Nodo $i (Step 2)..."
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
-            PIDS+=($!)
-            
-            if [ $i -lt 6 ]; then
-              sleep 1.5
-            fi
-          done
-
-          echo "Tutti i nodi Step 2 istanziati. Attesa completamento..."
-          wait "${PIDS[@]}"
-          
-          kill $TAIL_PID || true
-          
-          echo "STEP 2 completato. Rimozione dei container STEP 2..."
-          for i in {7..12}; do
-            docker stop warproxy-$i || true
-            docker rm warproxy-$i || true
-          done
-
-          # Aggregazione finale e unione di tutti i report
-          touch output_node_1_step1.txt output_node_1_step2.txt \
-                output_node_2_step1.txt output_node_2_step2.txt \
-                output_node_3_step1.txt output_node_3_step2.txt \
-                output_node_4_step1.txt output_node_4_step2.txt \
-                output_node_5_step1.txt output_node_5_step2.txt \
-                output_node_6_step1.txt output_node_6_step2.txt
-
-          cat output_node_1_step1.txt output_node_1_step2.txt \
-              output_node_2_step1.txt output_node_2_step2.txt \
-              output_node_3_step1.txt output_node_3_step2.txt \
-              output_node_4_step1.txt output_node_4_step2.txt \
-              output_node_5_step1.txt output_node_5_step2.txt \
-              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
-
-      - name: Upload Artifact Macchina 2
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
