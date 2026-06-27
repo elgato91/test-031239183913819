@@ -27,63 +27,6 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
           playwright install-deps chromium
 
-      - name: Setup 12 WARProxy Docker Containers (IPv6)
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          for i in {1..12}; do
-            PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-
-            if [ $i -lt 12 ]; then
-              DELAY=$((3 + RANDOM % 2))
-              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
-              sleep $DELAY
-            fi
-          done
-
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
-
-      - name: Verifica IP IPv6 con Auto-healing (socks5h)
-        run: |
-          for i in {1..12}; do
-            PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
-            DELAY=$((3 + RANDOM % 2))
-            sleep $DELAY
-
-            SUCCESS=false
-            for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP: $IP"
-                SUCCESS=true
-                break
-              else
-                echo "Container $i non risponde. Riavvio in corso..."
-                docker restart warproxy-$i
-                sleep 5
-              fi
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
-              exit 1
-            fi
-          done
-          echo "=================================================="
-
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
@@ -92,6 +35,125 @@ jobs:
       - name: Pre-inizializzazione Cache CloakBrowser
         run: |
           python -m cloakbrowser install
+
+      - name: Setup e Verifica Container STEP 1 (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          # Avvio controllato dei primi 6 container dedicati allo Step 1 (Porte 40001-40006)
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 2
+          done
+
+          # Endpoint IPv6 per il fallback rotativo
+          ENDPOINTS=(
+            "https://api6.ipify.org?format=json"
+            "https://v6.ident.me/.json"
+            "https://ifconfig.co/json"
+            "https://inet-ip.info/json"
+          )
+
+          # Verifica robusta dei primi 6 container
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA CONTAINER $i (PORTA $PORT):"
+            SUCCESS=false
+            
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5..."
+              
+              # Tenta la connessione provando i vari endpoint uno ad uno
+              for URL in "${ENDPOINTS[@]}"; do
+                echo "Test con endpoint: $URL"
+                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL")
+                if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                  echo "Container $i pronto! Risposta: $IP"
+                  SUCCESS=true
+                  break 2
+                fi
+              done
+              
+              echo "Tutti gli endpoint hanno fallito per il container $i. Riavvio e attesa..."
+              docker restart warproxy-$i
+              sleep 5
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non risponde dopo tentativi multipli."
+              exit 1
+            fi
+          done
+          echo "=================================================="
+
+      - name: Avvio Setup STEP 2 in Background
+        run: |
+          # Creazione dello script di inizializzazione per i container 7-12
+          cat << 'EOF' > setup_step2_bg.sh
+          #!/bin/bash
+          echo "[BG STEP 2] Avvio creazione container 7-12 in background..."
+          
+          for i in {7..12}; do
+            PORT=$((40000 + i))
+            echo "[BG STEP 2] Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 2
+          done
+
+          ENDPOINTS=(
+            "https://api6.ipify.org?format=json"
+            "https://v6.ident.me/.json"
+            "https://ifconfig.co/json"
+            "https://inet-ip.info/json"
+          )
+
+          for i in {7..12}; do
+            PORT=$((40000 + i))
+            echo "[BG STEP 2] Verifica container $i (PORTA $PORT)..."
+            SUCCESS=false
+            
+            for tentativo in {1..5}; do
+              for URL in "${ENDPOINTS[@]}"; do
+                IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT "$URL")
+                if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                  echo "[BG STEP 2] Container $i pronto via $URL!"
+                  SUCCESS=true
+                  break 2
+                fi
+              done
+              
+              echo "[BG STEP 2] Fallimento su tutti gli endpoint per container $i. Riavvio..."
+              docker restart warproxy-$i
+              sleep 5
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "[BG STEP 2] ERRORE: Impossibile avviare container $i" > /tmp/step2_status
+              exit 1
+            fi
+          done
+
+          echo "[BG STEP 2] Configurazione completata con successo."
+          echo "PRONTO" > /tmp/step2_status
+          EOF
+          
+          chmod +x setup_step2_bg.sh
+          # Esecuzione asincrona reindirizzando l'output per non bloccare la pipeline
+          ./setup_step2_bg.sh > step2_bg_setup.log 2>&1 &
+          echo "Setup dello STEP 2 avviato in background."
 
       - name: Creazione Script Python - STEP 1 (Cloakbrowser -> curl-cffi)
         run: |
@@ -142,7 +204,7 @@ jobs:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id # Porte 40001-40006 per Step 1
+          ACTIVE_PORT = 40000 + node_id
 
           num_nodes = 6
           slice_size = math.ceil(len(TARGETS) / num_nodes)
@@ -160,7 +222,6 @@ jobs:
               if not html or len(html.strip()) < 300:
                   return False, "Sorgente HTML vuota o estremamente ridotta (< 300 byte)"
               
-              # Escludiamo i siti di diagnostica dai controlli restrittivi sui bot
               if any(site in url for site in DIAGNOSTIC_SITES):
                   return True, ""
 
@@ -190,7 +251,7 @@ jobs:
           def gaussian_delay(mu=5.5, sigma=1.5):
               """Implementa un ritardo basato su distribuzione normale (gaussiana)."""
               delay = random.gauss(mu, sigma)
-              actual_delay = max(1.5, min(delay, 12.0)) # Limiti di sicurezza
+              actual_delay = max(1.5, min(delay, 12.0))
               print(f"[NODO {node_id}] Pausa gaussiana di {actual_delay:.2f} secondi...", flush=True)
               time.sleep(actual_delay)
 
@@ -307,7 +368,6 @@ jobs:
                   resp = session.get(url, timeout=30)
                   html_content = resp.text
                   
-                  # Validazione agnostica
                   is_ok, err_msg = validate_html(html_content, url)
                   
                   if is_ok:
@@ -323,11 +383,9 @@ jobs:
                   results += f"FALLITO (Errore di rete/globale): {str(e)}\n"
                   failed_targets.append(url)
 
-          # Salva report locale dello Step 1
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
               f.write(results)
 
-          # Salva gli URL falliti per lo Step 2
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
               json.dump(failed_targets, f)
           EOF
@@ -348,8 +406,7 @@ jobs:
               sys.exit(1)
 
           node_id = int(sys.argv[1])
-          # Lo Step 2 utilizza porte e IP distinti (porte 40007-40012)
-          ACTIVE_PORT = 40006 + node_id 
+          ACTIVE_PORT = 40006 + node_id # Porte 40007-40012 per lo Step 2
 
           failed_file = f"failed_node_{node_id}.json"
           if not os.path.exists(failed_file):
@@ -361,7 +418,6 @@ jobs:
 
           if not MY_TARGETS:
               print(f"[NODO {node_id}] Nessun URL fallito nello Step 1. Fine.", flush=True)
-              # Crea un file vuoto o minimale per evitare errori di concatenazione successivi
               with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                   f.write(f"Nessun URL da recuperare per il nodo {node_id}.\n")
               sys.exit(0)
@@ -459,7 +515,6 @@ jobs:
           random_seed = str(random.randint(100000, 999999))
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-          # Usiamo un percorso profilo differente per evitare conflitti di lock con lo Step 1
           profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
 
           extra_args_base = [
@@ -469,12 +524,10 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # Fase 1: Warmup in HTTP/1.1
           run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
 
           time.sleep(3)
 
-          # Fase 2: Scraping principale in HTTP/2 tramite CloakBrowser headful (Logica originale)
           print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale di recupero...", flush=True)
           context = launch_persistent_context(
               profile_dir,
@@ -564,7 +617,7 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo - STEP 1 (curl-cffi)
         run: |
-          echo "Avvio processi paralleli per STEP 1 con avvio scaglionato casuale..."
+          echo "Avvio processi paralleli per STEP 1..."
           
           for i in {1..6}; do
             echo "Inizializzazione Nodo $i (Step 1)..."
@@ -579,6 +632,36 @@ jobs:
 
           echo "Tutti i nodi Step 1 istanziati. Attesa completamento..."
           wait
+
+      - name: Sincronizzazione e Verifica Container STEP 2
+        run: |
+          echo "Verifica dello stato del setup dei container STEP 2 avviato precedentemente in background..."
+          
+          # Stampa i log intermedi del setup asincrono per monitorare i progressi
+          echo "=== LOG SETUP STEP 2 FINORA ==="
+          cat step2_bg_setup.log || true
+          echo "==============================="
+          
+          # Attende finché il processo in background non ha completato la scrittura dello stato
+          TENTATIVI=0
+          while [ ! -f /tmp/step2_status ]; do
+            echo "In attesa del file di stato dei container STEP 2 (Tempo trascorso: $((TENTATIVI * 5))s)..."
+            sleep 5
+            TENTATIVI=$((TENTATIVI + 1))
+            if [ $TENTATIVI -gt 60 ]; then # Timeout di sicurezza a 5 minuti
+              echo "ERRORE CRITICO: Il processo asincrono dello STEP 2 non si è completato in tempo."
+              exit 1
+            fi
+          done
+          
+          STATUS=$(cat /tmp/step2_status)
+          if [ "$STATUS" != "PRONTO" ]; then
+            echo "ERRORE CRITICO: Il setup in background dello STEP 2 ha riscontrato un fallimento durante l'avvio."
+            cat step2_bg_setup.log || true
+            exit 1
+          else
+            echo "Successo: Tutti i container dello STEP 2 sono già attivi, verificati e pronti all'uso!"
+          fi
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
