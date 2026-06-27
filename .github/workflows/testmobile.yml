@@ -102,7 +102,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Corretto get_query_from_url)
+      - name: Creazione script Python (Corretto get_safe_content e scrolling protetto)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -147,16 +147,6 @@ jobs:
               "best movies 2026", "wikipedia space exploration", "historical events today"
           ]
 
-          if len(sys.argv) < 2:
-              sys.exit(1)
-
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-
-          num_nodes = 6
-          slice_size = math.ceil(len(TARGETS) / num_nodes)
-          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
-
           def extract_text(html_content, url):
               soup = BeautifulSoup(html_content, 'html.parser')
               text = soup.get_text(separator=' ', strip=True)
@@ -175,6 +165,18 @@ jobs:
               except Exception:
                   pass
               return default
+
+          def get_safe_content(page, retries=3):
+              """Recupera in modo pulito l'HTML gestendo asincronie e redirect in corso."""
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(3)
+                      else:
+                          break
+              return ""
 
           def is_search_engine(url):
               """Verifica se l'URL appartiene a un motore di ricerca."""
@@ -247,15 +249,19 @@ jobs:
               return unique_links[:40]
 
           def human_scroll_to_bottom(page, scrolls=3):
-              """Esegue uno scorrimento fluido simulando un utente reale per caricare gli elementi lazy-load."""
+              """Esegue uno scorrimento fluido protetto da eccezioni di navigazione/distruzione del contesto."""
               print("[Scorrimento] Avvio scorrimento fluido della pagina...", flush=True)
               for _ in range(scrolls):
-                  scroll_amount = random.randint(450, 750)
-                  page.evaluate(f"window.scrollBy(0, {scroll_amount})")
-                  time.sleep(random.uniform(1.8, 3.2))
+                  try:
+                      scroll_amount = random.randint(450, 750)
+                      page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+                      time.sleep(random.uniform(1.8, 3.2))
+                  except Exception as e:
+                      print(f"[Scorrimento] Interruzione o errore durante lo scorrimento (nessuna anomalia critica): {e}", flush=True)
+                      break
 
           def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
-              """Riscaldamento del profilo in HTTP/1.1 limitato a Reddit (HTTP/1.1) e Wikipedia (Neutro). Google rimosso."""
+              """Riscaldamento del profilo in HTTP/1.1 limitato a Reddit (HTTP/1.1) e Wikipedia (Neutro)."""
               print(f"[NODO {node_id}] [Warmup HTTP/1.1] Avvio...", flush=True)
               warmup_args = extra_args_base + ["--disable-http2"]
               
@@ -285,7 +291,7 @@ jobs:
                   except Exception as e:
                       print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore Reddit: {e}", flush=True)
                       
-                  # 2. Wikipedia (Riscaldamento Neutro ad alta reputazione, no tracciamenti Google)
+                  # 2. Wikipedia (Riscaldamento Neutro)
                   print(f"[NODO {node_id}] [Warmup HTTP/1.1] Visita Wikipedia...", flush=True)
                   try:
                       page.goto("https://en.wikipedia.org/wiki/Special:Random", wait_until="domcontentloaded", timeout=30000)
@@ -367,7 +373,7 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
                   
-                  # Scrolling fluido automatico per caricare gli elementi dinamici (lazy-loading)
+                  # Scrolling fluido protetto da eccezioni
                   human_scroll_to_bottom(page, scrolls=3)
 
                   # Attesa passiva randomica
@@ -391,10 +397,10 @@ jobs:
                   
                   content_lower = raw_html.lower()
                   if any(indicator in content_lower for indicator in ["prove your humanity", "security verification", "malicious bots", "enable javascript and cookies to continue", "bot verification"]):
-                      print(f"[NODO {node_id}] ATTENZIONE: Rilevato possibile blocco anti-bot su {url}. Marcatura del profilo per eliminazione.", flush=True)
+                      print(f"[NODO {node_id}] ATTENZIONE: Rilevato blocco anti-bot su {url}. Marcatura profilo per eliminazione.", flush=True)
                       flagged_as_bot = True
 
-                  # ESTRAZIONE DIFFERENZIATA: Motori di ricerca vs Siti standard
+                  # Estrazione differenziata
                   if is_search_engine(url):
                       extracted_urls = parse_search_links(raw_html, url)
                       results += f"MOTORE DI RICERCA RILEVATO. URL ESTRATTI (Totale: {len(extracted_urls)}):\n"
@@ -419,14 +425,14 @@ jobs:
 
           context.close()
 
-          # SELF-HEALING DEL PROFILO: Se rilevato come bot, cancella la cartella locale
+          # Self-healing del profilo
           if flagged_as_bot:
-              print(f"[NODO {node_id}] [Self-Healing] Cancellazione del profilo compromesso '{profile_dir}'...", flush=True)
+              print(f"[NODO {node_id}] [Self-Healing] Cancellazione profilo compromesso '{profile_dir}'...", flush=True)
               try:
                   shutil.rmtree(profile_dir)
-                  print(f"[NODO {node_id}] [Self-Healing] Profilo rimosso. Il prossimo avvio partirà pulito.", flush=True)
+                  print(f"[NODO {node_id}] [Self-Healing] Profilo rimosso per ricominciare pulito.", flush=True)
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore durante la pulizia del profilo: {e}", flush=True)
+                  print(f"[NODO {node_id}] Errore durante la pulizia: {e}", flush=True)
 
           with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
               f.write(results)
