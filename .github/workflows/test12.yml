@@ -42,7 +42,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
 
             if [ $i -lt 6 ]; then
-              DELAY=$((5 + RANDOM % 4))
+              DELAY=$((3 + RANDOM % 2))
               echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
               sleep $DELAY
             fi
@@ -58,7 +58,7 @@ jobs:
             echo "=================================================="
             echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
             
-            DELAY=$((5 + RANDOM % 4))
+            DELAY=$((3 + RANDOM % 2))
             sleep $DELAY
 
             SUCCESS=false
@@ -73,7 +73,7 @@ jobs:
               else
                 echo "Container $i non risponde. Riavvio in corso..."
                 docker restart warproxy-$i
-                sleep 8
+                sleep 5
               fi
             done
 
