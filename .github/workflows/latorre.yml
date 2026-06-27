@@ -27,23 +27,22 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (WARP+ Premium Gratis Attivo)
+      - name: Setup 6 WARProxy Docker Containers (IPv6 Standard Ultra-Stabile)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT con licenza WARP+..."
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e WARP_PLUS=true \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
 
-            # Jitter di avvio per non accavallare la generazione delle chiavi premium
-            DELAY=$((6 + RANDOM % 4))
+            # Jitter di avvio standard per evitare blocchi Cloudflare
+            DELAY=$((4 + RANDOM % 3))
             echo "Attesa di $DELAY secondi prima del prossimo container..."
             sleep $DELAY
           done
@@ -173,7 +172,7 @@ jobs:
           home_dir = os.path.expanduser("~")
           windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-          # Blink Automation Disattivato + DNS Over HTTPS Criptato su Cloudflare
+          # SUPREME: Disattivazione Blink Automation + Forzatura DNS Over HTTPS Criptato su Cloudflare
           extra_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
