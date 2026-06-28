@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context API Fetching con URL-Encoding)
+      - name: Creazione script Python (In-Context API listentitiesreviews)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -89,7 +89,6 @@ jobs:
           import re
           import json
           from cloakbrowser import launch_persistent_context
-          from bs4 import BeautifulSoup
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -110,16 +109,15 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # --- METODO 1: RICERCA E RISOLUZIONE CID ---
-          def esegui_ricerca_e_risolvi_cid(page, query):
-              """Esegue la ricerca e recupera l'intera coppia esadecimale del CID dall'URL."""
+          # --- METODO 1: RICERCA E RISOLUZIONE COORDINATE ---
+          def esegui_ricerca_e_risolvi_coordinate(page, query):
+              """Esegue la ricerca e isola id_y e cid per ricostruire il parametro pb."""
               search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-              print(f"[NODO {node_id}] Navigazione per ricerca diretta su: {search_url}", flush=True)
+              print(f"[NODO {node_id}] Navigazione su: {search_url}", flush=True)
               
               page.set_default_navigation_timeout(90000)
               page.set_default_timeout(90000)
               
-              # Ottimizzazione di rete: blocchiamo immagini e tile geografici
               def block_heavy_assets(route):
                   url = route.request.url.lower()
                   if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
@@ -157,72 +155,43 @@ jobs:
               except Exception:
                   print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
 
-              # Estrazione dell'intera coppia esadecimale (es: 0x132ecd778417bda5:0x4e6e6043f0ea67e1) dall'URL
-              feature_id = None
+              # Estrazione di id_y e cid convertendoli da esadecimale a decimale
+              id_y = None
+              cid = None
               current_url = page.url
-              match = re.search(r"0x[a-fA-F0-9]+:0x[a-fA-F0-9]+", current_url)
+              match = re.search(r"(0x[a-fA-F0-9]+):(0x[a-fA-F0-9]+)", current_url)
+              
               if match:
-                  feature_id = match.group(0)
-                  print(f"[NODO {node_id}] Feature ID (coppia esadecimale) estratto con successo dall'URL.", flush=True)
-              
-              # Fallback via regex HTML se l'URL non presenta la coppia esadecimale direttamente
-              if not feature_id:
-                  html = page.content()
-                  match_html = re.search(r'data-cid="([0-9]+)"', html)
-                  if match_html:
-                      feature_id = match_html.group(1)
-                      print(f"[NODO {node_id}] CID risolto via regex HTML (Fallback).", flush=True)
-
-              print(f"[NODO {node_id}] Risultato risoluzione Feature ID: {feature_id}", flush=True)
-              return feature_id
-
-          # --- METODO 2: IN-CONTEXT API FETCHING ---
-          def estrai_recensioni_in_context(page, feature_id, max_recensioni=50):
-              """Effettua le chiamate fetch all'endpoint AJAX ereditando la sessione reale del browser."""
-              # 1. Clicchiamo sul tab delle recensioni usando il ruolo semantico ARIA tab, molto più stabile
-              tab_recensioni = page.locator("button[role='tab']:has-text('Recensioni'), button[role='tab']:has-text('Reviews')").first
-              
-              if tab_recensioni.is_visible(timeout=8000):
-                  print(f"[NODO {node_id}] Clicco sul tab Recensioni...", flush=True)
-                  tab_recensioni.click()
-              else:
-                  review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
-                  review_tab.wait_for(state="visible", timeout=15000)
-                  print(f"[NODO {node_id}] Clicco sul pulsante recensioni di ripiego...", flush=True)
-                  review_tab.click()
-
-              time.sleep(5)
-
-              # SCANSIONE DEGLI IFRAME: Identifichiamo il contesto di lavoro corretto.
-              work_context = page
-              for frame in page.frames:
                   try:
-                      if frame.locator(".jftiEf").count() > 0:
-                          work_context = frame
-                          print(f"[NODO {node_id}] Rilevato iframe dedicato per le recensioni! Sposto il contesto di esecuzione.", flush=True)
-                          break
-                  except Exception:
-                      continue
+                      hex_y = match.group(1)
+                      hex_cid = match.group(2)
+                      id_y = str(int(hex_y, 16))
+                      cid = str(int(hex_cid, 16))
+                      print(f"[NODO {node_id}] Coordinate convertite con successo! id_y={id_y}, cid={cid}", flush=True)
+                  except Exception as e:
+                      print(f"[NODO {node_id}] Errore di conversione esadecimale: {e}", flush=True)
+                      
+              return id_y, cid
 
+          # --- METODO 2: IN-CONTEXT JSON FETCHING ---
+          def estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50):
+              """Effettua le chiamate fetch all'endpoint nativo di Maps ereditando la sessione reale."""
               recensioni_estratte = []
               start_index = 0
               ciclo = 0
               
-              # URL-encoding obbligatorio del carattere ':' per impedire a Google di confondere
-              # la coppia esadecimale con i separatori chiave:valore del parametro async
-              feature_id_encoded = feature_id.replace(":", "%3A")
-              
-              print(f"[NODO {node_id}] Inizio fetch asincroni all'interno del contesto di lavoro...", flush=True)
+              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
-                  # Query allineata con l'esatta struttura attesa dai server di ricerca Google
-                  ajax_url = f"https://www.google.com/async/reviewSort?yv=3&async=feature_id:{feature_id_encoded},review_source:All%20reviews,sort_by:qualityScore,start_index:{start_index},is_owner:false,filter_text:,associated_topic:,next_page_token:,_pms:s,_fmt:pc"
                   
-                  # Chiamata fetch ereditando la sessione reale del browser
+                  # Costruiamo il parametro pb nativo richiesto da Google Maps per le recensioni
+                  pb_param = f"!1m2!1y{id_y}!2y{cid}!2m2!1i{start_index}!2i10!3e1!4m5!3b1!4b1!5b1!6b1!7b1"
+                  ajax_url = f"https://www.google.com/maps/preview/review/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_param}"
+                  
                   print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
                   try:
-                      html_chunk = work_context.evaluate("""async (url) => {
+                      json_raw = page.evaluate("""async (url) => {
                           try {
                               const response = await fetch(url);
                               return await response.text();
@@ -231,45 +200,53 @@ jobs:
                           }
                       }""", ajax_url)
                       
-                      if html_chunk.startswith("ERRORE:"):
-                          print(f"[NODO {node_id}] Errore nel fetch browser-side: {html_chunk}", flush=True)
+                      if json_raw.startswith("ERRORE:"):
+                          print(f"[NODO {node_id}] Errore nel fetch browser-side: {json_raw}", flush=True)
                           break
                           
-                      # Stampa diagnostica per ispezionare l'avvio della risposta grezza ricevuta
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Risposta ricevuta (lunghezza {len(html_chunk)}): {html_chunk[:200]}...", flush=True)
+                      # Rimuoviamo il prefisso di sicurezza XSSI di Google )]}'\n prima del parsing JSON
+                      if json_raw.startswith(")]}'"):
+                          json_raw = json_raw[4:].strip()
                           
-                      soup = BeautifulSoup(html_chunk, 'html.parser')
-                      review_elements = soup.find_all(class_="gws-localreviews__google-review")
+                      # Diagnostica log
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Risposta JSON ricevuta (lunghezza {len(json_raw)}): {json_raw[:180]}...", flush=True)
                       
-                      if not review_elements:
-                          print(f"[NODO {node_id}] Nessun elemento trovato nel chunk. Fine.", flush=True)
+                      data = json.loads(json_raw)
+                      
+                      # Nel JSON di Google, le recensioni sono caricate all'interno del terzo livello (indice 2)
+                      raw_reviews = data[2] if (len(data) > 2 and data[2] is not None) else []
+                      
+                      if not raw_reviews:
+                          print(f"[NODO {node_id}] Nessun elemento trovato nel JSON. Fine delle recensioni disponibili.", flush=True)
                           break
                           
                       nuove_estratte = 0
-                      for el in review_elements:
-                          autore_tag = el.find(class_="TSv7un") or el.find(class_="d470gc")
-                          autore = autore_tag.get_text(strip=True) if autore_tag else "Utente Google"
-                          
-                          testo_tag = el.find(class_="wiI7pd")
-                          testo = testo_tag.get_text(strip=True) if testo_tag else ""
-                          
-                          stelle_tag = el.find(class_="kv731") or el.find(attrs={"aria-label": True})
-                          stelle = stelle_tag["aria-label"] if stelle_tag else "N/D"
-                          
-                          recensioni_estratte.append({
-                              "autore": autore,
-                              "testo": testo,
-                              "stelle": stelle
-                          })
-                          nuove_estratte += 1
-                          
-                          if len(recensioni_estratte) >= max_recensioni:
-                              break
+                      for r in raw_reviews:
+                          try:
+                              # Struttura tipica del JSON di listentitiesreviews:
+                              # r[3] -> Testo della recensione
+                              # r[0][1] -> Autore
+                              # r[4] -> Stelle (valutazione numerica da 1 a 5)
+                              autore = r[0][1] if (len(r) > 0 and len(r[0]) > 1) else "Utente Google"
+                              testo = r[3] if len(r) > 3 else ""
+                              stelle = f"{r[4]} stelle" if len(r) > 4 else "N/D"
                               
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Elaborate {nuove_estratte} recensioni. Totale: {len(recensioni_estratte)}", flush=True)
+                              recensioni_estratte.append({
+                                  "autore": autore,
+                                  "testo": testo,
+                                  "stelle": stelle
+                              })
+                              nuove_estratte += 1
+                              
+                              if len(recensioni_estratte) >= max_recensioni:
+                                  break
+                          except Exception:
+                              continue
+                              
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Elaborate {nuove_estratte} recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
                       
                       start_index += 10
-                      time.sleep(random.uniform(0.3, 0.8))
+                      time.sleep(random.uniform(0.3, 0.7))
                       
                   except Exception as e:
                       print(f"[NODO {node_id}] Errore durante l'evaluate fetch: {e}", flush=True)
@@ -297,14 +274,14 @@ jobs:
               page = context.new_page()
               ricerca_target = "Coro Orvieto"
               
-              # 1. Risoluzione dell'ID a caldo
-              f_id = esegui_ricerca_e_risolvi_cid(page, ricerca_target)
+              # 1. Risoluzione delle coordinate esadecimali
+              id_y, cid = esegui_ricerca_e_risolvi_coordinate(page, ricerca_target)
               
-              if f_id:
-                  # 2. Estrazione diretta dei payload dal contesto (In-Context)
-                  recensioni = estrai_recensioni_in_context(page, f_id, max_recensioni=50)
+              if id_y and cid:
+                  # 2. Estrazione diretta dei payload JSON dal contesto (In-Context)
+                  recensioni = estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50)
               else:
-                  raise ValueError("Impossibile risolvere il CID del locale.")
+                  raise ValueError("Impossibile risolvere le coordinate id_y o cid del locale.")
               
               # 3. Salvataggio su file
               output_file = f"output_node_{node_id}.txt"
