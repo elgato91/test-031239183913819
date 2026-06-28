@@ -287,12 +287,11 @@ jobs:
       - name: Esecuzione Scraping Singolo Nodo
         run: |
           echo "Avvio processo su un singolo nodo (Nodo 1)..."
-          python -u m2_insocket.py 1 > node1.log 2>&1
+          # Eseguiamo direttamente lo script senza salvare in un file log cieco.
+          # Questo mostrerà l'output di Playwright in tempo reale sulla console di GitHub.
+          python -u m2_insocket.py 1
           
-          echo "=== LOG NODO 1 ===" && cat node1.log || true
-          echo "=================="
-
-          # Consolidamento dell'output
+          # Consolidamento dell'output per l'artifact
           touch output_node_1.txt
           cat output_node_1.txt > output_macchina2_cdp.txt
 
