@@ -58,13 +58,19 @@ jobs:
         run: |
           cat << 'EOF' > m2_step1_setup.py
           import json
-          TARGETS = [
+          
+          # Siti diagnostici spostati interamente allo Step 2
+          DIAGNOSTIC_TARGETS = [
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
+              "https://www.deviceinfo.me/"
+          ]
+          
+          # Target normali elaborati subito nello Step 1
+          TARGETS = [
               "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
@@ -83,7 +89,11 @@ jobs:
               "https://www.canadianinsider.com/money-is-moving"
           ]
           
-          # Suddivisione matematica statica (Chunking) per performance ottimali
+          # Salvataggio temporaneo per lo Step 2
+          with open("/tmp/diagnostic_targets.json", "w") as f:
+              json.dump(DIAGNOSTIC_TARGETS, f)
+          
+          # Suddivisione matematica statica (Chunking) per performance ottimali nello Step 1
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
@@ -103,8 +113,6 @@ jobs:
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
@@ -123,7 +131,6 @@ jobs:
           def validate_html(html, url, status_code):
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
-              if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
               
               low_html = html.lower()
               blocking_indicators = [
@@ -169,8 +176,6 @@ jobs:
                   if is_ok:
                       soup = BeautifulSoup(resp.text, 'html.parser')
                       text = soup.get_text(separator=' ', strip=True)[:5000]
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator=' ', strip=True)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
@@ -225,12 +230,22 @@ jobs:
           
           unique_failed = list(dict.fromkeys(merged_failed))
           
+          # Caricamento dei siti diagnostici salvati in precedenza
+          diagnostics = []
+          if os.path.exists("/tmp/diagnostic_targets.json"):
+              with open("/tmp/diagnostic_targets.json", "r", encoding="utf-8") as f:
+                  try: diagnostics = json.load(f)
+                  except Exception: pass
+                  
+          # Unione dei siti diagnostici ai target falliti nello Step 1
+          all_step2_targets = list(dict.fromkeys(unique_failed + diagnostics))
+          
           for i in range(1, 7):
-              chunk = unique_failed[i-1::6]
+              chunk = all_step2_targets[i-1::6]
               with open(f"/tmp/step2_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
                   
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          print(f"Code Step 2 distribuite con {len(all_step2_targets)} target complessivi.")
           EOF
           python -u m2_step2_setup.py
 
@@ -250,6 +265,9 @@ jobs:
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
+
+          # Lista di riconoscimento per i siti diagnostici
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -273,7 +291,6 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -283,7 +300,6 @@ jobs:
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
-                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
@@ -296,7 +312,7 @@ jobs:
                   )
                   page = await context.new_page()
                   
-                  # WARMUP Integrato - Creazione di cronologia valida
+                  # WARMUP Integrato
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
                   await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
@@ -313,7 +329,7 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
+                      # RICERCHE NATIVE con `.fill()`
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -344,39 +360,51 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
                       await asyncio.sleep(6) 
                       
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
+                      # Scorrimento Lazy Load NATIVO
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
                       
-                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
+                      
+                      # Identificazione se il target è un sito diagnostico
+                      is_diagnostic = any(site in url for site in DIAGNOSTIC_SITES)
+                      
+                      if is_diagnostic:
+                          # Estrazione completa senza limite di caratteri
+                          text = soup.get_text(separator=' ', strip=True)
+                      else:
+                          # Taglio per limitare la dimensione dei log dei siti generici
+                          text = soup.get_text(separator=' ', strip=True)[:5000]
+                      
                       text_lower = text.lower()
                       
-                      # Rilevamento passivo WAF/Captcha
-                      blocking_indicators = [
-                          "just a moment", "are you a robot", "prove your humanity",
-                          "captcha verification", "please enter in the characters you see below",
-                          "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity"
-                      ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
+                      # Rilevamento passivo WAF/Captcha (disattivato sui siti diagnostici per evitare falsi positivi)
+                      is_blocked = False
+                      if not is_diagnostic:
+                          blocking_indicators = [
+                              "just a moment", "are you a robot", "prove your humanity",
+                              "captcha verification", "please enter in the characters you see below",
+                              "access is forbidden", "access to this page is forbidden", "challenge-platform",
+                              "we've detected unusual activity"
+                          ]
+                          is_blocked = any(b in text_lower for b in blocking_indicators)
                       
-                      if len(text) > 150 and not is_blocked:
+                      # Requisiti minimi di lunghezza per considerare il recupero valido
+                      min_len = 50 if is_diagnostic else 150
+                      
+                      if len(text) > min_len and not is_blocked:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                       else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha o risposta vuota)\n"
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
 
                   except Exception as e:
@@ -397,7 +425,7 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
-          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
+          echo 'Avvio processi paralleli per STEP 2 sui target falliti e diagnostici...'
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
           TAIL_PID=$!
