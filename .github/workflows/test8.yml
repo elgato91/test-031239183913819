@@ -8,11 +8,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Dipendenze Leggere (No Browser/No UI)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          # Installiamo solo le librerie Python per HTTP, SOCKS5 e parsing HTML
-          pip install beautifulsoup4 requests "requests[socks]"
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
+
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
 
       - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
@@ -57,7 +70,16 @@ jobs:
           fi
           echo "=================================================="
 
-      - name: Creazione script Python (Protocol Emulation - async/reviewSort)
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (In-Context API Fetching)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -66,7 +88,7 @@ jobs:
           import os
           import re
           import json
-          import requests
+          from cloakbrowser import launch_persistent_context
           from bs4 import BeautifulSoup
 
           if len(sys.argv) < 2:
@@ -75,87 +97,134 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          # Configurazione del proxy locale fornito dal tuo container Docker
-          PROXIES = {
-              "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
-              "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
-          }
+          # --- CONFIGURAZIONE CLOAKBROWSER ---
+          random_seed = str(random.randint(100000, 999999))
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
 
-          # User-Agent standard per evitare blocchi immediati su richieste socket
-          HEADERS = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
-          }
+          extra_args_base = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+          ]
 
-          def estrai_feature_id(query):
-              """Esegue una ricerca rapida su Google ed estrae il data-cid (ludocid) del locale."""
-              search_url = "https://www.google.com/search"
-              params = {"q": query, "hl": "it"}
+          # --- METODO 1: RICERCA E RISOLUZIONE CID ---
+          def esegui_ricerca_e_risolvi_cid(page, query):
+              """Esegue la ricerca e recupera il data-cid (ludocid) direttamente dal DOM o dall'URL."""
+              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
+              print(f"[NODO {node_id}] Navigazione per ricerca diretta su: {search_url}", flush=True)
               
-              print(f"[NODO {node_id}] Risoluzione entità per: '{query}'...", flush=True)
-              response = requests.get(search_url, headers=HEADERS, params=params, proxies=PROXIES, timeout=15)
+              page.set_default_navigation_timeout(90000)
+              page.set_default_timeout(90000)
               
-              if response.status_code != 200:
-                  raise ConnectionError(f"Impossibile contattare Google Search (Status: {response.status_code})")
+              # Ottimizzazione di rete: blocchiamo immagini e tile geografici
+              def block_heavy_assets(route):
+                  url = route.request.url.lower()
+                  if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
+                      route.abort()
+                  else:
+                      route.continue_()
+                      
+              page.route("**/*", block_heavy_assets)
+              page.goto(search_url, wait_until="commit", timeout=90000)
               
-              # Cerchiamo il pattern del data-cid / ludocid nel sorgente HTML
-              match_cid = re.search(r'data-cid="([0-9]+)"', response.text)
-              if not match_cid:
-                  match_cid = re.search(r'data-ludocid="([0-9]+)"', response.text)
-                  
-              if match_cid:
-                  feature_id = match_cid.group(1)
-                  print(f"[NODO {node_id}] Entità risolta con successo. Feature ID (CID): {feature_id}", flush=True)
-                  return feature_id
+              time.sleep(6)
+              
+              # Gestione del Cookie Consent di Google se presente
+              try:
+                  consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
+                  if consent_btn.is_visible(timeout=5000):
+                      consent_btn.click()
+                      time.sleep(3)
+              except Exception:
+                  pass
+
+              # Gestione della disambiguazione (se compare l'elenco dei risultati)
+              risultati_ricerca = page.locator("a[href*='/maps/place/']")
+              if risultati_ricerca.count() > 0:
+                  print(f"[NODO {node_id}] Rilevato elenco. Clicco sul primo risultato...", flush=True)
+                  risultati_ricerca.first.click()
+                  time.sleep(5)
               else:
-                  raise ValueError("Impossibile trovare il Feature ID (CID) per questa attività commerciale.")
+                  print(f"[NODO {node_id}] Scheda aperta direttamente.", flush=True)
 
-          def scarica_recensioni_protocollo(feature_id, max_recensioni=50):
-              """Interroga direttamente l'endpoint AJAX delle recensioni ed esegue il parsing."""
+              # Estraiamo il data-cid/ludocid dal DOM reale o dai link
+              cid = page.evaluate('''() => {
+                  const el = document.querySelector('[data-cid], [data-ludocid]');
+                  if (el) {
+                      return el.getAttribute('data-cid') || el.getAttribute('data-ludocid');
+                  }
+                  const link = document.querySelector('a[href*="cid="]');
+                  if (link) {
+                      const url = new URL(link.href);
+                      return url.searchParams.get("cid");
+                  }
+                  return null;
+              }''')
+              
+              # Se il DOM non lo espone direttamente, convertiamo l'id esadecimale dall'URL di Maps
+              if not cid:
+                  current_url = page.url
+                  match = re.search(r"0x[a-f0-9]+:0x([a-f0-9]+)", current_url)
+                  if match:
+                      cid = str(int(match.group(1), 16))
+                      
+              if not cid:
+                  html = page.content()
+                  match = re.search(r'data-cid="([0-9]+)"', html)
+                  if match:
+                      cid = match.group(1)
+
+              print(f"[NODO {node_id}] CID risolto a caldo: {cid}", flush=True)
+              return cid
+
+          # --- METODO 2: IN-CONTEXT API FETCHING ---
+          def estrai_recensioni_in_context(page, feature_id, max_recensioni=50):
+              """Effettua le chiamate fetch all'endpoint AJAX ereditando la sessione reale del browser."""
               recensioni_estratte = []
               start_index = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Avvio estrazione tramite protocollo HTTP/REST...", flush=True)
+              print(f"[NODO {node_id}] Inizio fetch asincroni all'interno del contesto browser...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
-                  # Endpoint interno AJAX di Google per il sorting e la paginazione delle recensioni
-                  ajax_url = "https://www.google.com/async/reviewSort"
+                  ajax_url = f"https://www.google.com/async/reviewSort?yv=3&async=feature_id:{feature_id},_id:reviewSort,_p:true,menu:true,sort_by:qualityScore,start_index:{start_index},_fmt:pc"
                   
-                  # Parametri strutturati richiesti dal protocollo di Google
-                  params = {
-                      "yv": "3",
-                      "async": f"feature_id:{feature_id},_id:reviewSort,_p:true,menu:true,sort_by:qualityScore,start_index:{start_index},_fmt:pc"
-                  }
-                  
-                  response = requests.get(ajax_url, headers=HEADERS, params=params, proxies=PROXIES, timeout=15)
-                  
-                  if response.status_code != 200:
-                      print(f"[NODO {node_id}] Errore durante la paginazione all'indice {start_index}.", flush=True)
-                      break
+                  # Eseguiamo la chiamata fetch all'interno della sandbox del browser.
+                  # Questo eredita automaticamente cookies, user-agent, JA3 fingerprint e aggira il blocco 429.
+                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
+                  try:
+                      html_chunk = page.evaluate("""async (url) => {
+                          try {
+                              const response = await fetch(url);
+                              return await response.text();
+                          } catch (e) {
+                              return "ERRORE: " + e.message;
+                          }
+                      }""", ajax_url)
                       
-                  soup = BeautifulSoup(response.text, 'html.parser')
-                  
-                  # Le recensioni all'interno di questo frammento HTML sono racchiuse in div con classe 'gws-localreviews__google-review'
-                  review_elements = soup.find_all(class_="gws-localreviews__google-review")
-                  
-                  if not review_elements:
-                      print(f"[NODO {node_id}] Nessun elemento trovato all'indice {start_index}. Fine delle recensioni disponibili.", flush=True)
-                      break
+                      if html_chunk.startswith("ERRORE:"):
+                          print(f"[NODO {node_id}] Errore nel fetch browser-side: {html_chunk}", flush=True)
+                          break
+                          
+                      soup = BeautifulSoup(html_chunk, 'html.parser')
+                      review_elements = soup.find_all(class_="gws-localreviews__google-review")
                       
-                  nuove_estratte_ciclo = 0
-                  for el in review_elements:
-                      try:
-                          # Estrazione autore con fallback non bloccanti
+                      if not review_elements:
+                          print(f"[NODO {node_id}] Nessun elemento trovato nel chunk. Fine.", flush=True)
+                          break
+                          
+                      nuove_estratte = 0
+                      for el in review_elements:
                           autore_tag = el.find(class_="TSv7un") or el.find(class_="d470gc")
                           autore = autore_tag.get_text(strip=True) if autore_tag else "Utente Google"
                           
-                          # Estrazione testo con fallback
                           testo_tag = el.find(class_="wiI7pd")
                           testo = testo_tag.get_text(strip=True) if testo_tag else ""
                           
-                          # Estrazione valutazione (stelle)
                           stelle_tag = el.find(class_="kv731") or el.find(attrs={"aria-label": True})
                           stelle = stelle_tag["aria-label"] if stelle_tag else "N/D"
                           
@@ -164,50 +233,73 @@ jobs:
                               "testo": testo,
                               "stelle": stelle
                           })
-                          nuove_estratte_ciclo += 1
+                          nuove_estratte += 1
                           
                           if len(recensioni_estratte) >= max_recensioni:
                               break
-                      except Exception:
-                          continue
-                          
-                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuove_estratte_ciclo} nuove recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
-                  
-                  # Google impagina le recensioni a blocchi di 10
-                  start_index += 10
-                  
-                  # Leggera pausa casuale per simulare intervalli di rete standard
-                  time.sleep(random.uniform(0.5, 1.2))
-                  
+                              
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Elaborate {nuove_estratte} recensioni. Totale: {len(recensioni_estratte)}", flush=True)
+                      
+                      start_index += 10
+                      # Pausa minima per il throttling naturale
+                      time.sleep(random.uniform(0.3, 0.8))
+                      
+                  except Exception as e:
+                      print(f"[NODO {node_id}] Errore durante l'evaluate fetch: {e}", flush=True)
+                      break
+                      
               return recensioni_estratte
 
-          # --- FLUSSO PRINCIPALE ---
+          # --- RUN PRINCIPALE ---
           try:
+              context = launch_persistent_context(
+                  profile_dir,
+                  headless=False,
+                  humanize=True,
+                  human_config={
+                      "typing_delay": 100,
+                      "mistype_chance": 0.02,
+                      "idle_between_actions": True
+                  },
+                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+                  geoip=True,
+                  viewport={"width": 1920, "height": 1080},
+                  args=extra_args_base
+              )
+
+              page = context.new_page()
               ricerca_target = "Coro Orvieto"
               
-              # 1. Risoluzione dell'ID
-              f_id = estrai_feature_id(ricerca_target)
+              # 1. Risoluzione dell'ID a caldo
+              f_id = esegui_ricerca_e_risolvi_cid(page, ricerca_target)
               
-              # 2. Estrazione diretta dei payload
-              recensioni = scarica_recensioni_protocollo(f_id, max_recensioni=50)
+              if f_id:
+                  # 2. Estrazione diretta dei payload dal contesto browser (In-Context)
+                  recensioni = estrai_recensioni_in_context(page, f_id, max_recensioni=50)
+              else:
+                  raise ValueError("Impossibile risolvere il CID del locale.")
               
-              # 3. Salvataggio dell'output strutturato
+              # 3. Salvataggio su file
               output_file = f"output_node_{node_id}.txt"
               with open(output_file, "w", encoding="utf-8") as f:
                   f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
                   
-              print(f"[NODO {node_id}] Task completata! Salvate {len(recensioni)} recensioni.", flush=True)
+              print(f"[NODO {node_id}] Esecuzione terminata. Salvate {len(recensioni)} recensioni.", flush=True)
+              
+              page.close()
+              context.close()
 
           except Exception as e:
-              print(f"[NODO {node_id}] Errore nel protocollo: {e}", flush=True)
+              print(f"[NODO {node_id}] Errore critico nel processo: {e}", flush=True)
               with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
                   f.write(f"ERRORE CRITICO: {e}\n")
           EOF
 
-      - name: Esecuzione Scraping Singolo Nodo (In-Socket)
+      - name: Esecuzione Scraping Singolo Nodo
         run: |
           echo "Avvio processo su un singolo nodo (Nodo 1)..."
-          # Eseguiamo lo script direttamente. L'output a terminale sarà istantaneo.
+          # Eseguiamo direttamente lo script senza salvare in un file log cieco.
+          # Questo mostrerà l'output di Playwright in tempo reale sulla console di GitHub.
           python -u m2_insocket.py 1
           
           # Consolidamento dell'output per l'artifact
