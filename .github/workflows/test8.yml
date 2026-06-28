@@ -1,332 +1,300 @@
-name: Test RAG Challenge 2026
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on:
+on: 
   workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze
+      - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
           playwright install-deps chromium
 
-      - name: Setup Cloudflare WARP
+      - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update && sudo apt-get install -y cloudflare-warp
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos connect
+          docker pull ghcr.io/kingcc/warproxy:latest
+          PORT=40001
+          echo "Avvio container warproxy-1 sulla porta $PORT..."
+          docker run --name warproxy-1 \
+            --network host \
+            -e SOCKS5_PORT=$PORT \
+            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -e VERBOSE=true \
+            -d ghcr.io/kingcc/warproxy:latest
+
+          echo "Attesa inizializzazione del tunnel..."
           sleep 5
 
-      - name: Avvio Xvfb (Virtual Display Stabile)
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+        run: |
+          PORT=40001
+          echo "=================================================="
+          echo "VERIFICA E AUTO-HEALING CONTAINER 1 (PORTA $PORT):"
+          
+          SUCCESS=false
+          for tentativo in {1..5}; do
+            echo "Tentativo $tentativo/5..."
+            IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+            
+            if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+              echo "Container 1 pronto! IP: $IP"
+              SUCCESS=true
+              break
+            else
+              echo "Container 1 non risponde. Riavvio in corso..."
+              docker restart warproxy-1
+              sleep 5
+            fi
+          done
+
+          if [ "$SUCCESS" = "false" ]; then
+            echo "ERRORE CRITICO: Il container 1 non è raggiungibile dopo 5 riavvii."
+            exit 1
+          fi
+          echo "=================================================="
+
+      - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (Macchina 2)
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (Estrazione Recensioni Google Maps)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
+          import sys
           import random
-          import requests
-          from cloakbrowser import launch_context
-          from bs4 import BeautifulSoup
-          from urllib.parse import urlparse, parse_qs
+          import os
+          import re
+          import json
+          from cloakbrowser import launch_persistent_context
 
-          TARGETS = [
-              "https://api64.ipify.org?format=json",
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.eater.com/rome",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://guide.michelin.com/en/it/lazio/roma/restaurants",
-              "https://www.alltrails.com/en-gb/parks/england/buckinghamshire/chiltern-hills-area-of-outstanding-natural-beauty",
-              "https://www.facebook.com/groups/1373361046396315/posts/2860154274383644/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://taxsummaries.pwc.com/georgia/individual/taxes-on-personal-income",
-              "https://www.canadianinsider.com/money-is-moving"
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          # --- CONFIGURAZIONE CLOAKBROWSER ---
+          random_seed = str(random.randint(100000, 999999))
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
+
+          extra_args_base = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-          results = ""
-
-          def extract_text(html_content, url):
-              soup = BeautifulSoup(html_content, 'html.parser')
-              text = soup.get_text(separator=' ', strip=True)
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  return text
-              return text[:5000]
-
-          def get_query_from_url(url, default="migliore carbonara roma"):
-              try:
-                  parsed = urlparse(url)
-                  queries = parse_qs(parsed.query)
-                  for param in ['q', 'query', 'p']:
-                      if param in queries:
-                          return queries[param][0]
-              except Exception:
-                  pass
-              return default
-
-          def handle_cookie_consent(page):
-              """Accetta i cookie ma solo con un timeout rigoroso di 1.5s per non bloccare mai la navigazione"""
-              try:
-                  consent_selectors = [
-                      "button:has-text('Accetta tutto')",
-                      "button:has-text('Accept all')",
-                      "button:has-text('Consenti')",
-                      "button:has-text('I agree')",
-                      "button:has-text('Accetto')",
-                      "button:has-text('Agree')",
-                      "button:has-text('Accept')",
-                      "button:has-text('OK')",
-                      "button:has-text('Allow all')",
-                      "button:has-text('Consenti l\\'uso dei cookie')",
-                      "#L2AGLb"
-                  ]
-                  for selector in consent_selectors:
-                      btn = page.locator(selector)
-                      if btn.is_visible():
-                          btn.click(timeout=1500)
-                          time.sleep(0.5)
-                          print(f"Cookie bypassato: {selector}", flush=True)
-                          break
-              except Exception:
-                  pass
-
-          # 1. Rilevamento preventivo dell'IP esatto (previene il mismatch IPv4/IPv6 su WARP)
-          print("Rilevamento IP pubblico di rete...", flush=True)
-          detected_ip = None
-          try:
-              response = requests.get("https://api64.ipify.org?format=json", timeout=5)
-              if response.status_code == 200:
-                  detected_ip = response.json().get("ip")
-                  print(f"IP Rilevato: {detected_ip}", flush=True)
-          except Exception as e:
-              print(f"Avviso: impossibile rilevare l'IP di rete ({e})", flush=True)
-
-          timezone = "UTC"
-          locale = "en-US"
-
-          # 2. Geolocalizzazione basata sull'IP rilevato (con fallback robusto a freeipapi per evitare i 429)
-          if detected_ip:
-              geo_services = [
-                  (f"https://freeipapi.com/api/json/{detected_ip}", lambda d: (d.get("timeZone"), d.get("countryCode", "US"))),
-                  (f"https://ipapi.co/{detected_ip}/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-                  (f"https://ipwho.is/{detected_ip}", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-              ]
-              for url, parse_func in geo_services:
-                  try:
-                      print(f"Geolocalizzazione IP su {url}...", flush=True)
-                      response = requests.get(url, timeout=5)
-                      if response.status_code == 200:
-                          data = response.json()
-                          tz, loc = parse_func(data)
-                          if tz:
-                              timezone = tz
-                              locale = loc
-                              if len(locale) == 2:
-                                  country_to_locale = {
-                                      "IT": "it-IT", "US": "en-US", "GB": "en-GB", "FR": "fr-FR", 
-                                      "DE": "de-DE", "ES": "es-ES", "BR": "pt-BR", "CA": "en-CA"
-                                  }
-                                  locale = country_to_locale.get(locale.upper(), f"{locale.lower()}-{locale.upper()}")
-                              print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                              break
-                  except Exception as e:
-                      print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
-
-          # Generazione di un seed hardware dinamico coerente per ogni run
-          random_seed = str(random.randint(100000, 999999))
-          print(f"Avviando CloakBrowser con seed hardware dinamico: {random_seed}...", flush=True)
-
-          context = launch_context(
-              headless=False,
-              humanize=True,
-              timezone=timezone,
-              locale=locale,
-              # Impostiamo l'altezza interna a 950 per risolvere l'incongruenza innerHeight > outerHeight
-              viewport={"width": 1920, "height": 950},
-              args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",
-                  f"--fingerprint-locale={locale}",
-                  f"--fingerprint={random_seed}"
-              ]
-          )
-
-          for url in TARGETS:
-              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
-              try:
-                  page = context.new_page()
-                  
-                  # INIEZIONE ATTIVA DI POLYFILL (Per neutralizzare CreepJS "headless" e Incolumitas RTT)
-                  page.add_init_script("""
-                      // 1. Mock ContactsManager (atteso su Windows, nativamente assente su Linux headless)
-                      if (!('ContactsManager' in window)) {
-                          window.ContactsManager = class ContactsManager {
-                              async getProperties() { return ['name', 'email', 'tel', 'address', 'icon']; }
-                              async select() { return []; }
-                          };
-                          Object.defineProperty(navigator, 'contacts', {
-                              get: () => new window.ContactsManager(),
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-
-                      // 2. Mock ContentIndex (atteso su contesti HTTPS Chrome)
-                      if (!('ContentIndex' in window)) {
-                          window.ContentIndex = class ContentIndex {
-                              async add() {}
-                              async delete() {}
-                              async getAll() { return []; }
-                          };
-                      }
-
-                      // 3. Correzione downlinkMax sul Prototipo (CreepJS) e allineamento RTT realistico
-                      if (window.NetworkInformation && !('downlinkMax' in window.NetworkInformation.prototype)) {
-                          Object.defineProperty(window.NetworkInformation.prototype, 'downlinkMax', {
-                              get: () => 10,
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-                      if (navigator.connection) {
-                          if (!('downlinkMax' in navigator.connection)) {
-                              Object.defineProperty(navigator.connection, 'downlinkMax', {
-                                  get: () => 10,
-                                  configurable: true,
-                                  enumerable: true
-                              });
-                          }
-                          Object.defineProperty(navigator.connection, 'rtt', {
-                              get: () => 100, // Latenza simulata coerente con l'instradamento VPN di WARP
-                              configurable: true,
-                              enumerable: true
-                          });
-                      }
-                  """)
-
-                  query_to_search = get_query_from_url(url)
-
-                  # GESTIONE SPECIFICA YELP
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(3)
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input#q")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su Startpage: {e}", flush=True)
-                  
-                  # Navigazione simulata per DuckDuckGo HTML
-                  elif "html.duckduckgo.com/html" in url:
-                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      try:
-                          search_input = page.locator("input[name=q]")
-                          search_input.type(query_to_search, delay=100, timeout=2000)
-                          page.keyboard.press("Enter")
-                      except Exception as e:
-                          print(f"Avviso: errore scrittura su DuckDuckGo: {e}", flush=True)
+          # --- METODO 1: RICERCA E DISAMBIGUAZIONE ---
+          def esegui_ricerca_e_apri_scheda(page, query):
+              """Risolve la ricerca e si assicura che la scheda del luogo sia aperta."""
+              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
+              print(f"[NODO {node_id}] Eseguo ricerca diretta su URL: {search_url}", flush=True)
+              
+              # Impostiamo timeout ampi per non incorrere nel limite dei 30s di default
+              page.set_default_navigation_timeout(90000)
+              page.set_default_timeout(90000)
+              
+              # OTTIMIZZAZIONE RETE: Intercettiamo e blocchiamo immagini e tile della mappa.
+              # Maps si caricherà a una velocità sensibilmente superiore riducendo il consumo di banda.
+              def block_heavy_assets(route):
+                  url = route.request.url.lower()
+                  if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
+                      route.abort()
+                  else:
+                      route.continue_()
                       
-                  else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                      if not any(x in url for x in ["facebook.com", "reddit.com", "yelp"]):
-                          handle_cookie_consent(page)
+              page.route("**/*", block_heavy_assets)
+              
+              # Usiamo 'commit' in modo che Playwright si sblocchi non appena riceve l'HTML iniziale,
+              # senza attendere il caricamento dei pesanti script asincroni e assecondando i proxy lenti.
+              page.goto(search_url, wait_until="commit", timeout=90000)
+              
+              # Diamo al motore qualche secondo di assestamento per il rendering iniziale dell'HTML
+              time.sleep(6)
+              
+              # Gestione del Cookie Consent di Google se presente
+              try:
+                  consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
+                  if consent_btn.is_visible(timeout=5000):
+                      consent_btn.click()
+                      time.sleep(3)
+              except Exception:
+                  pass
+
+              # Attendiamo in modo reattivo l'apparizione degli elementi essenziali (elenco o pulsanti della scheda)
+              try:
+                  page.locator("a[href*='/maps/place/'], button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first.wait_for(timeout=30000)
+              except Exception:
+                  pass
+
+              # Verifica se siamo finiti su un elenco (Caso B) o direttamente sulla scheda (Caso A)
+              risultati_ricerca = page.locator("a[href*='/maps/place/']")
+              
+              if risultati_ricerca.count() > 0:
+                  print(f"[NODO {node_id}] Rilevato elenco di disambiguazione. Seleziono il primo risultato...", flush=True)
+                  # Clicchiamo sul primo risultato dell'elenco
+                  risultati_ricerca.first.click()
+                  time.sleep(5)
+              else:
+                  print(f"[NODO {node_id}] Direct Hit! Scheda del luogo aperta direttamente.", flush=True)
+
+          # --- METODO 2: ESTRAZIONE CON FINESTRA SCORREVOLE (SLIDING WINDOW) ---
+          def estrai_recensioni_passo_passo(page, max_recensioni=100):
+              """Estrae le recensioni in tempo reale gestendo la distruzione dei nodi nel DOM."""
+              # 1. Clicchiamo sul tab delle recensioni
+              review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
+              review_tab.wait_for(state="visible", timeout=15000)
+              review_tab.click()
+              time.sleep(5)
+              
+              # 2. Identifichiamo il selettore del sotto-pannello scrollabile
+              panel = page.locator("div[role='feed']").first
+              if not panel.is_visible():
+                  panel = page.locator("div.m6QErb.DDoB2b").first
+
+              recensioni_estratte = {}
+              iterazioni_senza_novita = 0
+              
+              print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
+              
+              while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 30:
+                  # Recupera tutte le card delle recensioni attualmente caricate in memoria
+                  cards = page.locator(".jftiEf").all()
+                  nuovi_elementi_trovati = 0
                   
-                  # GESTIONE SPECIFICA YAHOO FINANCE
-                  if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
+                  for card in cards:
                       try:
-                          page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=5000)
+                          # Google Maps espone l'ID univoco della recensione nel tag HTML
+                          review_id = card.get_attribute("data-review-id")
+                          
+                          # Fallback di sicurezza se manca l'ID
+                          if not review_id:
+                              autore_testo = card.locator(".d470gc").inner_text()
+                              testo_parziale = card.locator(".wiI7pd").inner_text()[:20]
+                              review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
+                          
+                          # Se la chiave non è presente nel nostro dizionario di accumulo, la estraiamo
+                          if review_id not in recensioni_estratte:
+                              autore = card.locator(".d470gc").inner_text()
+                              
+                              # Espandiamo il testo lungo ("Altro") prima della cattura
+                              altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
+                              if altro_btn.is_visible(timeout=500):
+                                  altro_btn.click() 
+                                  time.sleep(0.2)
+                                  
+                              testo_completo = card.locator(".wiI7pd").inner_text()
+                              stelle_el = card.locator("span.kv731.v37sz1").first
+                              stelle = stelle_el.get_attribute("aria-label") if stelle_el.count() > 0 else "N/D"
+                              
+                              # Salvataggio immediato
+                              recensioni_estratte[review_id] = {
+                                  "autore": autore,
+                                  "testo": testo_completo,
+                                  "stelle": stelle
+                              }
+                              nuovi_elementi_trovati += 1
+                              
+                              if len(recensioni_estratte) >= max_recensioni:
+                                  break
                       except Exception:
-                          pass
-                      time.sleep(1)
-
-                  # Scorrimento simulato
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, 300)
-                          time.sleep(1)
-                  except Exception:
-                      pass
-
-                  # Tempi di attesa bilanciati
-                  if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
+                          # Ignoriamo gli elementi che spariscono durante lo scroll
+                          continue
+                  
+                  if nuovi_elementi_trovati > 0:
+                      iterazioni_senza_novita = 0
+                      print(f"[NODO {node_id}] Scaricate {len(recensioni_estratte)} recensioni uniche...", flush=True)
                   else:
-                      time.sleep(4)
+                      iterazioni_senza_novita += 1
+                      
+                  # Eseguiamo lo scroll sul contenitore specifico
+                  panel.evaluate("el => el.scrollBy(0, 450)")
+                  
+                  # Pausa per permettere l'invio della richiesta AJAX e il rendering dei nodi
+                  time.sleep(random.uniform(1.5, 2.2))
+                  
+              return list(recensioni_estratte.values())
 
-                  raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
+          # --- RUN PRINCIPALE ---
+          try:
+              context = launch_persistent_context(
+                  profile_dir,
+                  headless=False,
+                  humanize=True,
+                  human_config={
+                      "typing_delay": 100,
+                      "mistype_chance": 0.02,
+                      "idle_between_actions": True
+                  },
+                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+                  geoip=True,
+                  viewport={"width": 1920, "height": 1080},
+                  args=extra_args_base
+              )
 
-              except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
-                  results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except Exception:
-                      pass
+              page = context.new_page()
+              
+              # Query dinamica di test
+              ricerca_target = "Coro Orvieto"
+              
+              # 1. Trova ed apre il locale gestendo la disambiguazione
+              esegui_ricerca_e_apri_scheda(page, ricerca_target)
+              
+              # 2. Estrae le recensioni in tempo reale battendo il recycling del DOM
+              recensioni = estrai_recensioni_passo_passo(page, max_recensioni=50)
+              
+              # 3. Salvataggio su file
+              output_file = f"output_node_{node_id}.txt"
+              with open(output_file, "w", encoding="utf-8") as f:
+                  f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
+                  
+              print(f"[NODO {node_id}] Esecuzione terminata. Salvate {len(recensioni)} recensioni.", flush=True)
+              
+              page.close()
+              context.close()
 
-          context.close()
-
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              f.write(results)
+          except Exception as e:
+              print(f"[NODO {node_id}] Errore critico nel processo: {e}", flush=True)
+              with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
+                  f.write(f"ERRORE CRITICO: {e}\n")
           EOF
 
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
+      - name: Esecuzione Scraping Singolo Nodo
+        run: |
+          echo "Avvio processo su un singolo nodo (Nodo 1)..."
+          python -u m2_insocket.py 1 > node1.log 2>&1
+          
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=================="
+
+          # Consolidamento dell'output
+          touch output_node_1.txt
+          cat output_node_1.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
