@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context API Fetching)
+      - name: Creazione script Python (In-Context API Fetching con Iframe Detection)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -112,7 +112,7 @@ jobs:
 
           # --- METODO 1: RICERCA E RISOLUZIONE CID ---
           def esegui_ricerca_e_risolvi_cid(page, query):
-              """Esegue la ricerca e recupera il data-cid (ludocid) direttamente dal DOM o dall'URL."""
+              """Esegue la ricerca e recupera il data-cid (ludocid) dopo il reindirizzamento."""
               search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
               print(f"[NODO {node_id}] Navigazione per ricerca diretta su: {search_url}", flush=True)
               
@@ -150,54 +150,95 @@ jobs:
               else:
                   print(f"[NODO {node_id}] Scheda aperta direttamente.", flush=True)
 
-              # Estraiamo il data-cid/ludocid dal DOM reale o dai link
-              cid = page.evaluate('''() => {
-                  const el = document.querySelector('[data-cid], [data-ludocid]');
-                  if (el) {
-                      return el.getAttribute('data-cid') || el.getAttribute('data-ludocid');
-                  }
-                  const link = document.querySelector('a[href*="cid="]');
-                  if (link) {
-                      const url = new URL(link.href);
-                      return url.searchParams.get("cid");
-                  }
-                  return null;
-              }''')
-              
-              # Se il DOM non lo espone direttamente, convertiamo l'id esadecimale dall'URL di Maps
-              if not cid:
-                  current_url = page.url
-                  match = re.search(r"0x[a-f0-9]+:0x([a-f0-9]+)", current_url)
-                  if match:
+              # Attendiamo che l'URL si stabilizzi sul reindirizzamento definitivo (/maps/place/...)
+              try:
+                  page.wait_for_url("**/maps/place/**", timeout=25000)
+                  print(f"[NODO {node_id}] Reindirizzamento completato: {page.url}", flush=True)
+              except Exception:
+                  print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
+
+              # Tentativo 1 (Il più stabile): Estrazione del CID convertendo la coordinata esadecimale dall'URL di Maps
+              cid = None
+              current_url = page.url
+              match = re.search(r"0x[a-fA-F0-9]+:0x([a-fA-F0-9]+)", current_url)
+              if match:
+                  try:
                       cid = str(int(match.group(1), 16))
-                      
+                      print(f"[NODO {node_id}] CID risolto via conversione esadecimale URL.", flush=True)
+                  except Exception:
+                      pass
+              
+              # Tentativo 2: Cerca attributi data-cid o data-ludocid nel DOM
+              if not cid:
+                  cid = page.evaluate('''() => {
+                      const el = document.querySelector('[data-cid], [data-ludocid]');
+                      if (el) {
+                          return el.getAttribute('data-cid') || el.getAttribute('data-ludocid');
+                      }
+                      const link = document.querySelector('a[href*="cid="]');
+                      if (link) {
+                          const url = new URL(link.href);
+                          return url.searchParams.get("cid");
+                      }
+                      return null;
+                  }''')
+                  if cid:
+                      print(f"[NODO {node_id}] CID risolto via attributo DOM.", flush=True)
+
+              # Tentativo 3: Scansione regex dell'HTML interno di base
               if not cid:
                   html = page.content()
-                  match = re.search(r'data-cid="([0-9]+)"', html)
-                  if match:
-                      cid = match.group(1)
+                  match_html = re.search(r'data-cid="([0-9]+)"', html)
+                  if match_html:
+                      cid = match_html.group(1)
+                      print(f"[NODO {node_id}] CID risolto via regex HTML.", flush=True)
 
-              print(f"[NODO {node_id}] CID risolto a caldo: {cid}", flush=True)
+              print(f"[NODO {node_id}] Risultato risoluzione CID: {cid}", flush=True)
               return cid
 
           # --- METODO 2: IN-CONTEXT API FETCHING ---
           def estrai_recensioni_in_context(page, feature_id, max_recensioni=50):
               """Effettua le chiamate fetch all'endpoint AJAX ereditando la sessione reale del browser."""
+              # 1. Clicchiamo sul tab delle recensioni usando il ruolo semantico ARIA tab, molto più stabile
+              tab_recensioni = page.locator("button[role='tab']:has-text('Recensioni'), button[role='tab']:has-text('Reviews')").first
+              
+              if tab_recensioni.is_visible(timeout=8000):
+                  print(f"[NODO {node_id}] Clicco sul tab Recensioni...", flush=True)
+                  tab_recensioni.click()
+              else:
+                  review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
+                  review_tab.wait_for(state="visible", timeout=15000)
+                  print(f"[NODO {node_id}] Clicco sul pulsante recensioni di ripiego...", flush=True)
+                  review_tab.click()
+
+              time.sleep(5)
+
+              # SCANSIONE DEGLI IFRAME: Identifichiamo il contesto di lavoro corretto.
+              # Se le recensioni sono caricate in un iframe, effettueremo le chiamate in quel contesto.
+              work_context = page
+              for frame in page.frames:
+                  try:
+                      if frame.locator(".jftiEf").count() > 0:
+                          work_context = frame
+                          print(f"[NODO {node_id}] Rilevato iframe dedicato per le recensioni! Sposto il contesto di esecuzione.", flush=True)
+                          break
+                  except Exception:
+                      continue
+
               recensioni_estratte = []
               start_index = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Inizio fetch asincroni all'interno del contesto browser...", flush=True)
+              print(f"[NODO {node_id}] Inizio fetch asincroni all'interno del contesto di lavoro...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
                   ajax_url = f"https://www.google.com/async/reviewSort?yv=3&async=feature_id:{feature_id},_id:reviewSort,_p:true,menu:true,sort_by:qualityScore,start_index:{start_index},_fmt:pc"
                   
-                  # Eseguiamo la chiamata fetch all'interno della sandbox del browser.
-                  # Questo eredita automaticamente cookies, user-agent, JA3 fingerprint e aggira il blocco 429.
+                  # Chiamata fetch ereditando la sessione reale del browser
                   print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
                   try:
-                      html_chunk = page.evaluate("""async (url) => {
+                      html_chunk = work_context.evaluate("""async (url) => {
                           try {
                               const response = await fetch(url);
                               return await response.text();
@@ -241,7 +282,6 @@ jobs:
                       print(f"[NODO {node_id}] [Ciclo {ciclo}] Elaborate {nuove_estratte} recensioni. Totale: {len(recensioni_estratte)}", flush=True)
                       
                       start_index += 10
-                      # Pausa minima per il throttling naturale
                       time.sleep(random.uniform(0.3, 0.8))
                       
                   except Exception as e:
@@ -274,7 +314,7 @@ jobs:
               f_id = esegui_ricerca_e_risolvi_cid(page, ricerca_target)
               
               if f_id:
-                  # 2. Estrazione diretta dei payload dal contesto browser (In-Context)
+                  # 2. Estrazione diretta dei payload dal contesto (In-Context)
                   recensioni = estrai_recensioni_in_context(page, f_id, max_recensioni=50)
               else:
                   raise ValueError("Impossibile risolvere il CID del locale.")
@@ -298,8 +338,6 @@ jobs:
       - name: Esecuzione Scraping Singolo Nodo
         run: |
           echo "Avvio processo su un singolo nodo (Nodo 1)..."
-          # Eseguiamo direttamente lo script senza salvare in un file log cieco.
-          # Questo mostrerà l'output di Playwright in tempo reale sulla console di GitHub.
           python -u m2_insocket.py 1
           
           # Consolidamento dell'output per l'artifact
