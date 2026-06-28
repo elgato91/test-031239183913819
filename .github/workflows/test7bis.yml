@@ -232,7 +232,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser + WAF Reload)
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Solido)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -258,6 +258,7 @@ jobs:
               except: pass
               return default
 
+          # RENDERING STABILITÀ DOM ORIGINALE (FUNZIONANTE)
           async def _wait_for_render_ready(page, timeout_seconds=8.0, min_text_length=150):
               start = time.time()
               while (time.time() - start) < timeout_seconds:
@@ -265,7 +266,7 @@ jobs:
                       ready_state = await page.evaluate("document.readyState || ''")
                       if ready_state in ("interactive", "complete"): break
                   except: pass
-                  await asyncio.sleep(0.3)
+                  await asyncio.sleep(0.5)
 
               stable_samples = 0
               prev_text_len = -1
@@ -280,7 +281,7 @@ jobs:
                               stable_samples = 0
                       prev_text_len = text_len
                   except: pass
-                  await asyncio.sleep(0.3)
+                  await asyncio.sleep(0.5)
               return False
 
           async def main():
@@ -312,25 +313,42 @@ jobs:
                   )
                   wp = await warmup_ctx.new_page()
                   await wp.goto("https://www.google.com", timeout=20000)
-                  await asyncio.sleep(2)
+                  await asyncio.sleep(3)
                   await wp.goto("https://www.reddit.com", timeout=20000)
-                  await asyncio.sleep(2)
+                  await asyncio.sleep(3)
                   await warmup_ctx.close()
-              except: pass
+                  
+                  # SICUREZZA CRITICA: Aspetta 5 secondi per garantire il rilascio dei lock sul profilo disco
+                  await asyncio.sleep(5)
+              except Exception as e:
+                  print(f"Errore Warmup: {e}")
+                  await asyncio.sleep(2)
 
               print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale...", flush=True)
-              try:
-                  context = await launch_persistent_context_async(
-                      profile_dir, headless=False, humanize=True,
-                      human_config={"typing_delay": 90, "mistype_chance": 0.02, "idle_between_actions": True},
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}", geoip=True, locale="it-IT",
-                      timezone_id="Europe/Rome", viewport={"width": 1920, "height": 1080}, args=base_args
-                  )
-                  page = await context.new_page()
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
+              
+              # RETRY LOOP PER IL RIGETTO DEL LOCK FILE (In caso il sistema operativo sia lento)
+              context = None
+              for attempt in range(4):
+                  try:
+                      context = await launch_persistent_context_async(
+                          profile_dir, headless=False, humanize=True,
+                          human_config={"typing_delay": 90, "mistype_chance": 0.02, "idle_between_actions": True},
+                          proxy=f"socks5://127.0.0.1:{INITIAL_PORT}", geoip=True, locale="it-IT",
+                          timezone_id="Europe/Rome", viewport={"width": 1920, "height": 1080}, args=base_args
+                      )
+                      break
+                  except Exception as e:
+                      if "existing browser session" in str(e) or "already in use" in str(e):
+                          print(f"[NODO {node_id}] Profilo ancora bloccato dal Warmup. Attesa rilascio (tentativo {attempt+1}/4)...", flush=True)
+                          await asyncio.sleep(5)
+                      else:
+                          raise e
+              
+              if not context:
+                  print(f"[NODO {node_id}] Impossibile avviare il browser principale per via del Lock del Profilo.")
                   return
-
+                  
+              page = await context.new_page()
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
 
               for url in targets:
@@ -339,45 +357,28 @@ jobs:
                       query_to_search = get_query_from_url(url)
                       
                       if "startpage.com" in url:
-                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=30000)
-                          await asyncio.sleep(2)
+                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                          await asyncio.sleep(3)
                           try:
                               await page.type("input#q", query_to_search)
                               await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                       elif "html.duckduckgo.com" in url:
-                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=30000)
-                          await asyncio.sleep(2)
+                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                          await asyncio.sleep(3)
                           try:
                               await page.type("input[name=q]", query_to_search)
                               await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                       else:
-                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          # wait_until='load' assicura che Yelp carichi PerimeterX/Datadome correttamente
+                          await page.goto(url, wait_until="load", timeout=40000)
                       
+                      # Attesa stabilità del DOM React/Vue
                       await _wait_for_render_ready(page)
+                      await asyncio.sleep(4) # Lascia che CloakBrowser bypassi il WAF in modo passivo
                       
-                      # Verifica passiva Captcha + Reload sblocca Yelp/Datadome
-                      for attempt in range(5): 
-                          try: content = (await page.content()).lower()
-                          except: content = ""
-                          
-                          if "challenge-platform" in content or "just a moment" in content or "prove your humanity" in content or "please enable js" in content:
-                              print(f"[NODO {node_id}] WAF/Datadome rilevato. Simulo umano...", flush=True)
-                              try:
-                                  await page.mouse.move(random.randint(300, 800), random.randint(300, 800))
-                                  await page.mouse.wheel(0, random.randint(200, 600))
-                              except: pass
-                              await asyncio.sleep(5)
-                              
-                              # Se siamo incastrati al 3° tentativo, ricarichiamo la pagina (Forza Datadome/Yelp a validare il cookie)
-                              if attempt == 2:
-                                  print(f"[NODO {node_id}] Ricarico la pagina per sbloccare WAF stallo...", flush=True)
-                                  await page.reload(wait_until="domcontentloaded")
-                                  await asyncio.sleep(4)
-                          else:
-                              break
-                      
+                      # Lieve scroll per triggerare lazy loads
                       try: await page.evaluate("window.scrollBy(0, 1000)")
                       except: pass
                       await asyncio.sleep(2)
@@ -391,7 +392,7 @@ jobs:
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
                           "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity", "please enable js"
+                          "we've detected unusual activity"
                       ]
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
