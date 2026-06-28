@@ -16,7 +16,6 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -24,10 +23,19 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
           playwright install-deps chromium
 
-      - name: Setup 6 WARProxy Docker Containers (IPv6)
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Setup Container WARP (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -40,207 +48,281 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-
-            if [ $i -lt 6 ]; then
-              DELAY=$((3 + RANDOM % 2))
-              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
-              sleep $DELAY
-            fi
+            sleep 0.5
           done
+          
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 6
 
-          echo "Attesa finale inizializzazione dei tunnel..."
-          sleep 10
-
-      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+      - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            echo "=================================================="
-            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
-            
-            DELAY=$((3 + RANDOM % 2))
-            sleep $DELAY
+          cat << 'EOF' > m2_step1_setup.py
+          import json
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+          
+          # Suddivisione matematica statica (Chunking)
+          for i in range(1, 7):
+              chunk = TARGETS[i-1::6]
+              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+          EOF
+          python -u m2_step1_setup.py
 
-            SUCCESS=false
-            for tentativo in {1..5}; do
-              echo "Tentativo $tentativo/5 per container $i..."
-              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-              
-              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-                echo "Container $i pronto! IP: $IP"
-                SUCCESS=true
-                break
-              else
-                echo "Container $i non risponde. Riavvio in corso..."
-                docker restart warproxy-$i
-                sleep 5
-              fi
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "ERRORE CRITICO: Il container $i non è raggiungibile dopo 5 riavvii."
-              exit 1
-            fi
-          done
-          echo "=================================================="
-
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Pre-inizializzazione Cache CloakBrowser
-        run: |
-          python -m cloakbrowser install
-
-      - name: Creazione script Python (Estrazione Recensioni Google Maps)
-        run: |
-          cat << 'EOF' > m2_insocket.py
+          cat << 'EOF' > m2_step1.py
           import time
           import sys
           import random
           import os
-          import re
           import json
-          from cloakbrowser import launch_persistent_context
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests
 
-          if len(sys.argv) < 2:
-              sys.exit(1)
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
+          if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          # --- CONFIGURAZIONE CLOAKBROWSER ---
-          random_seed = str(random.randint(100000, 999999))
-          home_dir = os.path.expanduser("~")
-          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
+          def verify_proxy_active(port, max_retries=5, delay=5):
+              test_session = requests.Session(impersonate="chrome120")
+              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              for _ in range(max_retries):
+                  try:
+                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200: return True
+                  except: pass
+                  time.sleep(delay)
+              return False
 
-          extra_args_base = [
+          def validate_html(html, url, status_code):
+              if status_code >= 400: return False, f"Blocco HTTP {status_code}"
+              if not html or len(html.strip()) < 300: return False, "HTML vuoto"
+              if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
+              
+              low_html = html.lower()
+              blocking_indicators = [
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
+                  "just a moment", "security verification", "please enable js", "enable javascript",
+                  "are you a robot", "please wait for verification", "we've detected unusual activity",
+                  "if you are not redirected", "unusual traffic from your computer network",
+                  "checking your browser", "prove your humanity", "captcha verification", 
+                  "please enter in the characters you see below", "access to this page is forbidden",
+                  "error 1020", "you have been blocked", "pardon our interruption",
+                  "se non vieni reindirizzato", "se hai problemi ad accedere", 
+                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
+              ]
+              
+              for ind in blocking_indicators:
+                  if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
+              return True, ""
+
+          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
+
+          queue_file = f"/tmp/step1_queue_{node_id}.json"
+          if not os.path.exists(queue_file): sys.exit(0)
+          
+          with open(queue_file, "r") as f:
+              targets = json.load(f)
+
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
+          failed_targets = []
+          
+          session = requests.Session(impersonate="chrome120")
+          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+          session.headers.update({
+              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+          })
+
+          for url in targets:
+              print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+              try:
+                  resp = session.get(url, timeout=12)
+                  is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+                  
+                  if is_ok:
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      text = soup.get_text(separator=' ', strip=True)[:5000]
+                      if any(site in url for site in DIAGNOSTIC_SITES):
+                          text = soup.get_text(separator=' ', strip=True)
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
+                  else:
+                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
+                      failed_targets.append(url)
+              except Exception as e:
+                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                  failed_targets.append(url)
+              
+              time.sleep(random.uniform(1.0, 2.0))
+
+          with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
+          with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
+          EOF
+
+      - name: Esecuzione Scraping Parallelo - STEP 1
+        run: |
+          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
+          
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+      - name: Refresh IP Container per lo STEP 2
+        run: |
+          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          sleep 6
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        run: |
+          cat << 'EOF' > m2_step2_setup.py
+          import json
+          import os
+
+          merged_failed = []
+          for i in range(1, 7):
+              filename = f"failed_node_{i}.json"
+              if os.path.exists(filename):
+                  with open(filename, "r", encoding="utf-8") as f:
+                      try: merged_failed.extend(json.load(f))
+                      except Exception: pass
+          
+          unique_failed = list(dict.fromkeys(merged_failed))
+          
+          for i in range(1, 7):
+              chunk = unique_failed[i-1::6]
+              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+                  
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare.")
+          EOF
+          python -u m2_step2_setup.py
+
+      - name: Creazione Script Python - STEP 2 (Sincrono Hardened)
+        run: |
+          cat << 'EOF' > m2_step2.py
+          import time
+          import sys
+          import random
+          import os
+          import json
+          import subprocess
+          from urllib.parse import urlparse, parse_qs
+          from cloakbrowser import launch_persistent_context
+          from bs4 import BeautifulSoup
+
+          if len(sys.argv) < 2: sys.exit(1)
+          node_id = int(sys.argv[1])
+          INITIAL_PORT = 40000 + node_id
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p']:
+                      if param in queries: return queries[param][0]
+              except: pass
+              return default
+
+          # FUNZIONE DI PULIZIA FORCELLA LOCKS (Previene SingletonLock)
+          def force_cleanup_profile(profile_dir):
+              try:
+                  subprocess.run(["pkill", "-9", "-f", profile_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              except: pass
+              time.sleep(1.0)
+              for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                  fp = os.path.join(profile_dir, lock_file)
+                  try:
+                      if os.path.islink(fp) or os.path.exists(fp):
+                          os.unlink(fp)
+                  except: pass
+              time.sleep(1.0)
+
+          queue_file = f"/tmp/step2_queue_{node_id}.json"
+          if not os.path.exists(queue_file): sys.exit(0)
+          
+          with open(queue_file, "r") as f:
+              targets = json.load(f)
+
+          if not targets:
+              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
+              sys.exit(0)
+
+          home_dir = os.path.expanduser("~")
+          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+          
+          base_args = [
               "--no-sandbox",
               "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
+              f"--fingerprint={random.randint(100000, 999999)}",
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # --- METODO 1: RICERCA E DISAMBIGUAZIONE ---
-          def esegui_ricerca_e_apri_scheda(page, query):
-              """Risolve la ricerca e si assicura che la scheda del luogo sia aperta."""
-              # Sostituiamo gli spazi con il '+' per l'URL di ricerca diretta di Google Maps
-              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-              print(f"[NODO {node_id}] Eseguo ricerca diretta su URL: {search_url}", flush=True)
-              
-              page.goto(search_url, wait_until="domcontentloaded", timeout=50000)
-              
-              # Gestione del Cookie Consent di Google (essenziale in GHA per evitare blocco iniziale)
-              try:
-                  consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                  if consent_btn.is_visible(timeout=4000):
-                      consent_btn.click()
-                      time.sleep(2)
-              except Exception:
-                  pass
-
-              page.wait_for_load_state("networkidle")
+          # --- RISCALDAMENTO IN HTTP/1.1 ---
+          print(f"[NODO {node_id}] [Warmup HTTP/1.1] Avvio sessione isolata...", flush=True)
+          force_cleanup_profile(profile_dir)
+          try:
+              warmup_ctx = launch_persistent_context(
+                  profile_dir,
+                  headless=False,
+                  proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                  geoip=True,
+                  locale="it-IT",
+                  timezone_id="Europe/Rome",
+                  args=base_args + ["--disable-http2"]
+              )
+              wp = warmup_ctx.new_page()
+              try: wp.goto("https://www.google.com", wait_until="commit", timeout=25000)
+              except: pass
               time.sleep(3)
-
-              # Verifica se siamo finiti su un elenco (Caso B) o direttamente sulla scheda (Caso A)
-              # Su Maps, i link dei risultati di una ricerca ad elenco contengono sempre '/maps/place/'
-              risultati_ricerca = page.locator("a[href*='/maps/place/']")
-              
-              if risultati_ricerca.count() > 0:
-                  print(f"[NODO {node_id}] Rilevato elenco di disambiguazione. Seleziono il primo risultato...", flush=True)
-                  # Clicchiamo sul primo risultato dell'elenco
-                  risultati_ricerca.first.click()
-                  page.wait_for_load_state("networkidle")
-                  time.sleep(3)
-              else:
-                  print(f"[NODO {node_id}] Direct Hit! Scheda del luogo aperta direttamente.", flush=True)
-
-          # --- METODO 2: ESTRAZIONE CON FINESTRA SCORREVOLE (SLIDING WINDOW) ---
-          def estrai_recensioni_passo_passo(page, max_recensioni=100):
-              """Estrae le recensioni in tempo reale gestendo la distruzione dei nodi nel DOM."""
-              # 1. Clicchiamo sul tab delle recensioni
-              # Cerchiamo il pulsante che contiene la stringa 'recensioni' o 'reviews' nell'aria-label
-              review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
-              review_tab.click()
+              try: wp.goto("https://www.reddit.com", wait_until="commit", timeout=25000)
+              except: pass
               time.sleep(3)
-              
-              # 2. Identifichiamo il selettore del sotto-pannello scrollabile
-              # Il feed delle recensioni è solitamente un div con attributo role="feed" o classe .m6QErb.DDoB2b
-              panel = page.locator("div[role='feed']").first
-              if not panel.is_visible():
-                  panel = page.locator("div.m6QErb.DDoB2b").first
+              warmup_ctx.close()
+          except Exception as e:
+              print(f"[NODO {node_id}] Errore Warmup: {e}", flush=True)
 
-              recensioni_estratte = {}
-              iterazioni_senza_novita = 0
-              
-              print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
-              
-              while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 8:
-                  # Recupera tutte le card delle recensioni attualmente caricate in memoria
-                  cards = page.locator(".jftiEf").all()
-                  nuovi_elementi_trovati = 0
-                  
-                  for card in cards:
-                      try:
-                          # Google Maps espone l'ID univoco della recensione nel tag HTML
-                          review_id = card.get_attribute("data-review-id")
-                          
-                          # Fallback di sicurezza: se manca l'ID, generiamo un hash sul testo parziale
-                          if not review_id:
-                              autore_testo = card.locator(".d470gc").inner_text()
-                              testo_parziale = card.locator(".wiI7pd").inner_text()[:20]
-                              review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
-                          
-                          # Se la chiave non è presente nel nostro dizionario di accumulo, la estraiamo
-                          if review_id not in recensioni_estratte:
-                              autore = card.locator(".d470gc").inner_text()
-                              
-                              # Se la recensione è molto lunga, Google nasconde il testo sotto un pulsante "Altro"
-                              altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
-                              if altro_btn.is_visible(timeout=500):
-                                  altro_btn.click() # Clic asincrono per espandere il testo prima di catturarlo
-                                  time.sleep(0.2)
-                                  
-                              testo_completo = card.locator(".wiI7pd").inner_text()
-                              stelle_el = card.locator("span.kv731.v37sz1").first
-                              stelle = stelle_el.get_attribute("aria-label") if stelle_el.count() > 0 else "N/D"
-                              
-                              # Salvataggio immediato
-                              recensioni_estratte[review_id] = {
-                                  "autore": autore,
-                                  "testo": testo_completo,
-                                  "stelle": stelle
-                              }
-                              nuovi_elementi_trovati += 1
-                              
-                              if len(recensioni_estratte) >= max_recensioni:
-                                  break
-                      except Exception:
-                          # Durante lo scrolling, Playwright potrebbe fallire la lettura se Vue distrugge l'elemento a caldo.
-                          # Intercettiamo l'errore per evitare il crash dello script e passiamo alla card successiva.
-                          continue
-                  
-                  if nuovi_elementi_trovati > 0:
-                      iterazioni_senza_dati = 0
-                      print(f"[NODO {node_id}] Trovate nuove recensioni. Totale: {len(api_key_extracted)}", flush=True)
-                  else:
-                      iterazioni_senza_novita += 1
-                  
-                  # Se per 30 iterazioni non troviamo nulla di nuovo, fermiamo lo scroll
-                  if iterazioni_senza_novita >= 30:
-                      break
+          # PULIZIA PRE-AVVIO FASE PRINCIPALE
+          force_cleanup_profile(profile_dir)
 
-                  # Eseguiamo lo scroll sul contenitore specifico (non sulla pagina globale)
-                  panel.evaluate("el => el.scrollBy(0, 450)")
-                  
-                  # Pausa per permettere l'invio della richiesta AJAX e il rendering dei nodi
-                  time.sleep(random.uniform(1.2, 1.8))
-                  
-              return list(recensioni_estratte.values())
-
-          # --- RUN PRINCIPALE ---
+          # --- SCRAPING IN HTTP/2 ---
+          print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale...", flush=True)
           try:
               context = launch_persistent_context(
                   profile_dir,
@@ -248,71 +330,127 @@ jobs:
                   humanize=True,
                   human_config={
                       "typing_delay": 100,
-                      "mistype_chance": 0.02,
+                      "mistype_chance": 0.03,
                       "idle_between_actions": True
                   },
-                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+                  proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                   geoip=True,
+                  locale="it-IT",
+                  timezone_id="Europe/Rome",
                   viewport={"width": 1920, "height": 1080},
-                  args=extra_args_base
+                  args=base_args
               )
-
-              page = context.new_page()
-              
-              # Query dinamica di test
-              ricerca_target = "Coro Orvieto"
-              
-              # 1. Trova ed apre il locale gestendo la disambiguazione
-              esegui_ricerca_e_apri_scheda(page, ricerca_target)
-              
-              # 2. Estrae le recensioni in tempo reale battendo il recycling del DOM
-              recensioni = estrai_recensioni_passo_passo(page, max_recensioni=50)
-              
-              # 3. Salvataggio su file
-              output_file = f"output_node_{node_id}.txt"
-              with open(output_file, "w", encoding="utf-8") as f:
-                  f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
-                  
-              print(f"[NODO {node_id}] Esecuzione terminata. Salvate {len(recensioni)} recensioni.", flush=True)
-              
-              page.close()
-              context.close()
-
           except Exception as e:
-              print(f"[NODO {node_id}] Errore critico nel processo: {e}", flush=True)
-              with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
-                  f.write(f"ERRORE CRITICO: {e}\n")
+              print(f"[NODO {node_id}] Errore critico avvio Browser HTTP/2: {e}")
+              sys.exit(0)
+
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+
+          for url in targets:
+              print(f"[NODO {node_id}] Recupero: {url}", flush=True)
+              page = None
+              try:
+                  page = context.new_page()
+                  query_to_search = get_query_from_url(url)
+                  
+                  if "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(4)
+                      try:
+                          page.type("input#q", query_to_search)
+                          page.keyboard.press("Enter")
+                      except: page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(4)
+                      try:
+                          page.type("input[name=q]", query_to_search)
+                          page.keyboard.press("Enter")
+                      except: page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
+
+                  time.sleep(8) # Attesa passiva naturale - Impossibile da tracciare per i WAF
+
+                  # Trigger opzionale per il lazy-loading dei contenuti
+                  try:
+                      page.mouse.move(random.randint(200, 700), random.randint(200, 700))
+                      page.mouse.wheel(0, 800)
+                      time.sleep(2)
+                  except: pass
+
+                  raw_html = page.content()
+                  soup = BeautifulSoup(raw_html, 'html.parser')
+                  text = soup.get_text(separator=' ', strip=True)[:5000]
+                  text_lower = text.lower()
+
+                  blocking_indicators = [
+                      "just a moment", "are you a robot", "prove your humanity",
+                      "captcha verification", "please enter in the characters you see below",
+                      "access is forbidden", "access to this page is forbidden", "challenge-platform",
+                      "we've detected unusual activity"
+                  ]
+                  is_blocked = any(b in text_lower for b in blocking_indicators)
+
+                  if len(text) > 150 and not is_blocked:
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
+                      print(f"[NODO {node_id}] -> Successo!", flush=True)
+                  else:
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
+                      print(f"[NODO {node_id}] -> Fallito.", flush=True)
+
+              except Exception as e:
+                  print(f"[NODO {node_id}] -> Errore: {e}", flush=True)
+                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+              finally:
+                  if page:
+                      try: page.close()
+                      except: pass
+
+              time.sleep(random.uniform(2.0, 4.0))
+
+          try: context.close()
+          except: pass
+
+          with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+              f.write(results)
           EOF
 
-      - name: Esecuzione Scraping Parallelo (6 Nodi con Staggered Delay)
+      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
-          echo "Avvio processi paralleli su 6 nodi con avvio scaglionato casuale..."
+          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
+          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
+          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
+          TAIL_PID=$!
           
+          PIDS=()
           for i in {1..6}; do
-            echo "Inizializzazione del Nodo $i..."
-            python -u m2_insocket.py $i > node$i.log 2>&1 &
-            
-            if [ $i -lt 6 ]; then
-              # Delay casuale tra 5 e 15 secondi prima di far partire lo scraper successivo
-              DELAY=$((5 + RANDOM % 11))
-              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
-              sleep $DELAY
-            fi
+            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
           done
 
-          echo "Tutti i nodi sono stati instanziati. Attesa del completamento dello scraping..."
-          wait
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+          
+          for i in {1..6}; do
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
+          done
 
-          echo "=== LOG NODO 1 ===" && cat node1.log || true
-          echo "=== LOG NODO 2 ===" && cat node2.log || true
-          echo "=== LOG NODO 3 ===" && cat node3.log || true
-          echo "=== LOG NODO 4 ===" && cat node4.log || true
-          echo "=== LOG NODO 5 ===" && cat node5.log || true
-          echo "=== LOG NODO 6 ===" && cat node6.log || true
-          echo "=================="
+          touch output_node_1_step1.txt output_node_1_step2.txt \
+                output_node_2_step1.txt output_node_2_step2.txt \
+                output_node_3_step1.txt output_node_3_step2.txt \
+                output_node_4_step1.txt output_node_4_step2.txt \
+                output_node_5_step1.txt output_node_5_step2.txt \
+                output_node_6_step1.txt output_node_6_step2.txt
 
-          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
-          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
+          cat output_node_1_step1.txt output_node_1_step2.txt \
+              output_node_2_step1.txt output_node_2_step2.txt \
+              output_node_3_step1.txt output_node_3_step2.txt \
+              output_node_4_step1.txt output_node_4_step2.txt \
+              output_node_5_step1.txt output_node_5_step2.txt \
+              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
