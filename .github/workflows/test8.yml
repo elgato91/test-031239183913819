@@ -120,7 +120,6 @@ jobs:
               page.set_default_timeout(90000)
               
               # OTTIMIZZAZIONE RETE: Intercettiamo e blocchiamo immagini e tile della mappa.
-              # Maps si caricherà a una velocità sensibilmente superiore riducendo il consumo di banda.
               def block_heavy_assets(route):
                   url = route.request.url.lower()
                   if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
@@ -130,8 +129,7 @@ jobs:
                       
               page.route("**/*", block_heavy_assets)
               
-              # Usiamo 'commit' in modo che Playwright si sblocchi non appena riceve l'HTML iniziale,
-              # senza attendere il caricamento dei pesanti script asincroni e assecondando i proxy lenti.
+              # Usiamo 'commit' in modo che Playwright si sblocchi non appena riceve l'HTML iniziale
               page.goto(search_url, wait_until="commit", timeout=90000)
               
               # Diamo al motore qualche secondo di assestamento per il rendering iniziale dell'HTML
@@ -181,15 +179,15 @@ jobs:
               
               # Attendiamo che appaia la prima recensione nel DOM per confermare l'apertura
               print(f"[NODO {node_id}] Attendo caricamento della prima recensione (.jftiEf)...", flush=True)
-              page.wait_for_selector(".jftiEf", timeout=30000)
+              first_card = page.locator(".jftiEf").first
+              first_card.wait_for(state="visible", timeout=30000)
               
-              # Javascript poller per trovare dinamicamente l'antenato scrollabile della recensione.
-              # In questo modo non dipendiamo da classi CSS oscure del pannello.
+              # Troviamo dinamicamente l'antenato scrollabile valutando JS direttamente sull'elemento
+              # reale trovato da Playwright (questo supera i limiti del Shadow DOM).
+              print(f"[NODO {node_id}] Identifico dinamicamente il container scrollabile...", flush=True)
               scrollable_panel_js = """
-                  () => {
-                      const firstCard = document.querySelector('.jftiEf');
-                      if (!firstCard) return null;
-                      let parent = firstCard.parentElement;
+                  el => {
+                      let parent = el.parentElement;
                       while (parent) {
                           const style = window.getComputedStyle(parent);
                           if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
@@ -200,6 +198,7 @@ jobs:
                       return document.querySelector('div[role="feed"]') || document.body;
                   }
               """
+              scroll_container = first_card.evaluate_handle(scrollable_panel_js)
 
               recensioni_estratte = {}
               iterazioni_senza_novita = 0
@@ -216,7 +215,7 @@ jobs:
                           # ID univoco esposto da Google
                           review_id = card.get_attribute("data-review-id")
                           
-                          # Fallback generativo dell'ID
+                          # Fallback di sicurezza se manca l'ID
                           if not review_id:
                               autore_testo = card.locator(".d470gc").inner_text()
                               testo_parziale = card.locator(".wiI7pd").inner_text()[:20]
@@ -226,7 +225,7 @@ jobs:
                           if review_id not in recensioni_estratte:
                               autore = card.locator(".d470gc").inner_text()
                               
-                              # Espansione del testo lungo ("Altro")
+                              # Espandiamo il testo lungo ("Altro")
                               altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
                               if altro_btn.is_visible(timeout=500):
                                   altro_btn.click() 
@@ -256,8 +255,8 @@ jobs:
                   else:
                       iterazioni_senza_novita += 1
                       
-                  # Eseguiamo lo scroll usando il riferimento del pannello trovato dinamicamente in JS
-                  page.evaluate(f"({scrollable_panel_js})().scrollBy(0, 450)")
+                  # Eseguiamo lo scroll usando l'handle del container precedentemente rilevato
+                  scroll_container.evaluate("el => el.scrollBy(0, 450)")
                   
                   # Pausa per permettere l'invio della richiesta AJAX e il rendering dei nodi
                   time.sleep(random.uniform(1.5, 2.2))
