@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context API Fetching con Iframe Detection)
+      - name: Creazione script Python (In-Context API Fetching con Coppia Esadecimale)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -110,9 +110,9 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # --- METODO 1: RICERCA E RISOLUZIONE CID ---
+          # --- METODO 1: RICERCA E RISOLUZIONE FEATURE ID ---
           def esegui_ricerca_e_risolvi_cid(page, query):
-              """Esegue la ricerca e recupera il data-cid (ludocid) dopo il reindirizzamento."""
+              """Esegue la ricerca e recupera l'intera coppia esadecimale del CID dall'URL."""
               search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
               print(f"[NODO {node_id}] Navigazione per ricerca diretta su: {search_url}", flush=True)
               
@@ -157,44 +157,25 @@ jobs:
               except Exception:
                   print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
 
-              # Tentativo 1 (Il più stabile): Estrazione del CID convertendo la coordinata esadecimale dall'URL di Maps
-              cid = None
+              # Estrazione dell'intera coppia esadecimale (es: 0x132ecd778417bda5:0x4e6e6043f0ea67e1) dall'URL
+              # Questo è l'identificatore univoco esatto (feature_id) che Google si aspetta per le recensioni
+              feature_id = None
               current_url = page.url
-              match = re.search(r"0x[a-fA-F0-9]+:0x([a-fA-F0-9]+)", current_url)
+              match = re.search(r"0x[a-fA-F0-9]+:0x[a-fA-F0-9]+", current_url)
               if match:
-                  try:
-                      cid = str(int(match.group(1), 16))
-                      print(f"[NODO {node_id}] CID risolto via conversione esadecimale URL.", flush=True)
-                  except Exception:
-                      pass
+                  feature_id = match.group(0)
+                  print(f"[NODO {node_id}] Feature ID (coppia esadecimale) estratto con successo dall'URL.", flush=True)
               
-              # Tentativo 2: Cerca attributi data-cid o data-ludocid nel DOM
-              if not cid:
-                  cid = page.evaluate('''() => {
-                      const el = document.querySelector('[data-cid], [data-ludocid]');
-                      if (el) {
-                          return el.getAttribute('data-cid') || el.getAttribute('data-ludocid');
-                      }
-                      const link = document.querySelector('a[href*="cid="]');
-                      if (link) {
-                          const url = new URL(link.href);
-                          return url.searchParams.get("cid");
-                      }
-                      return null;
-                  }''')
-                  if cid:
-                      print(f"[NODO {node_id}] CID risolto via attributo DOM.", flush=True)
-
-              # Tentativo 3: Scansione regex dell'HTML interno di base
-              if not cid:
+              # Fallback via regex HTML se l'URL non presenta la coppia esadecimale direttamente
+              if not feature_id:
                   html = page.content()
                   match_html = re.search(r'data-cid="([0-9]+)"', html)
                   if match_html:
-                      cid = match_html.group(1)
-                      print(f"[NODO {node_id}] CID risolto via regex HTML.", flush=True)
+                      feature_id = match_html.group(1)
+                      print(f"[NODO {node_id}] CID risolto via regex HTML (Fallback).", flush=True)
 
-              print(f"[NODO {node_id}] Risultato risoluzione CID: {cid}", flush=True)
-              return cid
+              print(f"[NODO {node_id}] Risultato risoluzione Feature ID: {feature_id}", flush=True)
+              return feature_id
 
           # --- METODO 2: IN-CONTEXT API FETCHING ---
           def estrai_recensioni_in_context(page, feature_id, max_recensioni=50):
