@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context API Fetching con Coppia Esadecimale)
+      - name: Creazione script Python (In-Context API Fetching con URL-Encoding)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -110,7 +110,7 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # --- METODO 1: RICERCA E RISOLUZIONE FEATURE ID ---
+          # --- METODO 1: RICERCA E RISOLUZIONE CID ---
           def esegui_ricerca_e_risolvi_cid(page, query):
               """Esegue la ricerca e recupera l'intera coppia esadecimale del CID dall'URL."""
               search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
@@ -158,7 +158,6 @@ jobs:
                   print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
 
               # Estrazione dell'intera coppia esadecimale (es: 0x132ecd778417bda5:0x4e6e6043f0ea67e1) dall'URL
-              # Questo è l'identificatore univoco esatto (feature_id) che Google si aspetta per le recensioni
               feature_id = None
               current_url = page.url
               match = re.search(r"0x[a-fA-F0-9]+:0x[a-fA-F0-9]+", current_url)
@@ -195,7 +194,6 @@ jobs:
               time.sleep(5)
 
               # SCANSIONE DEGLI IFRAME: Identifichiamo il contesto di lavoro corretto.
-              # Se le recensioni sono caricate in un iframe, effettueremo le chiamate in quel contesto.
               work_context = page
               for frame in page.frames:
                   try:
@@ -210,11 +208,16 @@ jobs:
               start_index = 0
               ciclo = 0
               
+              # URL-encoding obbligatorio del carattere ':' per impedire a Google di confondere
+              # la coppia esadecimale con i separatori chiave:valore del parametro async
+              feature_id_encoded = feature_id.replace(":", "%3A")
+              
               print(f"[NODO {node_id}] Inizio fetch asincroni all'interno del contesto di lavoro...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
-                  ajax_url = f"https://www.google.com/async/reviewSort?yv=3&async=feature_id:{feature_id},_id:reviewSort,_p:true,menu:true,sort_by:qualityScore,start_index:{start_index},_fmt:pc"
+                  # Query allineata con l'esatta struttura attesa dai server di ricerca Google
+                  ajax_url = f"https://www.google.com/async/reviewSort?yv=3&async=feature_id:{feature_id_encoded},review_source:All%20reviews,sort_by:qualityScore,start_index:{start_index},is_owner:false,filter_text:,associated_topic:,next_page_token:,_pms:s,_fmt:pc"
                   
                   # Chiamata fetch ereditando la sessione reale del browser
                   print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
@@ -231,6 +234,9 @@ jobs:
                       if html_chunk.startswith("ERRORE:"):
                           print(f"[NODO {node_id}] Errore nel fetch browser-side: {html_chunk}", flush=True)
                           break
+                          
+                      # Stampa diagnostica per ispezionare l'avvio della risposta grezza ricevuta
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Risposta ricevuta (lunghezza {len(html_chunk)}): {html_chunk[:200]}...", flush=True)
                           
                       soup = BeautifulSoup(html_chunk, 'html.parser')
                       review_elements = soup.find_all(class_="gws-localreviews__google-review")
