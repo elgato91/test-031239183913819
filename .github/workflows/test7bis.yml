@@ -83,7 +83,6 @@ jobs:
               "https://www.canadianinsider.com/money-is-moving"
           ]
           
-          # Suddivisione matematica statica (Chunking)
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
@@ -229,11 +228,11 @@ jobs:
               with open(f"/tmp/step2_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
                   
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare.")
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Sincrono Hardened)
+      - name: Creazione Script Python - STEP 2 (Sincrono Hardened - Ripristinato 100% Stealth)
         run: |
           cat << 'EOF' > m2_step2.py
           import time
@@ -259,18 +258,20 @@ jobs:
               except: pass
               return default
 
-          # FUNZIONE DI PULIZIA FORCELLA LOCKS (Previene SingletonLock)
+          # PULIZIA PROCESSI COMPLETA (Previene "Opening in existing browser session")
           def force_cleanup_profile(profile_dir):
               try:
-                  subprocess.run(["pkill", "-9", "-f", profile_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(["pkill", "-9", "-f", "chrome"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(["pkill", "-9", "-f", "Chromium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
               except: pass
-              time.sleep(1.0)
-              for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-                  fp = os.path.join(profile_dir, lock_file)
-                  try:
-                      if os.path.islink(fp) or os.path.exists(fp):
-                          os.unlink(fp)
-                  except: pass
+              time.sleep(1.5)
+              if os.path.exists(profile_dir):
+                  for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                      fp = os.path.join(profile_dir, lock_file)
+                      try:
+                          if os.path.islink(fp) or os.path.exists(fp):
+                              os.unlink(fp)
+                      except: pass
               time.sleep(1.0)
 
           queue_file = f"/tmp/step2_queue_{node_id}.json"
@@ -302,9 +303,7 @@ jobs:
                   profile_dir,
                   headless=False,
                   proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                  geoip=True,
-                  locale="it-IT",
-                  timezone_id="Europe/Rome",
+                  geoip=True, # Gestisce lingua e fuso orario in modo coerente con l'IP senza conflitti rigidi
                   args=base_args + ["--disable-http2"]
               )
               wp = warmup_ctx.new_page()
@@ -318,7 +317,7 @@ jobs:
           except Exception as e:
               print(f"[NODO {node_id}] Errore Warmup: {e}", flush=True)
 
-          # PULIZIA PRE-AVVIO FASE PRINCIPALE
+          # PULIZIA PROCESSI PRIMA DEL SECONDO AVVIO
           force_cleanup_profile(profile_dir)
 
           # --- SCRAPING IN HTTP/2 ---
@@ -334,9 +333,7 @@ jobs:
                       "idle_between_actions": True
                   },
                   proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                  geoip=True,
-                  locale="it-IT",
-                  timezone_id="Europe/Rome",
+                  geoip=True, # Coerenza totale della geolocalizzazione dinamica nativa
                   viewport={"width": 1920, "height": 1080},
                   args=base_args
               )
@@ -370,9 +367,9 @@ jobs:
                   else:
                       page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                  time.sleep(8) # Attesa passiva naturale - Impossibile da tracciare per i WAF
+                  time.sleep(8) # Attesa passiva naturale, nessun CDP evaluate inviato ai WAF
 
-                  # Trigger opzionale per il lazy-loading dei contenuti
+                  # Trigger passivo per il caricamento dinamico
                   try:
                       page.mouse.move(random.randint(200, 700), random.randint(200, 700))
                       page.mouse.wheel(0, 800)
