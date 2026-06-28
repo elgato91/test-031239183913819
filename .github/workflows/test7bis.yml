@@ -315,8 +315,6 @@ jobs:
                       headless=False,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      locale="it-IT",
-                      timezone_id="Europe/Rome",
                       args=base_args + ["--disable-http2"]
                   )
                   wp = await warmup_ctx.new_page()
@@ -338,8 +336,6 @@ jobs:
                       human_config={"typing_delay": 90, "mistype_chance": 0.02, "idle_between_actions": True},
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      locale="it-IT",
-                      timezone_id="Europe/Rome",
                       viewport={"width": 1920, "height": 1080},
                       args=base_args
                   )
