@@ -8,24 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Font di Sistema
+      - name: Installazione Dipendenze Leggere (No Browser/No UI)
         run: |
           sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
-          mkdir -p ~/.local/share/fonts/windows
-          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
-          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
-          fc-cache -f -v
-
-      - name: Installazione Dipendenze Scraper
-        run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
-          playwright install-deps chromium
+          # Installiamo solo le librerie Python per HTTP, SOCKS5 e parsing HTML
+          pip install beautifulsoup4 requests "requests[socks]"
 
       - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
@@ -70,16 +57,7 @@ jobs:
           fi
           echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Pre-inizializzazione Cache CloakBrowser
-        run: |
-          python -m cloakbrowser install
-
-      - name: Creazione script Python (Estrazione Recensioni Google Maps)
+      - name: Creazione script Python (Protocol Emulation - async/reviewSort)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -88,7 +66,8 @@ jobs:
           import os
           import re
           import json
-          from cloakbrowser import launch_persistent_context
+          import requests
+          from bs4 import BeautifulSoup
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -96,241 +75,139 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          # --- CONFIGURAZIONE CLOAKBROWSER ---
-          random_seed = str(random.randint(100000, 999999))
-          home_dir = os.path.expanduser("~")
-          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
+          # Configurazione del proxy locale fornito dal tuo container Docker
+          PROXIES = {
+              "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
+              "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
+          }
 
-          extra_args_base = [
-              "--no-sandbox",
-              "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}"
-          ]
+          # User-Agent standard per evitare blocchi immediati su richieste socket
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+          }
 
-          # --- METODO 1: RICERCA E DISAMBIGUAZIONE ---
-          def esegui_ricerca_e_apri_scheda(page, query):
-              """Risolve la ricerca e si assicura che la scheda del luogo sia aperta."""
-              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-              print(f"[NODO {node_id}] Eseguo ricerca diretta su URL: {search_url}", flush=True)
+          def estrai_feature_id(query):
+              """Esegue una ricerca rapida su Google ed estrae il data-cid (ludocid) del locale."""
+              search_url = "https://www.google.com/search"
+              params = {"q": query, "hl": "it"}
               
-              # Impostiamo timeout ampi per non incorrere nel limite dei 30s di default
-              page.set_default_navigation_timeout(90000)
-              page.set_default_timeout(90000)
+              print(f"[NODO {node_id}] Risoluzione entità per: '{query}'...", flush=True)
+              response = requests.get(search_url, headers=HEADERS, params=params, proxies=PROXIES, timeout=15)
               
-              # OTTIMIZZAZIONE RETE: Intercettiamo e blocchiamo immagini e tile della mappa.
-              def block_heavy_assets(route):
-                  url = route.request.url.lower()
-                  if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
-                      route.abort()
-                  else:
-                      route.continue_()
-                      
-              page.route("**/*", block_heavy_assets)
+              if response.status_code != 200:
+                  raise ConnectionError(f"Impossibile contattare Google Search (Status: {response.status_code})")
               
-              # Usiamo 'commit' in modo che Playwright si sblocchi non appena riceve l'HTML iniziale
-              page.goto(search_url, wait_until="commit", timeout=90000)
-              
-              # Diamo al motore qualche secondo di assestamento per il rendering iniziale dell'HTML
-              time.sleep(6)
-              
-              # Gestione del Cookie Consent di Google se presente
-              try:
-                  consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                  if consent_btn.is_visible(timeout=5000):
-                      consent_btn.click()
-                      time.sleep(3)
-              except Exception:
-                  pass
-
-              # Attendiamo in modo reattivo l'apparizione degli elementi essenziali (elenco o pulsanti della scheda)
-              try:
-                  page.locator("a[href*='/maps/place/'], button[aria-label*='recensioni'], button[aria-label*='Reviews'], button[role='tab']").first.wait_for(timeout=30000)
-              except Exception:
-                  pass
-
-              # Verifica se siamo finiti su un elenco (Caso B) o direttamente sulla scheda (Caso A)
-              risultati_ricerca = page.locator("a[href*='/maps/place/']")
-              
-              if risultati_ricerca.count() > 0:
-                  print(f"[NODO {node_id}] Rilevato elenco di disambiguazione. Seleziono il primo risultato...", flush=True)
-                  # Clicchiamo sul primo risultato dell'elenco
-                  risultati_ricerca.first.click()
-                  time.sleep(5)
+              # Cerchiamo il pattern del data-cid / ludocid nel sorgente HTML
+              match_cid = re.search(r'data-cid="([0-9]+)"', response.text)
+              if not match_cid:
+                  match_cid = re.search(r'data-ludocid="([0-9]+)"', response.text)
+                  
+              if match_cid:
+                  feature_id = match_cid.group(1)
+                  print(f"[NODO {node_id}] Entità risolta con successo. Feature ID (CID): {feature_id}", flush=True)
+                  return feature_id
               else:
-                  print(f"[NODO {node_id}] Direct Hit! Scheda del luogo aperta direttamente.", flush=True)
+                  raise ValueError("Impossibile trovare il Feature ID (CID) per questa attività commerciale.")
 
-          # --- METODO 2: ESTRAZIONE CON FINESTRA SCORREVOLE (SLIDING WINDOW) ---
-          def estrai_recensioni_passo_passo(page, max_recensioni=100):
-              """Estrae le recensioni in tempo reale gestendo la distruzione dei nodi nel DOM."""
-              # 1. Clicchiamo sul tab delle recensioni usando il ruolo semantico ARIA tab, molto più stabile
-              tab_recensioni = page.locator("button[role='tab']:has-text('Recensioni'), button[role='tab']:has-text('Reviews')").first
-              
-              if tab_recensioni.is_visible(timeout=8000):
-                  print(f"[NODO {node_id}] Clicco sul tab Recensioni...", flush=True)
-                  tab_recensioni.click()
-              else:
-                  # Fallback su bottone classico se l'interfaccia è in modalità mista
-                  review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
-                  review_tab.wait_for(state="visible", timeout=15000)
-                  print(f"[NODO {node_id}] Clicco sul pulsante recensioni di ripiego...", flush=True)
-                  review_tab.click()
-              
-              # Attendiamo che appaia la prima recensione nel DOM per confermare l'apertura
-              print(f"[NODO {node_id}] Attendo caricamento della prima recensione (.jftiEf)...", flush=True)
-              first_card = page.locator(".jftiEf").first
-              first_card.wait_for(state="visible", timeout=30000)
-              
-              # Troviamo dinamicamente l'antenato scrollabile valutando JS direttamente sull'elemento
-              # reale trovato da Playwright (questo supera i limiti del Shadow DOM).
-              print(f"[NODO {node_id}] Identifico dinamicamente il container scrollabile...", flush=True)
-              scrollable_panel_js = """
-                  el => {
-                      let parent = el.parentElement;
-                      while (parent) {
-                          const style = window.getComputedStyle(parent);
-                          if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                              return parent;
-                          }
-                          parent = parent.parentElement;
-                      }
-                      return document.querySelector('div[role="feed"]') || document.body;
-                  }
-              """
-              scroll_container = first_card.evaluate_handle(scrollable_panel_js)
-
-              recensioni_estratte = {}
-              iterazioni_senza_novita = 0
+          def scarica_recensioni_protocollo(feature_id, max_recensioni=50):
+              """Interroga direttamente l'endpoint AJAX delle recensioni ed esegue il parsing."""
+              recensioni_estratte = []
+              start_index = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
+              print(f"[NODO {node_id}] Avvio estrazione tramite protocollo HTTP/REST...", flush=True)
               
-              while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 30:
+              while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
-                  # Recupera tutte le card delle recensioni attualmente caricate nel viewport
-                  cards = page.locator(".jftiEf").all()
-                  nuovi_elementi_trovati = 0
+                  # Endpoint interno AJAX di Google per il sorting e la paginazione delle recensioni
+                  ajax_url = "https://www.google.com/async/reviewSort"
                   
-                  for card in cards:
-                      try:
-                          # Estrazione dell'attributo data-review-id con timeout minimo di sicurezza
-                          review_id = card.get_attribute("data-review-id", timeout=1000)
-                          
-                          # Fallback di sicurezza se manca l'ID
-                          if not review_id:
-                              autore_testo = card.locator(".d470gc").inner_text(timeout=1000)
-                              testo_parziale = card.locator(".wiI7pd").inner_text(timeout=1000)[:20]
-                              review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
-                          
-                          # Se non ancora estratto, leggiamo i dati
-                          if review_id not in recensioni_estratte:
-                              # Controllo non bloccante della presenza dell'autore
-                              autore_el = card.locator(".d470gc, .TSv7un, .X7N63e, [class*='name']").first
-                              autore = "Utente Google"
-                              if autore_el.count() > 0:
-                                  autore = autore_el.inner_text(timeout=1000)
-                              
-                              # Espandiamo il testo lungo ("Altro") se presente
-                              altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
-                              if altro_btn.is_visible(timeout=500):
-                                  altro_btn.click() 
-                                  time.sleep(0.2)
-                                  
-                              # Controllo non bloccante della presenza del testo
-                              testo_el = card.locator(".wiI7pd, [class*='text']").first
-                              testo_completo = ""
-                              if testo_el.count() > 0:
-                                  testo_completo = testo_el.inner_text(timeout=1000)
-                              
-                              # Controllo non bloccante della presenza delle stelle
-                              stelle_el = card.locator("span.kv731.v37sz1, [class*='rating'], [class*='star']").first
-                              stelle = "N/D"
-                              if stelle_el.count() > 0:
-                                  stelle = stelle_el.get_attribute("aria-label", timeout=1000) or "N/D"
-                              
-                              # Salvataggio immediato nell'accumulatore
-                              recensioni_estratte[review_id] = {
-                                  "autore": autore,
-                                  "testo": testo_completo,
-                                  "stelle": stelle
-                              }
-                              nuovi_elementi_trovati += 1
-                              
-                              if len(recensioni_estratte) >= max_recensioni:
-                                  break
-                      except Exception:
-                          # Tolleriamo nodi distrutti o disallineamenti temporanei dello scroll
-                          continue
+                  # Parametri strutturati richiesti dal protocollo di Google
+                  params = {
+                      "yv": "3",
+                      "async": f"feature_id:{feature_id},_id:reviewSort,_p:true,menu:true,sort_by:qualityScore,start_index:{start_index},_fmt:pc"
+                  }
                   
-                  if nuovi_elementi_trovati > 0:
-                      iterazioni_senza_novita = 0
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuovi_elementi_trovati} nuove recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
-                  else:
-                      iterazioni_senza_novita += 1
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Nessun nuovo elemento rilevato. Tentativi a vuoto: {iterazioni_senza_novita}/30", flush=True)
-                      
-                  # Eseguiamo lo scroll usando l'handle del container precedentemente rilevato
-                  try:
-                      scroll_container.evaluate("el => el.scrollBy(0, 450)")
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore durante l'esecuzione dello scroll JS: {e}", flush=True)
+                  response = requests.get(ajax_url, headers=HEADERS, params=params, proxies=PROXIES, timeout=15)
+                  
+                  if response.status_code != 200:
+                      print(f"[NODO {node_id}] Errore durante la paginazione all'indice {start_index}.", flush=True)
                       break
+                      
+                  soup = BeautifulSoup(response.text, 'html.parser')
                   
-                  # Pausa per permettere l'invio della richiesta AJAX e il rendering dei nodi
-                  time.sleep(random.uniform(1.8, 2.5))
+                  # Le recensioni all'interno di questo frammento HTML sono racchiuse in div con classe 'gws-localreviews__google-review'
+                  review_elements = soup.find_all(class_="gws-localreviews__google-review")
                   
-              return list(recensioni_estratte.values())
+                  if not review_elements:
+                      print(f"[NODO {node_id}] Nessun elemento trovato all'indice {start_index}. Fine delle recensioni disponibili.", flush=True)
+                      break
+                      
+                  nuove_estratte_ciclo = 0
+                  for el in review_elements:
+                      try:
+                          # Estrazione autore con fallback non bloccanti
+                          autore_tag = el.find(class_="TSv7un") or el.find(class_="d470gc")
+                          autore = autore_tag.get_text(strip=True) if autore_tag else "Utente Google"
+                          
+                          # Estrazione testo con fallback
+                          testo_tag = el.find(class_="wiI7pd")
+                          testo = testo_tag.get_text(strip=True) if testo_tag else ""
+                          
+                          # Estrazione valutazione (stelle)
+                          stelle_tag = el.find(class_="kv731") or el.find(attrs={"aria-label": True})
+                          stelle = stelle_tag["aria-label"] if stelle_tag else "N/D"
+                          
+                          recensioni_estratte.append({
+                              "autore": autore,
+                              "testo": testo,
+                              "stelle": stelle
+                          })
+                          nuove_estratte_ciclo += 1
+                          
+                          if len(recensioni_estratte) >= max_recensioni:
+                              break
+                      except Exception:
+                          continue
+                          
+                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuove_estratte_ciclo} nuove recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
+                  
+                  # Google impagina le recensioni a blocchi di 10
+                  start_index += 10
+                  
+                  # Leggera pausa casuale per simulare intervalli di rete standard
+                  time.sleep(random.uniform(0.5, 1.2))
+                  
+              return recensioni_estratte
 
-          # --- RUN PRINCIPALE ---
+          # --- FLUSSO PRINCIPALE ---
           try:
-              context = launch_persistent_context(
-                  profile_dir,
-                  headless=False,
-                  humanize=True,
-                  human_config={
-                      "typing_delay": 100,
-                      "mistype_chance": 0.02,
-                      "idle_between_actions": True
-                  },
-                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-                  geoip=True,
-                  viewport={"width": 1920, "height": 1080},
-                  args=extra_args_base
-              )
-
-              page = context.new_page()
-              
-              # Query dinamica di test
               ricerca_target = "Coro Orvieto"
               
-              # 1. Trova ed apre il locale gestendo la disambiguazione
-              esegui_ricerca_e_apri_scheda(page, ricerca_target)
+              # 1. Risoluzione dell'ID
+              f_id = estrai_feature_id(ricerca_target)
               
-              # 2. Estrae le recensioni in tempo reale battendo il recycling del DOM
-              recensioni = estrai_recensioni_passo_passo(page, max_recensioni=50)
+              # 2. Estrazione diretta dei payload
+              recensioni = scarica_recensioni_protocollo(f_id, max_recensioni=50)
               
-              # 3. Salvataggio su file
+              # 3. Salvataggio dell'output strutturato
               output_file = f"output_node_{node_id}.txt"
               with open(output_file, "w", encoding="utf-8") as f:
                   f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
                   
-              print(f"[NODO {node_id}] Esecuzione terminata. Salvate {len(recensioni)} recensioni.", flush=True)
-              
-              page.close()
-              context.close()
+              print(f"[NODO {node_id}] Task completata! Salvate {len(recensioni)} recensioni.", flush=True)
 
           except Exception as e:
-              print(f"[NODO {node_id}] Errore critico nel processo: {e}", flush=True)
+              print(f"[NODO {node_id}] Errore nel protocollo: {e}", flush=True)
               with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
                   f.write(f"ERRORE CRITICO: {e}\n")
           EOF
 
-      - name: Esecuzione Scraping Singolo Nodo
+      - name: Esecuzione Scraping Singolo Nodo (In-Socket)
         run: |
           echo "Avvio processo su un singolo nodo (Nodo 1)..."
-          # Eseguiamo direttamente lo script senza salvare in un file log cieco.
-          # Questo mostrerà l'output di Playwright in tempo reale sulla console di GitHub.
+          # Eseguiamo lo script direttamente. L'output a terminale sarà istantaneo.
           python -u m2_insocket.py 1
           
           # Consolidamento dell'output per l'artifact
