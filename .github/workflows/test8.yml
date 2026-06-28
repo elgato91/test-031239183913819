@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context API listentitiesreviews)
+      - name: Creazione script Python (In-Context RPC listentitiesreviews)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -175,21 +175,22 @@ jobs:
 
           # --- METODO 2: IN-CONTEXT JSON FETCHING ---
           def estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50):
-              """Effettua le chiamate fetch all'endpoint nativo di Maps ereditando la sessione reale."""
+              """Effettua le chiamate fetch all'endpoint nativo di Maps rpc ereditando la sessione reale."""
               recensioni_estratte = []
               start_index = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro...", flush=True)
+              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro (RPC)...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
                   
                   # Costruiamo il parametro pb nativo richiesto da Google Maps per le recensioni
                   pb_param = f"!1m2!1y{id_y}!2y{cid}!2m2!1i{start_index}!2i10!3e1!4m5!3b1!4b1!5b1!6b1!7b1"
-                  ajax_url = f"https://www.google.com/maps/preview/review/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_param}"
+                  # URL corretto puntato sulla directory dei servizi rpc
+                  ajax_url = f"https://www.google.com/maps/rpc/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_param}"
                   
-                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
+                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata RPC fetch per indice {start_index}...", flush=True)
                   try:
                       json_raw = page.evaluate("""async (url) => {
                           try {
@@ -223,7 +224,7 @@ jobs:
                       nuove_estratte = 0
                       for r in raw_reviews:
                           try:
-                              # Struttura tipica del JSON di listentitiesreviews:
+                              # Struttura del JSON di listentitiesreviews:
                               # r[3] -> Testo della recensione
                               # r[0][1] -> Autore
                               # r[4] -> Stelle (valutazione numerica da 1 a 5)
@@ -278,7 +279,7 @@ jobs:
               id_y, cid = esegui_ricerca_e_risolvi_coordinate(page, ricerca_target)
               
               if id_y and cid:
-                  # 2. Estrazione diretta dei payload JSON dal contesto (In-Context)
+                  # 2. Estrazione diretta dei payload JSON dal contesto (In-Context) senza cliccare alcun tasto
                   recensioni = estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50)
               else:
                   raise ValueError("Impossibile risolvere le coordinate id_y o cid del locale.")
