@@ -232,7 +232,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Sincrono Hardened - Ripristinato 100% Stealth)
+      - name: Creazione Script Python - STEP 2 (Sincrono Puro - Stealth 100%)
         run: |
           cat << 'EOF' > m2_step2.py
           import time
