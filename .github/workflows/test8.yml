@@ -202,38 +202,52 @@ jobs:
 
               recensioni_estratte = {}
               iterazioni_senza_novita = 0
+              ciclo = 0
               
               print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 30:
+                  ciclo += 1
                   # Recupera tutte le card delle recensioni attualmente caricate nel viewport
                   cards = page.locator(".jftiEf").all()
                   nuovi_elementi_trovati = 0
                   
                   for card in cards:
                       try:
-                          # ID univoco esposto da Google
-                          review_id = card.get_attribute("data-review-id")
+                          # Estrazione dell'attributo data-review-id con timeout minimo di sicurezza
+                          review_id = card.get_attribute("data-review-id", timeout=1000)
                           
                           # Fallback di sicurezza se manca l'ID
                           if not review_id:
-                              autore_testo = card.locator(".d470gc").inner_text()
-                              testo_parziale = card.locator(".wiI7pd").inner_text()[:20]
+                              autore_testo = card.locator(".d470gc").inner_text(timeout=1000)
+                              testo_parziale = card.locator(".wiI7pd").inner_text(timeout=1000)[:20]
                               review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
                           
                           # Se non ancora estratto, leggiamo i dati
                           if review_id not in recensioni_estratte:
-                              autore = card.locator(".d470gc").inner_text()
+                              # Controllo non bloccante della presenza dell'autore
+                              autore_el = card.locator(".d470gc, .TSv7un, .X7N63e, [class*='name']").first
+                              autore = "Utente Google"
+                              if autore_el.count() > 0:
+                                  autore = autore_el.inner_text(timeout=1000)
                               
-                              # Espandiamo il testo lungo ("Altro")
+                              # Espandiamo il testo lungo ("Altro") se presente
                               altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
                               if altro_btn.is_visible(timeout=500):
                                   altro_btn.click() 
                                   time.sleep(0.2)
                                   
-                              testo_completo = card.locator(".wiI7pd").inner_text()
-                              stelle_el = card.locator("span.kv731.v37sz1").first
-                              stelle = stelle_el.get_attribute("aria-label") if stelle_el.count() > 0 else "N/D"
+                              # Controllo non bloccante della presenza del testo
+                              testo_el = card.locator(".wiI7pd, [class*='text']").first
+                              testo_completo = ""
+                              if testo_el.count() > 0:
+                                  testo_completo = testo_el.inner_text(timeout=1000)
+                              
+                              # Controllo non bloccante della presenza delle stelle
+                              stelle_el = card.locator("span.kv731.v37sz1, [class*='rating'], [class*='star']").first
+                              stelle = "N/D"
+                              if stelle_el.count() > 0:
+                                  stelle = stelle_el.get_attribute("aria-label", timeout=1000) or "N/D"
                               
                               # Salvataggio immediato nell'accumulatore
                               recensioni_estratte[review_id] = {
@@ -246,20 +260,25 @@ jobs:
                               if len(recensioni_estratte) >= max_recensioni:
                                   break
                       except Exception:
-                          # Tolleriamo nodi distrutti dallo scrolling a caldo
+                          # Tolleriamo nodi distrutti o disallineamenti temporanei dello scroll
                           continue
                   
                   if nuovi_elementi_trovati > 0:
                       iterazioni_senza_novita = 0
-                      print(f"[NODO {node_id}] Scaricate {len(recensioni_estratte)} recensioni uniche...", flush=True)
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuovi_elementi_trovati} nuove recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
                   else:
                       iterazioni_senza_novita += 1
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Nessun nuovo elemento rilevato. Tentativi a vuoto: {iterazioni_senza_novita}/30", flush=True)
                       
                   # Eseguiamo lo scroll usando l'handle del container precedentemente rilevato
-                  scroll_container.evaluate("el => el.scrollBy(0, 450)")
+                  try:
+                      scroll_container.evaluate("el => el.scrollBy(0, 450)")
+                  except Exception as e:
+                      print(f"[NODO {node_id}] Errore durante l'esecuzione dello scroll JS: {e}", flush=True)
+                      break
                   
                   # Pausa per permettere l'invio della richiesta AJAX e il rendering dei nodi
-                  time.sleep(random.uniform(1.5, 2.2))
+                  time.sleep(random.uniform(1.8, 2.5))
                   
               return list(recensioni_estratte.values())
 
