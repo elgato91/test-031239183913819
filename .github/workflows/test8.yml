@@ -148,7 +148,7 @@ jobs:
 
               # Attendiamo in modo reattivo l'apparizione degli elementi essenziali (elenco o pulsanti della scheda)
               try:
-                  page.locator("a[href*='/maps/place/'], button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first.wait_for(timeout=30000)
+                  page.locator("a[href*='/maps/place/'], button[aria-label*='recensioni'], button[aria-label*='Reviews'], button[role='tab']").first.wait_for(timeout=30000)
               except Exception:
                   pass
 
@@ -166,16 +166,40 @@ jobs:
           # --- METODO 2: ESTRAZIONE CON FINESTRA SCORREVOLE (SLIDING WINDOW) ---
           def estrai_recensioni_passo_passo(page, max_recensioni=100):
               """Estrae le recensioni in tempo reale gestendo la distruzione dei nodi nel DOM."""
-              # 1. Clicchiamo sul tab delle recensioni
-              review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
-              review_tab.wait_for(state="visible", timeout=15000)
-              review_tab.click()
-              time.sleep(5)
+              # 1. Clicchiamo sul tab delle recensioni usando il ruolo semantico ARIA tab, molto più stabile
+              tab_recensioni = page.locator("button[role='tab']:has-text('Recensioni'), button[role='tab']:has-text('Reviews')").first
               
-              # 2. Identifichiamo il selettore del sotto-pannello scrollabile
-              panel = page.locator("div[role='feed']").first
-              if not panel.is_visible():
-                  panel = page.locator("div.m6QErb.DDoB2b").first
+              if tab_recensioni.is_visible(timeout=8000):
+                  print(f"[NODO {node_id}] Clicco sul tab Recensioni...", flush=True)
+                  tab_recensioni.click()
+              else:
+                  # Fallback su bottone classico se l'interfaccia è in modalità mista
+                  review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
+                  review_tab.wait_for(state="visible", timeout=15000)
+                  print(f"[NODO {node_id}] Clicco sul pulsante recensioni di ripiego...", flush=True)
+                  review_tab.click()
+              
+              # Attendiamo che appaia la prima recensione nel DOM per confermare l'apertura
+              print(f"[NODO {node_id}] Attendo caricamento della prima recensione (.jftiEf)...", flush=True)
+              page.wait_for_selector(".jftiEf", timeout=30000)
+              
+              # Javascript poller per trovare dinamicamente l'antenato scrollabile della recensione.
+              # In questo modo non dipendiamo da classi CSS oscure del pannello.
+              scrollable_panel_js = """
+                  () => {
+                      const firstCard = document.querySelector('.jftiEf');
+                      if (!firstCard) return null;
+                      let parent = firstCard.parentElement;
+                      while (parent) {
+                          const style = window.getComputedStyle(parent);
+                          if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                              return parent;
+                          }
+                          parent = parent.parentElement;
+                      }
+                      return document.querySelector('div[role="feed"]') || document.body;
+                  }
+              """
 
               recensioni_estratte = {}
               iterazioni_senza_novita = 0
@@ -183,26 +207,26 @@ jobs:
               print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 30:
-                  # Recupera tutte le card delle recensioni attualmente caricate in memoria
+                  # Recupera tutte le card delle recensioni attualmente caricate nel viewport
                   cards = page.locator(".jftiEf").all()
                   nuovi_elementi_trovati = 0
                   
                   for card in cards:
                       try:
-                          # Google Maps espone l'ID univoco della recensione nel tag HTML
+                          # ID univoco esposto da Google
                           review_id = card.get_attribute("data-review-id")
                           
-                          # Fallback di sicurezza se manca l'ID
+                          # Fallback generativo dell'ID
                           if not review_id:
                               autore_testo = card.locator(".d470gc").inner_text()
                               testo_parziale = card.locator(".wiI7pd").inner_text()[:20]
                               review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
                           
-                          # Se la chiave non è presente nel nostro dizionario di accumulo, la estraiamo
+                          # Se non ancora estratto, leggiamo i dati
                           if review_id not in recensioni_estratte:
                               autore = card.locator(".d470gc").inner_text()
                               
-                              # Espandiamo il testo lungo ("Altro") prima della cattura
+                              # Espansione del testo lungo ("Altro")
                               altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
                               if altro_btn.is_visible(timeout=500):
                                   altro_btn.click() 
@@ -212,7 +236,7 @@ jobs:
                               stelle_el = card.locator("span.kv731.v37sz1").first
                               stelle = stelle_el.get_attribute("aria-label") if stelle_el.count() > 0 else "N/D"
                               
-                              # Salvataggio immediato
+                              # Salvataggio immediato nell'accumulatore
                               recensioni_estratte[review_id] = {
                                   "autore": autore,
                                   "testo": testo_completo,
@@ -223,7 +247,7 @@ jobs:
                               if len(recensioni_estratte) >= max_recensioni:
                                   break
                       except Exception:
-                          # Ignoriamo gli elementi che spariscono durante lo scroll
+                          # Tolleriamo nodi distrutti dallo scrolling a caldo
                           continue
                   
                   if nuovi_elementi_trovati > 0:
@@ -232,8 +256,8 @@ jobs:
                   else:
                       iterazioni_senza_novita += 1
                       
-                  # Eseguiamo lo scroll sul contenitore specifico
-                  panel.evaluate("el => el.scrollBy(0, 450)")
+                  # Eseguiamo lo scroll usando il riferimento del pannello trovato dinamicamente in JS
+                  page.evaluate(f"({scrollable_panel_js})().scrollBy(0, 450)")
                   
                   # Pausa per permettere l'invio della richiesta AJAX e il rendering dei nodi
                   time.sleep(random.uniform(1.5, 2.2))
