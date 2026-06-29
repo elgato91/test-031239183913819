@@ -16,16 +16,11 @@ jobs:
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER
+          # COPIA DEI FONT WINDOWS (Essenziale per i controlli di fingerprinting sui font)
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
-
-      - name: Installazione Dipendenze Scraper
-        run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
-          playwright install-deps chromium
 
       - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
@@ -70,251 +65,81 @@ jobs:
           fi
           echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Avvio Xvfb (Virtual Display Headful per UC Mode)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Pre-inizializzazione Cache CloakBrowser
+      - name: Clona e Configura George's Scraper
         run: |
-          python -m cloakbrowser install
-
-      - name: Creazione script Python (Estrazione Recensioni via OS Wheel Scroll)
-        run: |
-          cat << 'EOF' > m2_insocket.py
-          import time
-          import sys
-          import random
-          import os
-          import re
-          import json
-          from cloakbrowser import launch_persistent_context
-
-          if len(sys.argv) < 2:
-              sys.exit(1)
-
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-
-          # --- CONFIGURAZIONE CLOAKBROWSER ---
-          random_seed = str(random.randint(100000, 999999))
-          home_dir = os.path.expanduser("~")
-          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
-
-          extra_args_base = [
-              "--no-sandbox",
-              "--disable-dev-shm-usage",
-              f"--fingerprint={random_seed}",
-              f"--fingerprint-fonts-dir={windows_fonts_dir}"
-          ]
-
-          # --- METODO 1: RICERCA E APERTURA SCHEDA ---
-          def esegui_ricerca_e_apri_scheda(page, query):
-              """Esegue la ricerca su Maps attendendo il reindirizzamento definitivo."""
-              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-              print(f"[NODO {node_id}] Navigazione su: {search_url}", flush=True)
-              
-              page.set_default_navigation_timeout(90000)
-              page.set_default_timeout(90000)
-              
-              # Carichiamo la pagina normalmente consentendo l'esecuzione di tutti i JS di Maps
-              page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
-              
-              time.sleep(8)
-              
-              # Gestione del Cookie Consent di Google se presente
-              try:
-                  print(f"[NODO {node_id}] Controllo presenza Cookie Consent...", flush=True)
-                  consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all'), button[aria-label*='Accetta'], button[aria-label*='Accept']").first
-                  if consent_btn.is_visible(timeout=5000):
-                      print(f"[NODO {node_id}] Cookie Consent trovato. Accetto...", flush=True)
-                      consent_btn.click()
-                      time.sleep(3)
-              except Exception as e:
-                  print(f"[NODO {node_id}] Nessun Cookie Consent rilevato o errore: {e}", flush=True)
-
-              # Gestione della disambiguazione (se compare l'elenco dei risultati)
-              risultati_ricerca = page.locator("a[href*='/maps/place/']")
-              if risultati_ricerca.count() > 0:
-                  print(f"[NODO {node_id}] Rilevato elenco. Clicco sul primo risultato...", flush=True)
-                  risultati_ricerca.first.click()
-                  time.sleep(5)
-              else:
-                  print(f"[NODO {node_id}] Scheda aperta direttamente.", flush=True)
-
-              # Attendiamo l'assestamento definitivo dell'URL
-              try:
-                  page.wait_for_url("**/maps/place/**", timeout=25000)
-                  print(f"[NODO {node_id}] Reindirizzamento completato: {page.url}", flush=True)
-              except Exception:
-                  pass
-
-          # --- METODO 2: ESTRAZIONE CON OS-LEVEL WHEEL SCROLL ---
-          def estrai_recensioni_passo_passo_ui(page, max_recensioni=50):
-              """Estrae le recensioni simulando eventi fisici di scroll della rotellina del mouse."""
-              # 1. Tentativo di apertura del pannello recensioni usando più selettori stabili in cascata
-              print(f"[NODO {node_id}] Tento l'apertura delle recensioni...", flush=True)
-              successo_apertura = False
-              
-              for selector in [
-                  "button[role='tab']:has-text('Recensioni')",
-                  "button[role='tab']:has-text('Reviews')",
-                  "div.F7nice",
-                  "span.F7nice",
-                  "button[aria-label*='recensioni']",
-                  "button[aria-label*='Reviews']"
-              ]:
-                  try:
-                      el = page.locator(selector).first
-                      if el.is_visible(timeout=3000):
-                          el.click()
-                          print(f"[NODO {node_id}] Cliccato con successo sul selettore di apertura: {selector}", flush=True)
-                          successo_apertura = True
-                          break
-                  except Exception:
-                      continue
-
-              if not successo_apertura:
-                  print(f"[NODO {node_id}] Avviso: Nessun selettore di apertura ha risposto. Tento attesa forzata...", flush=True)
-              
-              # Attendiamo che appaia la prima recensione nel DOM per confermare l'apertura (.jftiEf)
-              print(f"[NODO {node_id}] Attendo caricamento della prima recensione (.jftiEf)...", flush=True)
-              first_card = page.locator(".jftiEf").first
-              first_card.wait_for(state="visible", timeout=30000)
-              
-              recensioni_estratte = {}
-              iterazioni_senza_novita = 0
-              ciclo = 0
-              
-              print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
-              
-              # Hover iniziale sopra la prima recensione per focalizzare il puntatore sull'area delle recensioni
-              first_card.hover()
-              
-              while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 15:
-                  ciclo += 1
-                  # Recupera tutte le card delle recensioni attualmente caricate nel viewport (Playwright penetra nel Shadow DOM)
-                  cards = page.locator(".jftiEf").all()
-                  nuovi_elementi_trovati = 0
-                  
-                  for card in cards:
-                      try:
-                          # Estrazione dell'attributo data-review-id con timeout minimo di sicurezza
-                          review_id = card.get_attribute("data-review-id", timeout=1000)
-                          
-                          # Fallback di sicurezza se manca l'ID
-                          if not review_id:
-                              autore_testo = card.locator(".d470gc").inner_text(timeout=1000)
-                              testo_parziale = card.locator(".wiI7pd").inner_text(timeout=1000)[:20]
-                              review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
-                          
-                          # Se non ancora estratto, leggiamo i dati con controlli non bloccanti (.count())
-                          if review_id not in recensioni_estratte:
-                              autore_el = card.locator(".d470gc, .TSv7un, .X7N63e, button.al6Kxe, [class*='name']").first
-                              autore = autore_el.inner_text(timeout=1000) if autore_el.count() > 0 else "Utente Google"
-                              
-                              # Espandiamo il testo lungo ("Altro") se presente
-                              altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
-                              if altro_btn.is_visible(timeout=300):
-                                  altro_btn.click() 
-                                  time.sleep(0.1)
-                                  
-                              testo_el = card.locator(".wiI7pd, [class*='text']").first
-                              testo_completo = testo_el.inner_text(timeout=1000) if testo_el.count() > 0 else ""
-                              
-                              stelle_el = card.locator("span.kv731.v37sz1, [class*='rating'], [class*='star']").first
-                              stelle = stelle_el.get_attribute("aria-label", timeout=1000) or "N/D" if stelle_el.count() > 0 else "N/D"
-                              
-                              # Salvataggio immediato nell'accumulatore
-                              recensioni_estratte[review_id] = {
-                                  "autore": autore,
-                                  "testo": testo_completo,
-                                  "stelle": stelle
-                              }
-                              nuovi_elementi_trovati += 1
-                              
-                              if len(recensioni_estratte) >= max_recensioni:
-                                  break
-                      except Exception:
-                          continue
-                  
-                  if nuovi_elementi_trovati > 0:
-                      iterazioni_senza_novita = 0
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuovi_elementi_trovati} nuove recensioni. Totale: {len(recensioni_estratte)}", flush=True)
-                  else:
-                      iterazioni_senza_novita += 1
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Nessun nuovo elemento rilevato. Tentativi a vuoto: {iterazioni_senza_novita}/15", flush=True)
-                      
-                  # Simula lo scorrimento fisico della rotellina del mouse sopra l'area delle recensioni.
-                  # Muove il cursore sopra l'ultima recensione estratta per assicurare la messa a fuoco corretta.
-                  try:
-                      last_card = page.locator(".jftiEf").last
-                      last_card.hover(timeout=2000)
-                      # Esegue lo scroll nativo della rotellina del mouse (deltaY = 800)
-                      page.mouse.wheel(0, 800)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore durante lo scroll nativo: {e}. Uso tastiera...", flush=True)
-                      # Fallback alternativo via tastiera
-                      page.keyboard.press("PageDown")
-                      
-                  time.sleep(random.uniform(1.5, 2.2))
-                  
-              return list(recensioni_estratte.values())
-
-          # --- RUN PRINCIPALE ---
-          try:
-              context = launch_persistent_context(
-                  profile_dir,
-                  headless=False,
-                  humanize=True,
-                  human_config={
-                      "typing_delay": 100,
-                      "mistype_chance": 0.02,
-                      "idle_between_actions": True
-                  },
-                  proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
-                  geoip=True,
-                  viewport={"width": 1920, "height": 1080},
-                  args=extra_args_base
-              )
-
-              page = context.new_page()
-              ricerca_target = "Coro Orvieto"
-              
-              # 1. Trova ed apre il locale gestendo la disambiguazione
-              esegui_ricerca_e_apri_scheda(page, ricerca_target)
-              
-              # 2. Estrae le recensioni in tempo reale battendo il recycling del DOM con scorrimento fisico
-              recensioni = estrai_recensioni_passo_passo_ui(page, max_recensioni=50)
-              
-              # 3. Salvataggio su file
-              output_file = f"output_node_{node_id}.txt"
-              with open(output_file, "w", encoding="utf-8") as f:
-                  f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
-                  
-              print(f"[NODO {node_id}] Esecuzione terminata. Salvate {len(recensioni)} recensioni.", flush=True)
-              
-              page.close()
-              context.close()
-
-          except Exception as e:
-              print(f"[NODO {node_id}] Errore critico nel processo: {e}", flush=True)
-              with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
-                  f.write(f"ERRORE CRITICO: {e}\n")
-          EOF
-
-      - name: Esecuzione Scraping Singolo Nodo
-        run: |
-          echo "Avvio processo su un singolo nodo (Nodo 1)..."
-          python -u m2_insocket.py 1
+          # 1. Cloniamo il repository di George
+          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
+          cd google-reviews-scraper-pro
           
-          # Consolidamento dell'output per l'artifact
-          touch output_node_1.txt
-          cat output_node_1.txt > output_macchina2_cdp.txt
+          # 2. Installiamo le sue dipendenze
+          pip install -r requirements.txt
+          pip install pyyaml seleniumbase
+          
+          # 3. Armiamo il driver di SeleniumBase
+          seleniumbase install chromedriver
+          
+          # 4. Copiamo i file di configurazione campione
+          cp config.sample.yaml config.yaml
+          cp config.businesses.sample.yaml config.businesses.yaml
 
-      - name: Upload Artifact Macchina 2
+          # 5. Script Python inline per modificare dinamicamente i file YAML con il nostro proxy e target
+          python -c "
+          import yaml
+
+          # Configurazione generale dello Scraper (Headed per Xvfb, Proxy, Limitatori)
+          with open('config.yaml', 'r') as f:
+              cfg = yaml.safe_load(f) or {}
+
+          if 'scraper' not in cfg:
+              cfg['scraper'] = {}
+              
+          cfg['scraper']['headless'] = False  # Deve essere headed per far funzionare l'UC mode sotto Xvfb
+          cfg['scraper']['proxy'] = 'socks5://127.0.0.1:40001'
+          cfg['scraper']['max_reviews'] = 50  # Limitiamo l'estrazione a 50 recensioni per i test didattici
+          cfg['scraper']['sort_by'] = 'relevance'
+
+          with open('config.yaml', 'w') as f:
+              yaml.dump(cfg, f)
+
+          # Configurazione dell'attività commerciale target (Coro Orvieto)
+          biz_cfg = {
+              'businesses': [
+                  {
+                      'name': 'Coro Orvieto',
+                      'url': 'https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660'
+                  }
+              ]
+          }
+
+          with open('config.businesses.yaml', 'w') as f:
+              yaml.dump(biz_cfg, f)
+          "
+          echo "Configurazione completata con successo."
+
+      - name: Esecuzione Scraping Professionale (George's Scraper)
+        run: |
+          cd google-reviews-scraper-pro
+          # Avviamo lo scraper di George. Mostrerà i log in tempo reale sulla console.
+          python start.py
+          
+          # Copiamo i file di output generati nella root della directory di lavoro
+          # George salva i file di backup in formato JSON
+          cp google_reviews.json ../output_macchina2_cdp.txt || true
+          cp reviews.db ../output_macchina2_cdp.db || true
+
+      - name: Upload Artifact Macchina 2 (JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Macchina2
+          name: Risultati_Macchina2_JSON
           path: output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2 (Database SQLite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2_DB
+          path: output_macchina2_cdp.db
