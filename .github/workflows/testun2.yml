@@ -1,4 +1,4 @@
-name: Test Standalone - Gemini 3.1 Live API (Granular AI Analysis)
+name: Test Standalone - Gemini 3.1 Live API (Raw Vision Test)
 
 on: 
   workflow_dispatch:
@@ -8,6 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
+      - name: Checkout Repository
+        # Questo passaggio è ora fondamentale per caricare il TUO google_reviews.json presente nel repo
+        uses: actions/checkout@v4
+
       - name: Setup Ambiente Python
         uses: actions/setup-python@v5
         with:
@@ -16,54 +20,6 @@ jobs:
       - name: Installazione Dipendenze Essenziali
         run: |
           pip install google-genai requests
-
-      - name: Scrivi File Dati Recensioni (google_reviews.json)
-        shell: bash
-        run: |
-          cat << 'EOF' > google_reviews.json
-          [
-            {
-              "review_id": "Ci9DQUlRQUNvZENodHljRjlvT2xGWGQwUkVjVGcxY25CVmNFbFNSV1F5T1ZWU01sRRAB",
-              "place_id": "0x48ce5180d52bd02f:0",
-              "author": "Rudi Schachtl",
-              "rating": 5.0,
-              "description": {
-                "en": "A dream... Four hot tubs outside in wonderful nature... and what a view of the glacier!\nBrand new facilities, nice and helpful staff, prize for two about 7000 isk"
-              },
-              "user_images": [
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn03yI63nePNdRTjcmDMzu6M6_0Q0aplvd-AyD4KDrsC9JzJsgxe7ERwRPgIRhNJ_UZ2VhbMDiiT9OSPAxjZLeXKfCF4MJmqJwyE8zs2Z22Fyno2T8guUQqz4RxroIbNAJixl427n3HF_6w=w600-h450-p-k-no"
-              ],
-              "company": "Hoffell hot tub"
-            },
-            {
-              "review_id": "Ci9DQUlRQUNvZENodHljRjlvT2tOclFUZHFiazFZZVdocFFUZzNVVWxqZFRaNlJsRRAB",
-              "place_id": "0x48ce5180d52bd02f:0",
-              "author": "Brittany Hartmeyer",
-              "rating": 5.0,
-              "description": {
-                "en": "Much needed relaxing spot. Only us and one other couple when we were there. Very clean locker room and showers. Highly recommended if you pass it stop and soak for an hour or so!"
-              },
-              "user_images": [
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn3zevpVc8sz636YOrnUhQ4_91nl6lrxjlA5HvTkKGHtNThSvv18Mlc6hhgJZsel4LMZFHfkwbwPi2xqFvp2ZJt8qy3y-5xAZJB2XOZNY5ZEdu1Um52GPlETwk0kl5TCP5glMqN0UwO_GzrD=w600-h450-p-k-no"
-              ],
-              "company": "Hoffell hot tub"
-            },
-            {
-              "review_id": "Ci9DQUlRQUNvZENodHljRjlvT2xwUFUzSnpTVUZCYjJadWJIRlpOMWw0U0RsQmRGRRAB",
-              "place_id": "0x48ce5180d52bd02f:0",
-              "author": "Ivan Toropitsin",
-              "rating": 5.0,
-              "description": {
-                "en": "Great spot with new spa and sauna. Perfect view."
-              },
-              "user_images": [
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn3tTh2inpiAIP221yKeLRrvGaxiVDaESqVpd--R1GFFxXy66shBVZJYSLeDzoYmMzgCCIndzLlcnOR2WztT9AAeCuFKtOXorazHHnehcaCwPfDY2kqRH3yew5Q41hjozc48BDrTs_TPhgIw=w300-h450-p-k-no",
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn0lT3st43PWr3sqX9dZTEa0OGsJog54_c96TV5pHKZQBtejyjSYw3VNLs-TBSeSe-HmHP6ChGqAJs-_EFnWmfgI346oLxOuDgdrWu_aQAV9ox2yYe-3XOANA0No2u_SLrafhFUkUXMSHYo=w300-h450-p-k-no"
-              ],
-              "company": "Hoffell hot tub"
-            }
-          ]
-          EOF
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
         shell: bash
@@ -84,11 +40,12 @@ jobs:
 
           client = genai.Client(api_key=api_key)
 
+          # Leggiamo il file google_reviews.json REALE caricato sul tuo repository
           try:
               with open("google_reviews.json", "r", encoding="utf-8") as f:
                   reviews = json.load(f)
           except Exception as e:
-              print(f"Impossibile leggere google_reviews.json: {e}")
+              print(f"Impossibile leggere google_reviews.json dal repository: {e}")
               exit(1)
 
           # Raggruppiamo gli URL delle immagini per locale
@@ -144,19 +101,19 @@ jobs:
               for locale, urls in immagini_per_locale.items():
                   # Rimuoviamo i duplicati
                   urls_unici = list(set(urls))
-                  # Limitiamo la coda di analisi a un massimo di 20 immagini per locale
+                  # Limitiamo la coda di analisi a un massimo di 20 immagini reali per locale
                   urls_campione = urls_unici[:20]
                   
                   if not urls_campione:
                       continue
                       
-                  print(f"\n-> Avvio analisi granulare di {len(urls_campione)} immagini per: {locale}...", flush=True)
+                  print(f"\n-> Avvio analisi di {len(urls_campione)} immagini per: {locale}...", flush=True)
                   
                   risultati_locale = []
                   
                   for idx, url in enumerate(urls_campione):
                       try:
-                          # Richiediamo un formato a 600px per catturare meglio dettagli OCR piccoli
+                          # Richiediamo un formato a 600px per i dettagli visivi
                           url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
                           response = requests.get(url_ottimizzato, timeout=10)
                           
@@ -164,26 +121,14 @@ jobs:
                               img_bytes = response.content
                               print(f"   [Immagine {idx+1}/{len(urls_campione)}] Scaricata. Interrogazione Live API...", flush=True)
                               
-                              # Prompt scientifico, asciutto e strutturato per singola foto
-                              prompt_singolo = """
-                              Sei un analista scientifico e un giornalista d'inchiesta sul campo.
-                              Descrivi in modo estremamente approfondito, oggettivo, analitico e distaccato questa singola immagine.
-                              Evita qualsiasi aggettivo vuoto, metafora o tono promozionale.
-                              
-                              Documenta minuziosamente i seguenti punti basandoti solo su ciò che vedi:
-                              1. Elementi naturali e geologia (montagne, tipo di terreno, vegetazione, cielo, ora del giorno approssimativa, meteo, eventuale fauna).
-                              2. Infrastrutture, architettura e materiali (materiali visibili come assi di legno, pietra, metallo; layout spaziale; pulizia percepita, usura o recente ristrutturazione delle strutture).
-                              3. Presenza umana e dettagli operativi (abbigliamento esatto come costume da bagno, attività che stanno svolgendo le persone, densità di affollamento).
-                              4. OCR / Trascrizione testi: trascrivi con la massima precisione qualsiasi scritta, numero, menu o cartello leggibile nella foto.
-                              
-                              Rispondi esclusivamente in italiano in un unico paragrafo denso e ricco di dettagli puramente fattuali.
-                              """
+                              # PROMPT TOTALMENTE NEUTRO E NON SUGGESTIVO
+                              prompt_singolo = "Descrivi questa immagine in modo dettagliato, oggettivo ed approfondito. Evita qualsiasi riflessione poetica o commento personale."
                               
                               descrizione = await analizza_singola_immagine_live(img_bytes, prompt_singolo)
                               if descrizione:
                                   risultati_locale.append({
                                       "url_immagine": url,
-                                      "descrizione_empirica": descrizione
+                                      "descrizione_dettagliata": descrizione
                                   })
                                   print(f"   [Immagine {idx+1}/{len(urls_campione)}] Analisi completata.", flush=True)
                           else:
@@ -197,7 +142,7 @@ jobs:
               output_path = "guida_viaggio_visiva.json"
               with open(output_path, "w", encoding="utf-8") as f:
                   json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
-              print(f"\nGuida turistica visiva completata e salvata in {output_path}.", flush=True)
+              print(f"\nAnalisi completata e salvata in {output_path}.", flush=True)
 
           if __name__ == "__main__":
               asyncio.run(main())
@@ -212,5 +157,5 @@ jobs:
       - name: Esporta Guida AI (JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: Risultato_Guida_AI_Live_Granulare
+          name: Risultato_Vision_Test_Granulare
           path: guida_viaggio_visiva.json
