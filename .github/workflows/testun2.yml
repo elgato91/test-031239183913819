@@ -1,229 +1,159 @@
-name: Test Standalone - Gemini 3.1 Live API (Only AI)
+import os
+import json
+import re
+import asyncio
+import requests
+from google import genai
+from google.genai import types
 
-on: 
-  workflow_dispatch:
+# 1. Caricamento della chiave API di Gemini
+api_key = os.environ.get("GEMINI_API_KEY")
+if not api_key:
+    print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
+    exit(1)
 
-jobs:
-  test_gemini_live:
-    runs-on: ubuntu-latest
-    steps:
+client = genai.Client(api_key=api_key)
 
-      - name: Setup Ambiente Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+# 2. Caricamento del file JSON delle recensioni
+try:
+    with open("google_reviews.json", "r", encoding="utf-8") as f:
+        reviews = json.load(f)
+except Exception as e:
+    print(f"Errore: impossibile leggere google_reviews.json nella directory corrente: {e}")
+    exit(1)
 
-      - name: Installazione Dipendenze Essenziali
-        run: |
-          pip install google-genai requests
+# Raggruppiamo gli URL delle immagini per locale
+immagini_per_locale = {}
+for r in reviews:
+    company = r.get("company")
+    images = r.get("user_images", [])
+    if company and images:
+        if company not in immagini_per_locale:
+            immagini_per_locale[company] = []
+        immagini_per_locale[company].extend(images)
 
-      - name: Scrivi File Dati Recensioni (google_reviews.json)
-        shell: bash
-        run: |
-          cat << 'EOF' > google_reviews.json
-          [
-            {
-              "review_id": "Ci9DQUlRQUNvZENodHljRjlvT2xGWGQwUkVjVGcxY25CVmNFbFNSV1F5T1ZWU01sRRAB",
-              "place_id": "0x48ce5180d52bd02f:0",
-              "author": "Rudi Schachtl",
-              "rating": 5.0,
-              "description": {
-                "en": "A dream... Four hot tubs outside in wonderful nature... and what a view of the glacier!\nBrand new facilities, nice and helpful staff, prize for two about 7000 isk"
-              },
-              "user_images": [
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn03yI63nePNdRTjcmDMzu6M6_0Q0aplvd-AyD4KDrsC9JzJsgxe7ERwRPgIRhNJ_UZ2VhbMDiiT9OSPAxjZLeXKfCF4MJmqJwyE8zs2Z22Fyno2T8guUQqz4RxroIbNAJixl427n3HF_6w=w600-h450-p-k-no"
-              ],
-              "company": "Hoffell hot tub"
-            },
-            {
-              "review_id": "Ci9DQUlRQUNvZENodHljRjlvT2tOclFUZHFiazFZZVdocFFUZzNVVWxqZFRaNlJsRRAB",
-              "place_id": "0x48ce5180d52bd02f:0",
-              "author": "Brittany Hartmeyer",
-              "rating": 5.0,
-              "description": {
-                "en": "Much needed relaxing spot. Only us and one other couple when we were there. Very clean locker room and showers. Highly recommended if you pass it stop and soak for an hour or so!"
-              },
-              "user_images": [
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn3zevpVc8sz636YOrnUhQ4_91nl6lrxjlA5HvTkKGHtNThSvv18Mlc6hhgJZsel4LMZFHfkwbwPi2xqFvp2ZJt8qy3y-5xAZJB2XOZNY5ZEdu1Um52GPlETwk0kl5TCP5glMqN0UwO_GzrD=w600-h450-p-k-no"
-              ],
-              "company": "Hoffell hot tub"
-            },
-            {
-              "review_id": "Ci9DQUlRQUNvZENodHljRjlvT2xwUFUzSnpTVUZCYjJadWJIRlpOMWw0U0RsQmRGRRAB",
-              "place_id": "0x48ce5180d52bd02f:0",
-              "author": "Ivan Toropitsin",
-              "rating": 5.0,
-              "description": {
-                "en": "Great spot with new spa and sauna. Perfect view."
-              },
-              "user_images": [
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn3tTh2inpiAIP221yKeLRrvGaxiVDaESqVpd--R1GFFxXy66shBVZJYSLeDzoYmMzgCCIndzLlcnOR2WztT9AAeCuFKtOXorazHHnehcaCwPfDY2kqRH3yew5Q41hjozc48BDrTs_TPhgIw=w300-h450-p-k-no",
-                "https://lh3.googleusercontent.com/grass-cs/ANxoTn0lT3st43PWr3sqX9dZTEa0OGsJog54_c96TV5pHKZQBtejyjSYw3VNLs-TBSeSe-HmHP6ChGqAJs-_EFnWmfgI346oLxOuDgdrWu_aQAV9ox2yYe-3XOANA0No2u_SLrafhFUkUXMSHYo=w300-h450-p-k-no"
-              ],
-              "company": "Hoffell hot tub"
-            }
-          ]
-          EOF
+guida_turistica_visiva = {}
 
-      - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
-        shell: bash
-        run: |
-          cat << 'EOF' > generate_guide.py
-          import os
-          import json
-          import re
-          import asyncio
-          import requests
-          from google import genai
-          from google.genai import types
+# Esecuzione della sessione asincrona Live WebSocket
+async def analizza_locale_live(locale, urls_campione):
+    print(f"\n-> Avvio sessione Live WebSocket per {locale} con gemini-3.1-flash-live-preview...", flush=True)
+    
+    # Download delle immagini in memoria
+    immagini_bytes = []
+    for idx, url in enumerate(urls_campione):
+        try:
+            url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w400-h400', url)
+            response = requests.get(url_ottimizzato, timeout=10)
+            if response.status_code == 200:
+                immagini_bytes.append(response.content)
+                print(f"   [Foto {idx+1}/{len(urls_campione)}] Scaricata.", flush=True)
+        except Exception as e:
+            print(f"   [Foto {idx+1}] Errore download: {e}", flush=True)
 
-          api_key = os.environ.get("GEMINI_API_KEY")
-          if not api_key:
-              print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
-              exit(1)
+    if not immagini_bytes:
+        print(f"Nessuna immagine scaricata per {locale}.", flush=True)
+        return None
 
-          client = genai.Client(api_key=api_key)
+    # Configurazione della sessione Live
+    config = types.LiveConnectConfig(
+        response_modalities=[types.Modality.AUDIO],
+        output_audio_transcription=types.AudioTranscriptionConfig()
+    )
 
-          try:
-              with open("google_reviews.json", "r", encoding="utf-8") as f:
-                  reviews = json.load(f)
-          except Exception as e:
-              print(f"Impossibile leggere google_reviews.json: {e}")
-              exit(1)
+    # Prompt ottimizzato per analisi giornalistica ed empirica (OCR + Rilevamento)
+    prompt = """
+    Sei un giornalista d'inchiesta e un ricercatore sul campo specializzato in reportage di viaggio, geomarketing e analisi del territorio. 
+    Il tuo compito è analizzare questo gruppo di immagini per ricostruire oggettivamente e scientificamente le caratteristiche reali del luogo. 
+    
+    Devi evitare ASSOLUTAMENTE qualsiasi tono poetico, metafora, espressione promozionale o aggettivo vuoto (es. evita formule come 'teatro di luci', 'protagonista indiscussa', 'magico', 'maestoso', 'immergiti nell'abbraccio di'). 
+    Mantieni un tono giornalistico, analitico, asciutto, distaccato e basato esclusivamente su prove visive concrete ed inferenze logiche rigorose.
+    
+    Analizza le immagini focalizzandoti su:
+    1. Ambiente geografico e geologico (tipo di paesaggio, vegetazione, fauna visibile come cavalli o pecore, meteo, elementi naturali come montagne, ghiacciai o corsi d'acqua).
+    2. Infrastrutture, architettura e materiali (materiali costruttivi visibili come legno scuro, pietra, metallo; layout spaziale; stato delle strutture, pulizia o recente ristrutturazione).
+    3. Presenza umana e dinamiche (attività delle persone, abbigliamento, densità di affollamento, comportamento).
+    4. OCR ed Estrazione Dati: estrai con la massima precisione qualsiasi testo leggibile (cartelli, menu, orari, listini prezzi, regole).
+    
+    Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
+    {
+        "tipo_entita": "Categoria esatta identificata (es. Ristorante / Vasche geotermiche all'aperto / Monumento storico / Sentiero escursionistico / Spa)",
+        "analisi_ambiente_geografico": "Analisi analitica e dettagliata in 2 paragrafi degli elementi naturali, geografici e paesaggistici visibili nelle foto (es. catene montuose brulle, presenza di pascoli, vallata aperta, condizioni meteo). Descrivi solo i fatti visivi accertabili.",
+        "analisi_strutture_e_materiali": "Analisi tecnica delle infrastrutture (es. vasche circolari rivestite in legno scuro, edificio adiacente dal design nordico minimalista con rivestimento nero, presenza di sauna panoramica con vetrata, livello percepito di manutenzione e pulizia).",
+        "analisi_presenza_umana_e_vibe": "Rilevazione di persone, abbigliamento (es. costumi da bagno), densità (affollato o deserto), e orari della giornata deducibili dalle ombre o dalla luce (es. tramonto o cielo coperto).",
+        "dati_estratti_e_ocr": "Trascrizione testuale accurata di qualsiasi scritta, cartello, menu o prezzo leggibile nelle foto (se presente, altrimenti scrivi 'Nessun cartello o menu con testo rilevato')"
+    }
+    
+    Rispondi esclusivamente in italiano per i testi. Mantieni un approccio puramente descrittivo, scientifico ed empirico.
+    """
 
-          immagini_per_locale = {}
-          for r in reviews:
-              company = r.get("company")
-              images = r.get("user_images", [])
-              if company and images:
-                  if company not in immagini_per_locale:
-                      immagini_per_locale[company] = []
-                  immagini_per_locale[company].extend(images)
+    accumulated_text = ""
 
-          guida_turistica_visiva = {}
+    try:
+        # Connessione WebSocket asincrona
+        async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
+            # Invio dei byte delle immagini
+            for img in immagini_bytes:
+                await session.send_realtime_input(
+                    video=types.Blob(
+                        data=img,
+                        mime_type="image/jpeg"
+                    )
+                )
+                await asyncio.sleep(0.5)
+            
+            # Invio del prompt
+            await session.send_realtime_input(
+                text=prompt
+            )
 
-          async def analizza_locale_live(locale, urls_campione):
-              print(f"\n-> Avvio sessione Live WebSocket per {locale} con gemini-3.1-flash-live-preview...", flush=True)
-              
-              immagini_bytes = []
-              for idx, url in enumerate(urls_campione):
-                  try:
-                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w400-h400', url)
-                      response = requests.get(url_ottimizzato, timeout=10)
-                      if response.status_code == 200:
-                          immagini_bytes.append(response.content)
-                          print(f"   [Foto {idx+1}/{len(urls_campione)}] Scaricata.", flush=True)
-                  except Exception as e:
-                      print(f"   [Foto {idx+1}] Errore download: {e}", flush=True)
+            # Ricezione dello stream di trascrizione
+            async for response in session.receive():
+                if response.server_content and response.server_content.output_transcription:
+                    if response.server_content.output_transcription.text:
+                        accumulated_text += response.server_content.output_transcription.text
+                
+                # Usciamo al completamento del turno
+                if response.server_content and response.server_content.turn_complete:
+                    break
 
-              if not immagini_bytes:
-                  print(f"Nessuna immagine scaricata per {locale}.", flush=True)
-                  return None
+        print(f"-> Sessione Live completata con successo per {locale}!", flush=True)
 
-              # Configuriamo response_modalities su AUDIO ed abilitiamo output_audio_transcription
-              config = types.LiveConnectConfig(
-                  response_modalities=[types.Modality.AUDIO],
-                  output_audio_transcription=types.AudioTranscriptionConfig()
-              )
+        # Estrazione del JSON dal markdown
+        match = re.search(r'```json\s*(.*?)\s*```', accumulated_text, re.DOTALL)
+        if match:
+            json_str = match.group(1)
+            return json.loads(json_str)
+        else:
+            try:
+                return json.loads(accumulated_text)
+            except Exception:
+                return {
+                    "tipo_entita": "N/D",
+                    "analisi_ambiente_geografico": accumulated_text,
+                    "analisi_strutture_e_materiali": "N/D",
+                    "analisi_presenza_umana_e_vibe": "N/D",
+                    "dati_estratti_e_ocr": "N/D"
+                }
+    except Exception as e:
+        print(f"Errore durante l'interrogazione WebSocket per {locale}: {e}", flush=True)
+        return None
 
-              prompt = """
-              Sei un sistema di intelligenza artificiale multimodale specializzato in geomarketing, viaggi ed estrazione dati visivi.
-              Analizza attentamente questo gruppo di immagini caricate dagli utenti per questa specifica attività commerciale o punto di interesse.
-              
-              Devi capire dinamicamente che tipo di entità stai analizzando (es. ristorante, attrazione naturale, terme/spa, monumento storico, chiesa, sentiero, museo, hotel, ecc.) e adattare l'analisi in base alle caratteristiche del luogo.
-              
-              Inoltre, effettua un'operazione di OCR (riconoscimento ottico dei caratteri): se nelle foto compaiono cartelli, menu, listini, lavagne con prezzi, orari di apertura o avvisi scritti, estrai queste informazioni con precisione.
-              
-              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
-              {
-                  "tipo_entita": "Categoria identificata (es. Ristorante / Terme / Monumento Storico / Chiesa / Sentiero / Hotel)",
-                  "descrizione_atmosfera": "Descrizione evocativa e professionale di 2 paragrafi in italiano sullo stile, l'atmosfera, il design, le luci e la 'vibe' del posto. Concentrati sulle emozioni visive.",
-                  "analisi_visiva_dettagli": "Dettagli sugli elementi visibili (es. presentazione e cura dei piatti, stile degli arredi, panorama circostante, architettura, stato delle piscine o vasche termali, ecc.)",
-                  "dati_estratti_da_cartelli": "Eventuali prezzi, orari, regole o informazioni testuali letti direttamente dalle scritte e dai cartelli nelle foto (se presenti, altrimenti scrivi 'Nessun cartello o menu con testo rilevato')"
-              }
-              
-              Importante: rispondi esclusivamente in italiano per i testi descrittivi, e non menzionare mai che stai analizzando dei file o delle immagini nella 'descrizione_atmosfera'. Scrivi come se descrivessi l'esperienza vissuta sul posto.
-              """
+async def main():
+    for locale, urls in immagini_per_locale.items():
+        urls_unici = list(set(urls))
+        urls_campione = urls_unici[:5]
+        
+        if not urls_campione:
+            continue
+            
+        json_res = await analizza_locale_live(locale, urls_campione)
+        if json_res:
+            guida_turistica_visiva[locale] = json_res
 
-              accumulated_text = ""
+    output_path = "guida_viaggio_visiva.json"
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
+    print(f"\nGuida turistica visiva completata e salvata in {output_path}.", flush=True)
 
-              try:
-                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
-                      # Inviamo i byte delle immagini come video input stream
-                      for img in immagini_bytes:
-                          await session.send_realtime_input(
-                              video=types.Blob(
-                                  data=img,
-                                  mime_type="image/jpeg"
-                              )
-                          )
-                          await asyncio.sleep(0.5)
-                      
-                      # Inviamo il prompt per elaborare l'input
-                      await session.send_realtime_input(
-                          text=prompt
-                      )
-
-                      # Catturiamo lo stream ed estraiamo il testo dell'output_transcription piatto
-                      async for response in session.receive():
-                          if response.server_content and response.server_content.output_transcription:
-                              if response.server_content.output_transcription.text:
-                                  accumulated_text += response.server_content.output_transcription.text
-                          
-                          # Usciamo al completamento del turno
-                          if response.server_content and response.server_content.turn_complete:
-                              break
-
-                  print(f"-> Sessione Live completata con successo per {locale}!", flush=True)
-
-                  # Estrazione del JSON strutturato dal blocco di markdown
-                  match = re.search(r'```json\s*(.*?)\s*```', accumulated_text, re.DOTALL)
-                  if match:
-                      json_str = match.group(1)
-                      return json.loads(json_str)
-                  else:
-                      try:
-                          return json.loads(accumulated_text)
-                      except Exception:
-                          return {
-                              "tipo_entita": "N/D",
-                              "descrizione_atmosfera": accumulated_text,
-                              "analisi_visiva_dettagli": "N/D",
-                              "dati_estratti_da_cartelli": "N/D"
-                          }
-              except Exception as e:
-                  print(f"Errore durante l'interrogazione WebSocket per {locale}: {e}", flush=True)
-                  return None
-
-          async def main():
-              for locale, urls in immagini_per_locale.items():
-                  urls_unici = list(set(urls))
-                  urls_campione = urls_unici[:5]
-                  
-                  if not urls_campione:
-                      continue
-                      
-                  json_res = await analizza_locale_live(locale, urls_campione)
-                  if json_res:
-                      guida_turistica_visiva[locale] = json_res
-
-              output_path = "guida_viaggio_visiva.json"
-              with open(output_path, "w", encoding="utf-8") as f:
-                  json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
-              print(f"\nGuida turistica visiva completata e salvata in {output_path}.", flush=True)
-
-          if __name__ == "__main__":
-              asyncio.run(main())
-          EOF
-
-      - name: Esecuzione Fase 3 (Generazione Guida Turistica con Gemini AI Live)
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python generate_guide.py
-
-      - name: Esporta Guida AI (JSON)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risultato_Guida_AI_Live
-          path: guida_viaggio_visiva.json
+if __name__ == "__main__":
+    asyncio.run(main())
