@@ -1,4 +1,4 @@
-name: AI Agentic Scraper PoC (Gemini 3 Live API)
+name: AI Agentic Scraper PoC (SeleniumBase UC + Gemini 3 Live)
 
 on: 
   workflow_dispatch:
@@ -24,104 +24,81 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Dipendenze (Playwright, Google GenAI SDK con supporto SOCKS)
+      - name: Installazione Dipendenze (SeleniumBase, SOCKS e GenAI SDK)
+        # Installiamo seleniumbase e selenium-wire per abilitare l'intercettazione dei pacchetti in UC Mode
         run: |
-          pip install playwright google-genai "requests[socks]" PySocks
-          playwright install chromium
+          pip install seleniumbase selenium-wire google-genai "requests[socks]" PySocks
+          seleniumbase install chromedriver
 
-      - name: Fase 1 - L'Ariete (Intercettazione Rete con Playwright)
+      - name: Avvio Xvfb (Display virtuale per UC Mode Headful)
+        # Indispensabile per far girare SeleniumBase in modalità headed (non rilevabile) su Linux
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Fase 1 - L'Ariete (Intercettazione Rete con SeleniumBase UC Mode)
         run: |
           cat << 'EOF' > interceptor.py
-          from playwright.sync_api import sync_playwright
           import json
+          import time
+          from seleniumbase import SB
 
           captured_requests = []
-          all_urls = []
 
-          def handle_request(request):
-              url = request.url
-              if request.resource_type in ["xhr", "fetch"]:
-                  all_urls.append(url)
-                  # Cattura l'API delle recensioni o le chiamate di rendering associate
-                  if "listugc" in url or "preview/review" in url:
-                      captured_requests.append({
-                          "url": url,
-                          "method": request.method,
-                          "headers": request.headers,
-                          "post_data": request.post_data
-                      })
-
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True, proxy={"server": "socks5://127.0.0.1:40001"})
-              page = browser.new_page(viewport={"width": 1280, "height": 720})
-              page.on("request", handle_request)
-              
-              print("Navigazione su Google Maps...")
-              # URL diretto al pannello delle recensioni del ristorante
+          # Inizializziamo SeleniumBase con:
+          # uc=True -> Undetected ChromeDriver (Bypass dei blocchi)
+          # wire=True -> Abilita selenium-wire per intercettare il traffico di rete
+          # headless=False -> Headed reale su schermo virtuale Xvfb
+          with SB(uc=True, wire=True, headless=False, proxy="socks5://127.0.0.1:40001") as sb:
               url = "https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!4m8!3m7!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!9m1!1b1!16s%2Fg%2F11l23qq660"
-              page.goto(url, wait_until="domcontentloaded", timeout=60000)
-              page.wait_for_timeout(5000)
-
-              # Diagnosi e superamento della barriera dei cookie
-              print("Verifica della presenza di moduli di consenso...")
+              print("Apertura di Google Maps tramite SeleniumBase UC Mode...")
+              sb.open(url)
+              sb.sleep(5)
+              
+              # Gestione del consenso dei cookie se presente
               try:
-                  buttons = page.locator("button")
-                  button_count = buttons.count()
-                  for i in range(button_count):
-                      btn = buttons.nth(i)
-                      txt = (btn.inner_text() or "").lower()
-                      if any(word in txt for word in ["accetta tutto", "accept all", "i agree", "consento", "agree"]):
-                          print(f"Trovato pulsante di consenso: '{btn.inner_text()}'. Clicco...")
-                          btn.click()
-                          page.wait_for_timeout(5000)
-                          break
+                  if sb.is_element_visible('button:has-text("Accetta tutto")'):
+                      sb.click('button:has-text("Accetta tutto")')
+                      print("Consenso cookie cliccato.")
+                      sb.sleep(4)
               except Exception as e:
-                  print(f"Ricerca del consenso interrotta o non necessaria: {e}")
+                  print(f"Nessun popup di consenso rilevato: {e}")
 
-              # Salvataggio screenshot per debugging visivo
-              page.screenshot(path="page_state.png")
+              # Scorrimento per innescare le chiamate di rete AJAX
+              print("Scorrimento della pagina per innescare le API...")
+              try:
+                  for _ in range(5):
+                      # Tasto Page Down per scorrere l'interfaccia
+                      sb.press_keys('body', '\ue00f')
+                      sb.sleep(2)
+              except Exception as e:
+                  print(f"Errore durante lo scorrimento: {e}")
+
+              # Salvataggio screenshot di debug dello schermo virtuale
+              sb.save_screenshot("page_state.png")
               print("Screenshot dello stato della pagina salvato come page_state.png")
 
-              # Individuazione ed attivazione dello scorrimento del feed delle recensioni
-              print("Tentativo di scorrimento del feed delle recensioni...")
-              try:
-                  # Prova diversi selettori comuni per il contenitore delle recensioni di Google Maps
-                  feed_selectors = ['div[role="feed"]', '.m6ZQ1b', 'div.DxyBCb']
-                  feed_found = False
-                  for selector in feed_selectors:
-                      feed_loc = page.locator(selector)
-                      if feed_loc.count() > 0:
-                          print(f"Contenitore recensioni individuato via selettore: {selector}")
-                          # Forza lo scorrimento del contenitore specifico via DOM JavaScript
-                          for step in range(5):
-                              page.evaluate(f"document.querySelector('{selector}').scrollTop += 1500")
-                              page.wait_for_timeout(1500)
-                          feed_found = True
-                          break
-                  
-                  if not feed_found:
-                      print("Nessun contenitore specifico trovato. Tento scorrimento generico...")
-                      page.mouse.wheel(0, 3000)
-                      page.wait_for_timeout(4000)
-              except Exception as e:
-                  print(f"Errore durante lo scorrimento del DOM: {e}")
-                  page.mouse.wheel(0, 3000)
-                  page.wait_for_timeout(4000)
-              
-              browser.close()
+              # Analisi dei pacchetti intercettati da selenium-wire
+              print("Analisi del traffico di rete catturato...")
+              for request in sb.driver.requests:
+                  url_str = request.url
+                  if "listugc" in url_str or "preview/review" in url_str:
+                      captured_requests.append({
+                          "url": url_str,
+                          "method": request.method,
+                          "headers": dict(request.headers),
+                          "post_data": request.body.decode('utf-8', errors='ignore') if request.body else None
+                      })
 
-          # Valutazione dei risultati dell'intercettazione
           if captured_requests:
-              best_request = captured_requests[0]
+              # Isoliamo la richiesta più grande che contiene il payload
+              best_request = max(captured_requests, key=lambda r: len(r['url']))
               with open("intercepted.json", "w") as f:
                   json.dump(best_request, f)
               print(f"Richiesta intercettata con successo! URL: {best_request['url'][:80]}...")
           else:
-              print("\nERRORE: NESSUNA RICHIESTA 'listugc' INTERCETTATA.")
-              print("Elenco parziale degli URL intercettati durante l'esecuzione per diagnostica:")
-              for u in all_urls[:15]:
-                  print(f" - {u[:90]}")
-              # Genera un file vuoto per evitare il crash immediato del workflow prima dell'upload degli artefatti
+              print("ERRORE: NESSUNA RICHIESTA 'listugc' INTERCETTATA.")
+              # Creiamo un file vuoto per evitare il crash immediato del workflow
               with open("intercepted.json", "w") as f:
                   json.dump({}, f)
           EOF
