@@ -1,4 +1,4 @@
-name: Test Standalone - Gemini 3.1 Live API (Raw Vision Test 20 Images)
+name: Test Standalone - Gemini 3.1 Live API (Agnostic Dual-Stage Analysis)
 
 on: 
   workflow_dispatch:
@@ -37,7 +37,8 @@ jobs:
           client = genai.Client(api_key=api_key)
 
           # -----------------------------------------------------------------
-          # ELENCO COMPLETO ED ESATTO DI 20 IMMAGINI DA ANALIZZARE
+          # ELENCO DI 20 IMMAGINI DA ANALIZZARE
+          # (Incluso le foto test inserite per verificare la capacità di analisi)
           # -----------------------------------------------------------------
           immagini_test = [
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn2nikKKf0tccFSld6MfPaA3ptpr5UL6KIGzl4YcV4KJJMHff0t34FQbBdndHHCjp81_iX4hWtpijmq1rAgirXVF7WcLVcMajiQEVAqHIzuKbGd-UbtVF3IIm3U3UWxjffWRN4-7ug=w600-h900-p-k-no",
@@ -62,54 +63,59 @@ jobs:
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn2k5I5fmzp_MXQOpwtMnK9I23ak5T4uc5v4HDnkfadu4RMH4whs5DSueMmQoPph4lxYNI6LRpPdfYZ7YUH-aKk3M3f1wg6Et0SlxFTA9pAAvzWmovG5Wl4BJ8RBsYSmj22zfHz43pjMOmeR=w300-h225-p-k-no"
           ]
 
-          # Funzione asincrona riutilizzabile per analizzare una singola immagine
-          async def analizza_singola_immagine_live(img_bytes, prompt):
+          # Funzione asincrona riutilizzabile per interrogare la Live API WebSocket
+          async def interroga_live_api(payload_item, prompt, is_image=True):
               config = {
                   "response_modalities": ["AUDIO"],
                   "output_audio_transcription": {}
               }
               accumulated_text = ""
               try:
-                  # Connessione asincrona alla Live API
                   async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
-                      # Inviamo i byte dell'immagine come video input stream
-                      await session.send_realtime_input(
-                          video=types.Blob(
-                              data=img_bytes,
-                              mime_type="image/jpeg"
+                      if is_image:
+                          # Fase 1: Inviamo l'immagine come video frame
+                          await session.send_realtime_input(
+                              video=types.Blob(
+                                  data=payload_item,
+                                  mime_type="image/jpeg"
+                              )
                           )
-                      )
-                      await asyncio.sleep(0.5)
+                          await asyncio.sleep(0.5)
+                      else:
+                          # Fase 2: Inviamo la lista testuale delle descrizioni
+                          await session.send_realtime_input(
+                              text=payload_item
+                          )
+                          await asyncio.sleep(0.5)
                       
-                      # Inviamo il prompt testuale per elaborare l'input
+                      # Inviamo il prompt per l'elaborazione
                       await session.send_realtime_input(
                           text=prompt
                       )
 
-                      # Catturiamo lo stream ed estraiamo il testo dell'output_transcription piatto (.text)
+                      # Ricezione dello stream della trascrizione vocale (.text)
                       async for response in session.receive():
                           if response.server_content and response.server_content.output_transcription:
                               if response.server_content.output_transcription.text:
                                   accumulated_text += response.server_content.output_transcription.text
                           
-                          # Usciamo al completamento del turno
                           if response.server_content and response.server_content.turn_complete:
                               break
                               
                   return accumulated_text.strip()
               except Exception as e:
-                  print(f"Errore durante l'interrogazione WebSocket per la singola immagine: {e}", flush=True)
+                  print(f"Errore durante l'interrogazione WebSocket: {e}", flush=True)
                   return None
 
           async def main():
               locale = "Hoffell hot tub"
-              print(f"\n-> Avvio analisi granulare di {len(immagini_test)} immagini per: {locale}...", flush=True)
+              print(f"\n[Fase 1] Avvio analisi granulare delle {len(immagini_test)} immagini...", flush=True)
               
-              risultati_locale = []
+              risultati_granulari = []
               
               for idx, url in enumerate(immagini_test):
                   try:
-                      # Chiediamo un formato a 600px per i dettagli visivi
+                      # Richiediamo un formato a 600px per i dettagli visivi
                       url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
                       response = requests.get(url_ottimizzato, timeout=10)
                       
@@ -117,12 +123,12 @@ jobs:
                           img_bytes = response.content
                           print(f"   [Immagine {idx+1}/{len(immagini_test)}] Scaricata. Interrogazione Live API...", flush=True)
                           
-                          # PROMPT TOTALMENTE NEUTRO, PUREAMENTE DESCRITTIVO E NON SUGGESTIVO
+                          # PROMPT TOTALMENTE NEUTRO E NON SUGGESTIVO PER SINGOLA FOTO
                           prompt_singolo = "Descrivi questa immagine in modo dettagliato, oggettivo ed approfondito. Evita qualsiasi riflessione poetica o commento personale."
                           
-                          descrizione = await analizza_singola_immagine_live(img_bytes, prompt_singolo)
+                          descrizione = await interroga_live_api(img_bytes, prompt_singolo, is_image=True)
                           if descrizione:
-                              risultati_locale.append({
+                              risultati_granulari.append({
                                   "url_immagine": url,
                                   "descrizione_dettagliata": descrizione
                               })
@@ -134,12 +140,76 @@ jobs:
                   except Exception as e:
                       print(f"   [Immagine {idx+1}] Errore generico: {e}", flush=True)
                       
-              guida_turistica_visiva = {locale: risultati_locale}
+              # -----------------------------------------------------------------
+              # FASE 2: SINTESI SCIENTIFICO-GIORNALISTICA COMPLETAMENTE AGNOSTICA
+              # -----------------------------------------------------------------
+              print(f"\n[Fase 2] Avvio sintesi globale e consolidamento dei fatti per {locale}...", flush=True)
+              
+              # Prepariamo l'input testuale per il secondo stadio
+              input_fase2_str = ""
+              for i, r in enumerate(risultati_granulari):
+                  input_fase2_str += f"--- DETTAGLI IMMAGINE {i+1} ({r['url_immagine']}) ---\n{r['descrizione_dettagliata']}\n\n"
+
+              # PROMPT COMPLETAMENTE AGNOSTICO E NON SUGGESTIVO
+              prompt_stadio2 = """
+              Sei un analista senior e ricercatore d'archivio specializzato nel controllo incrociato di reportage sul campo e informazioni geomarketing.
+              Ti viene fornito un elenco strutturato di descrizioni empiriche ed oggettive di diverse immagini relative a un singolo luogo geografico.
+              
+              Il tuo compito NON è scrivere una guida turistica, un testo romanzato o promozionale, ma effettuare una sintesi e ricostruzione globale del posto basandoti esclusivamente sui fatti riportati.
+              Devi produrre un "nugget" informativo strutturato e oggettivo, pronto per essere utilizzato all'interno di un processo di deep research editoriale.
+              
+              Mantieni un approccio distaccato, puramente fattuale, analitico e non suggestivo. Evita qualsiasi tono lirico, enfatico, poetico o promozionale. Limita la tua analisi esclusivamente a quanto emerge in modo diretto, logico e comprovabile dalle descrizioni fornite.
+              In particolare, evidenzia in modo naturale qualsiasi eventuale anomalia o elemento visivo palesemente contrastante rispetto al contesto generale che emerge dal set di descrizioni, senza però forzare o suggerire che debbano essercene.
+              
+              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
+              {
+                  "tipologia_luogo": "Categoria generale del luogo identificata dall'analisi incrociata dei dati",
+                  "descrizione_globale_posto": "Una descrizione complessiva, dettagliata, fattuale e oggettiva del luogo ricavata sintetizzando gli elementi coerenti e ricorrenti presenti nelle descrizioni delle immagini.",
+                  "fatti_rilevanti_accertati": [
+                      "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti"
+                  ],
+                  "discrepanze_o_incoerenze_rilevate": [
+                      "Eventuali elementi visivi contrastanti, dati contraddittori o descrizioni che appaiono palesemente incoerenti con il resto del set di dati (se presenti, altrimenti lista vuota)"
+                  ],
+                  "testi_e_dati_ocr_aggregati": [
+                      "Trascrizione o sintesi strutturata dei testi, cartelli, listini, regole o orari emersi dalla lettura ottica delle immagini (se presenti, altrimenti lista vuota)"
+                  ]
+              }
+              
+              Rispondi esclusivamente in italiano per i testi. Mantieni un tono enciclopedico, rigoroso ed empirico.
+              """
+
+              sintesi_globale = {}
+              descrizione_sintesi = await interroga_live_api(input_fase2_str, prompt_stadio2, is_image=False)
+              
+              if descrizione_sintesi:
+                  try:
+                      match = re.search(r'```json\s*(.*?)\s*```', descrizione_sintesi, re.DOTALL)
+                      if match:
+                          sintesi_globale = json.loads(match.group(1))
+                      else:
+                          sintesi_globale = json.loads(descrizione_sintesi)
+                  except Exception:
+                      sintesi_globale = {
+                          "tipologia_luogo": "N/D",
+                          "descrizione_globale_posto": descrizione_sintesi,
+                          "fatti_rilevanti_accertati": [],
+                          "discrepanze_o_incoerenze_rilevate": [],
+                          "testi_e_dati_ocr_aggregati": []
+                      }
+                      
+              # Strutturiamo l'output finale contenente sia la sintesi che le descrizioni granulari
+              output_finale = {
+                  locale: {
+                      "ricostruzione_globale_analitica": sintesi_globale,
+                      "analisi_granulare_immagini": risultati_granulari
+                  }
+              }
 
               output_path = "guida_viaggio_visiva.json"
               with open(output_path, "w", encoding="utf-8") as f:
-                  json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
-              print(f"\nAnalisi completata e salvata in {output_path}.", flush=True)
+                  json.dump(output_finale, f, indent=4, ensure_ascii=False)
+              print(f"\nAnalisi globale completata e salvata in {output_path}.", flush=True)
 
           if __name__ == "__main__":
               asyncio.run(main())
@@ -154,5 +224,5 @@ jobs:
       - name: Esporta Guida AI (JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: Risultato_Vision_Test_Granulare
+          name: Risultato_Vision_Test_Due_Stadi
           path: guida_viaggio_visiva.json
