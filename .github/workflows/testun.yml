@@ -1,466 +1,177 @@
-name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+name: AI Agentic Scraper PoC (Gemini 3 Live API)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  machine2_cdp_insocket:
+  agentic_scraping:
     runs-on: ubuntu-latest
+    
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
     steps:
-
-      - name: Installazione Font di Sistema
-        run: |
-          sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          
-          mkdir -p ~/.local/share/fonts/windows
-          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
-          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
-          fc-cache -f -v
-
-      - name: Installazione Dipendenze Scraper
-        run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
-          playwright install-deps chromium
-
-      - name: Avvio Xvfb (Virtual Display Headful)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Pre-inizializzazione Cache CloakBrowser
-        run: |
-          python -m cloakbrowser install
-
-      - name: Setup Container WARP (IPv6)
+      - name: Setup WARProxy (Anti-Ban)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
+          docker run --name warproxy-1 --network host \
+            -e SOCKS5_PORT=40001 -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -d ghcr.io/kingcc/warproxy:latest
+          sleep 5
 
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
-          done
-          
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-      - name: Inizializzazione Database di Coda - STEP 1
+      - name: Installazione Dipendenze (Playwright, Google GenAI SDK)
         run: |
-          cat << 'EOF' > m2_setup_db.py
-          import sqlite3
-          TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
-          ]
-          conn = sqlite3.connect("/tmp/scraping_queue.db")
-          conn.execute("PRAGMA busy_timeout = 10000")
-          cursor = conn.cursor()
-          cursor.execute("""
-              CREATE TABLE IF NOT EXISTS queue (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  url TEXT UNIQUE,
-                  status TEXT DEFAULT 'pending',
-                  node_id INTEGER,
-                  result TEXT
-              )
-          """)
-          for url in TARGETS:
-              cursor.execute("INSERT OR IGNORE INTO queue (url) VALUES (?)", (url,))
-          conn.commit()
-          conn.close()
-          print("Database di coda condiviso inizializzato.")
+          pip install playwright google-genai requests
+          playwright install chromium
+
+      - name: Fase 1 - L'Ariete (Intercettazione Rete con Playwright)
+        run: |
+          cat << 'EOF' > interceptor.py
+          from playwright.sync_api import sync_playwright
+          import json
+
+          captured_requests = []
+
+          def handle_request(request):
+              if request.resource_type in ["xhr", "fetch"] and "pb=" in request.url:
+                  captured_requests.append({
+                      "url": request.url,
+                      "method": request.method,
+                      "headers": request.headers,
+                      "post_data": request.post_data
+                  })
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True, proxy={"server": "socks5://127.0.0.1:40001"})
+              page = browser.new_page()
+              page.on("request", handle_request)
+              
+              print("Apertura di Google Maps per intercettare l'API...")
+              page.goto("https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660", timeout=60000)
+              
+              page.wait_for_timeout(4000)
+              page.mouse.wheel(0, 2000)
+              page.wait_for_timeout(3000)
+              
+              browser.close()
+
+          if captured_requests:
+              best_request = max(captured_requests, key=lambda r: len(r['url']))
+              with open("intercepted.json", "w") as f:
+                  json.dump(best_request, f)
+              print(f"Richiesta intercettata con successo! URL: {best_request['url'][:50]}...")
+          else:
+              print("ERRORE: NESSUNA RICHIESTA UTILE INTERCETTATA.")
           EOF
-          python -u m2_setup_db.py
+          python interceptor.py
 
-      - name: Creazione Script Python - STEP 1 (Coda Condivisa SQLite)
+      - name: Fase 2 - Il Cervello (AI Agent via Gemini 3 Live API)
         run: |
-          cat << 'EOF' > m2_step1.py
-          import time
-          import sys
-          import random
-          import os
-          import sqlite3
-          from urllib.parse import urlparse
-          from bs4 import BeautifulSoup
-          from curl_cffi import requests
-
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-          DB_PATH = "/tmp/scraping_queue.db"
-
-          def verify_proxy_active(port, max_retries=3, delay=3):
-              test_session = requests.Session(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for _ in range(max_retries):
-                  try:
-                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200: return True
-                  except: pass
-                  time.sleep(delay)
-              return False
-
-          def validate_html(html, url, status_code):
-              if status_code >= 400: return False, f"Blocco HTTP {status_code}"
-              if not html or len(html.strip()) < 300: return False, "HTML vuoto"
-              if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
-              
-              low_html = html.lower()
-              blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
-                  "just a moment", "security verification", "please enable js", "enable javascript",
-                  "are you a robot", "please wait for verification", "we've detected unusual activity",
-                  "if you are not redirected", "unusual traffic from your computer network",
-                  "checking your browser", "prove your humanity", "captcha verification", 
-                  "please enter in the characters you see below", "access to this page is forbidden",
-                  "error 1020", "you have been blocked", "pardon our interruption",
-                  "se non vieni reindirizzato", "se hai problemi ad accedere", 
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
-              ]
-              
-              for ind in blocking_indicators:
-                  if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
-              return True, ""
-
-          def get_next_target():
-              conn = sqlite3.connect(DB_PATH)
-              conn.execute("PRAGMA busy_timeout = 10000")
-              cursor = conn.cursor()
-              url = None
-              try:
-                  cursor.execute("BEGIN IMMEDIATE")
-                  cursor.execute("SELECT url FROM queue WHERE status = 'pending' LIMIT 1")
-                  row = cursor.fetchone()
-                  if row:
-                      url = row[0]
-                      cursor.execute("UPDATE queue SET status = 'processing', node_id = ? WHERE url = ?", (node_id, url))
-                  conn.commit()
-              except Exception as e:
-                  conn.rollback()
-                  print(f"[NODO {node_id}] Errore acquisizione target: {e}")
-              finally:
-                  conn.close()
-              return url
-
-          def update_target(url, status, result=None):
-              conn = sqlite3.connect(DB_PATH)
-              conn.execute("PRAGMA busy_timeout = 10000")
-              cursor = conn.cursor()
-              try:
-                  cursor.execute("BEGIN IMMEDIATE")
-                  cursor.execute("UPDATE queue SET status = ?, result = ? WHERE url = ?", (status, result, url))
-                  conn.commit()
-              except Exception as e:
-                  conn.rollback()
-                  print(f"[NODO {node_id}] Errore aggiornamento target: {e}")
-              finally:
-                  conn.close()
-
-          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
-
-          session = requests.Session(impersonate="chrome120")
-          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-          session.headers.update({
-              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-          })
-
-          while True:
-              url = get_next_target()
-              if not url:
-                  break
-              
-              print(f"[NODO {node_id}] Richiesta: {url}", flush=True)
-              try:
-                  resp = session.get(url, timeout=12)
-                  is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-                  
-                  if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator=' ', strip=True)
-                      formatted_result = f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      update_target(url, 'completed', formatted_result)
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato: {err_msg}", flush=True)
-                      update_target(url, 'failed')
-              except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete.", flush=True)
-                  update_target(url, 'failed')
-              
-              time.sleep(random.uniform(1.0, 2.0))
-          EOF
-
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          echo 'Avvio processi paralleli per STEP 1...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
-      - name: Refresh IP Container per lo STEP 2
-        run: |
-          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
-
-      - name: Creazione Script Python - STEP 2 (Dynamic CloakBrowser sequenziale)
-        run: |
-          cat << 'EOF' > m2_step2.py
+          cat << 'EOF' > ai_agent.py
           import asyncio
-          import time
-          import sys
-          import random
           import os
-          import sqlite3
-          from urllib.parse import urlparse, parse_qs
-          from cloakbrowser import launch_persistent_context_async
-          from bs4 import BeautifulSoup
-
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
-          DB_PATH = "/tmp/scraping_queue.db"
-
-          def get_query_from_url(url, default="migliore carbonara roma"):
-              try:
-                  parsed = urlparse(url)
-                  queries = parse_qs(parsed.query)
-                  for param in ['q', 'query', 'p', 'find_desc']:
-                      if param in queries: return queries[param][0]
-              except: pass
-              return default
-
-          def get_next_target():
-              conn = sqlite3.connect(DB_PATH)
-              conn.execute("PRAGMA busy_timeout = 10000")
-              cursor = conn.cursor()
-              url = None
-              try:
-                  cursor.execute("BEGIN IMMEDIATE")
-                  cursor.execute("SELECT url FROM queue WHERE status = 'failed' LIMIT 1")
-                  row = cursor.fetchone()
-                  if row:
-                      url = row[0]
-                      cursor.execute("UPDATE queue SET status = 'processing_step2', node_id = ? WHERE url = ?", (node_id, url))
-                  conn.commit()
-              except Exception as e:
-                  conn.rollback()
-                  print(f"[NODO {node_id}] Errore acquisizione target Step 2: {e}")
-              finally:
-                  conn.close()
-              return url
-
-          def update_target(url, status, result=None):
-              conn = sqlite3.connect(DB_PATH)
-              conn.execute("PRAGMA busy_timeout = 10000")
-              cursor = conn.cursor()
-              try:
-                  cursor.execute("BEGIN IMMEDIATE")
-                  cursor.execute("UPDATE queue SET status = ?, result = ? WHERE url = ?", (status, result, url))
-                  conn.commit()
-              except Exception as e:
-                  conn.rollback()
-                  print(f"[NODO {node_id}] Errore aggiornamento target Step 2: {e}")
-              finally:
-                  conn.close()
+          import sys
+          import json
+          from google import genai
+          from google.genai import types
 
           async def main():
-              # Controlla se c'è almeno un target da elaborare prima di avviare il browser
-              url_test = get_next_target()
-              if not url_test:
-                  return
+              api_key = os.environ.get("GEMINI_API_KEY")
+              if not api_key:
+                  print("ERRORE CRITICO: API Key non trovata. Aggiungi GEMINI_API_KEY nei secrets.")
+                  sys.exit(1)
 
-              home_dir = os.path.expanduser("~")
-              profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
-              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+              # Creiamo il client ufficiale
+              client = genai.Client(api_key=api_key)
               
-              base_args = [
-                  "--no-sandbox",
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=10000",
-                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
-              ]
+              # Configurazione per ricevere risposte testuali in WebSocket
+              config = types.LiveConnectConfig(response_modalities=[types.Modality.TEXT])
+              model = "gemini-3.1-flash-live-preview"
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente...", flush=True)
               try:
-                  context = await launch_persistent_context_async(
-                      profile_dir,
-                      headless=False,
-                      humanize=True,
-                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                      geoip=True,
-                      viewport={"width": 1920, "height": 1080},
-                      args=base_args
-                  )
-                  page = await context.new_page()
+                  with open("intercepted.json", "r") as f:
+                      req_data = f.read()
+              except FileNotFoundError:
+                  print("Nessun dato intercettato. Interrompo.")
+                  sys.exit(1)
+
+              prompt = f"""
+              Sei un programmatore Python esperto di web scraping e reverse engineering.
+              Il mio browser ha intercettato questa richiesta HTTP interna verso le API di Google Maps:
+              
+              {req_data}
+              
+              Il tuo compito è scrivere uno script Python usando la libreria 'requests' che replica questa chiamata HTTP (usando lo stesso URL e headers intercettati).
+              Lo script deve:
+              1. Importare la libreria 'requests'.
+              2. Impostare le variabili url e headers (copiando i dati intercettati).
+              3. Fare la richiesta HTTP (GET o POST in base al method). Usa proxies={{"http": "socks5://127.0.0.1:40001", "https": "socks5://127.0.0.1:40001"}} per il proxy.
+              4. Salvare il testo crudo della risposta (response.text) in un file chiamato 'raw_data.txt'.
+              
+              RESTITUISCI SOLO IL CODICE PYTHON PURO VALIDO. Non usare blocchi markdown (come ```python), nessuna spiegazione iniziale o finale. Solo codice.
+              """
+
+              print("Connessione in corso a Gemini 3 Live API tramite WebSocket...")
+              generated_code = []
+
+              # Apriamo la connessione bidirezionale WebSocket asincrona
+              async with client.aio.live.connect(model=model, config=config) as session:
+                  print("Connessione asincrona stabilita.")
                   
-                  # WARMUP Integrato
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
-                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
-                  update_target(url_test, 'failed')
-                  return
+                  # Inviamo il prompt testuale in tempo reale
+                  await session.send_realtime_input(text=prompt)
+                  print("Prompt inviato. Ricezione dello stream di dati in tempo reale...")
 
-              url = url_test
-              while url:
-                  print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
-                  try:
-                      query_to_search = get_query_from_url(url)
-                              
-                      if "startpage.com" in url:
-                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.0, 3.5))
-                          try:
-                              search_box = page.locator("input#q").first
-                              await search_box.fill(query_to_search)
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
-                      elif "html.duckduckgo.com" in url:
-                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.0, 3.5))
-                          try:
-                              search_box = page.locator("input[name=q]").first
-                              await search_box.fill(query_to_search)
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
-                      else:
-                          await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                      
-                      try: await page.wait_for_load_state("networkidle", timeout=12000)
-                      except: pass
-                          
-                      await asyncio.sleep(6) 
-                      
-                      raw_html = await page.content()
-                      soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      text_lower = text.lower()
-                      
-                      blocking_indicators = [
-                          "just a moment", "are you a robot", "prove your humanity",
-                          "captcha verification", "please enter in the characters you see below",
-                          "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity"
-                      ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
-                      
-                      if len(text) > 150 and not is_blocked:
-                          res_str = f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
-                          update_target(url, 'completed_step2', res_str)
-                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
-                      else:
-                          res_str = f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          update_target(url, 'failed_step2', res_str)
-                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
+                  # Ascoltiamo la risposta in streaming
+                  async for response in session.receive():
+                      server_content = response.server_content
+                      if server_content:
+                          model_turn = server_content.model_turn
+                          if model_turn and model_turn.parts:
+                              for part in model_turn.parts:
+                                  if part.text:
+                                      print(part.text, end="", flush=True)
+                                      generated_code.append(part.text)
 
-                  except Exception as e:
-                      print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                      res_str = f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
-                      update_target(url, 'failed_step2', res_str)
-                  
-                  await asyncio.sleep(random.uniform(4.0, 7.0))
-                  url = get_next_target()
+              # Uniamo i pezzi di testo ricevuti
+              code = "".join(generated_code).strip()
+              
+              # Rimozione di eventuali blocchi markdown inseriti dal modello
+              if code.startswith("```python"): code = code[9:]
+              if code.startswith("```"): code = code[3:]
+              if code.endswith("```"): code = code[:-3]
+              code = code.strip()
 
-              try: await context.close()
-              except: pass
+              with open("fast_scraper.py", "w") as f:
+                  f.write(code)
+              print("\n[AI Agent] Codice Python salvato in fast_scraper.py!")
 
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
+          python ai_agent.py
 
-      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
+      - name: Fase 3 - Velocità della Luce (Esecuzione Codice AI)
         run: |
-          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
-          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
-          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
-          TAIL_PID=$!
+          echo "==================================="
+          echo "Eseguo lo script scritto da Gemini 3 Live..."
+          cat fast_scraper.py
+          echo "==================================="
           
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
+          python fast_scraper.py
           
-          for i in {1..6}; do
-            docker stop warproxy-$i || true
-            docker rm warproxy-$i || true
-          done
+          echo "Esecuzione completata!"
 
-      - name: Esportazione Risultati Finali da Database
-        run: |
-          cat << 'EOF' > m2_export_results.py
-          import sqlite3
-          conn = sqlite3.connect("/tmp/scraping_queue.db")
-          cursor = conn.cursor()
-          cursor.execute("SELECT result FROM queue WHERE result IS NOT NULL")
-          rows = cursor.fetchall()
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              f.write("\n" + "#"*60 + "\nREPORT GENERALE ESTRATTO DAL DATABASE\n" + "#"*60 + "\n")
-              for row in rows:
-                  f.write(row[0])
-          conn.close()
-          print("Esportazione completata con successo.")
-          EOF
-          python -u m2_export_results.py
-
-      - name: Upload Artifact Macchina 2
+      - name: Upload Artefatti Finali
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
+          name: AI_Reverse_Engineering_PoC
+          path: |
+            intercepted.json
+            fast_scraper.py
+            raw_data.txt
