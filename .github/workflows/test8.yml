@@ -88,26 +88,22 @@ jobs:
           # 3. Armiamo il driver di SeleniumBase
           seleniumbase install chromedriver
           
-          # 4. Script Python inline per generare un config.yaml pulito da zero
-          # Questo evita conflitti con i file sample preesistenti e assicura l'uso del nostro proxy
+          # 4. Script Python inline per generare un config.yaml piatto da zero
+          # Questo evita conflitti e applica correttamente i filtri anti-overhead descritti nella documentazione
           python -c "
           import yaml
 
           config_data = {
-              'scraper': {
-                  'headless': False,               # Headed obbligatorio per UC Mode sotto Xvfb
-                  'sort_by': 'relevance',         # Ordine di rilevanza [5]
-                  'max_reviews': 50,              # Limite massimo di recensioni da estrarre [5]
-                  'proxy': 'socks5://127.0.0.1:40001', # Il nostro tunnel WARProxy
-                  'log_level': 'INFO'
-              },
-              'database': {
-                  'db_path': 'reviews.db'         # Nome del database autogenerato [5]
-              },
-              'json': {
-                  'backup_to_json': True,         # Abilita il backup automatico in JSON [5]
-                  'json_path': 'google_reviews.json'
-              },
+              'headless': False,                       # Headed obbligatorio per UC Mode sotto Xvfb
+              'sort_by': 'relevance',                  # Filtro ordinamento [5]
+              'max_reviews': 50,                       # Limite massimo di recensioni da estrarre (per velocizzare i test) [5]
+              'proxy': 'socks5://127.0.0.1:40001',     # Il nostro tunnel WARProxy
+              'db_path': 'reviews.db',                 # SQLite database [5]
+              'download_images': False,                # Disattiva completamente il download delle immagini (risparmio drastico di tempo e banda) [5]
+              'use_mongodb': False,                    # Esclude il sync MongoDB evitando il timeout di 30 secondi [5]
+              'backup_to_json': True,                  # Genera in automatico il backup JSON finale [5]
+              'json_path': 'google_reviews.json',       # Percorso di scrittura del JSON [5]
+              'log_level': 'INFO',
               'businesses': [
                   {
                       'url': 'https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660',
@@ -121,15 +117,15 @@ jobs:
           with open('config.yaml', 'w') as f:
               yaml.dump(config_data, f)
           "
-          echo "Configurazione pulita generata con successo."
+          echo "Configurazione piatta generata con successo."
 
       - name: Esecuzione Scraping Professionale (George's Scraper)
         run: |
           cd google-reviews-scraper-pro
-          # Avviamo lo scraper di George. L'output mostrerà l'avanzamento dei cicli in tempo reale.
+          # Avviamo lo scraper di George. Mostrerà i log in tempo reale sulla console.
           python start.py
           
-          # Spostiamo i file prodotti dall'esecuzione nella root della nostra cartella di lavoro
+          # Copiamo i file di output generati nella root della directory di lavoro
           cp google_reviews.json ../output_macchina2_cdp.txt || true
           cp reviews.db ../output_macchina2_cdp.db || true
 
