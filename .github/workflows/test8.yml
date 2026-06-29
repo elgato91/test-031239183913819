@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context RPC listentitiesreviews)
+      - name: Creazione script Python (In-Context API listentitiesreviews)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -88,6 +88,7 @@ jobs:
           import os
           import re
           import json
+          import urllib.parse
           from cloakbrowser import launch_persistent_context
 
           if len(sys.argv) < 2:
@@ -109,9 +110,18 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
+          # --- SUPPORTO INTERI A 64 BIT CON SEGNO (Complemento a Due) ---
+          def to_signed_64(hex_str):
+              """Converte una stringa esadecimale in un intero a 64-bit con segno."""
+              val = int(hex_str, 16)
+              # Se il bit più significativo è attivo, la coordinata è negativa in memoria
+              if val >= 0x8000000000000000:
+                  val -= 0x10000000000000000
+              return str(val)
+
           # --- METODO 1: RICERCA E RISOLUZIONE COORDINATE ---
           def esegui_ricerca_e_risolvi_coordinate(page, query):
-              """Esegue la ricerca e isola id_y e cid per ricostruire il parametro pb."""
+              """Esegue la ricerca e isola id_y e cid in formato signed 64-bit."""
               search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
               print(f"[NODO {node_id}] Navigazione su: {search_url}", flush=True)
               
@@ -155,7 +165,7 @@ jobs:
               except Exception:
                   print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
 
-              # Estrazione di id_y e cid convertendoli da esadecimale a decimale
+              # Estrazione di id_y e cid convertendoli da esadecimale a signed 64-bit decimale
               id_y = None
               cid = None
               current_url = page.url
@@ -165,9 +175,9 @@ jobs:
                   try:
                       hex_y = match.group(1)
                       hex_cid = match.group(2)
-                      id_y = str(int(hex_y, 16))
-                      cid = str(int(hex_cid, 16))
-                      print(f"[NODO {node_id}] Coordinate convertite con successo! id_y={id_y}, cid={cid}", flush=True)
+                      id_y = to_signed_64(hex_y)
+                      cid = to_signed_64(hex_cid)
+                      print(f"[NODO {node_id}] Coordinate convertite (Signed 64-bit): id_y={id_y}, cid={cid}", flush=True)
                   except Exception as e:
                       print(f"[NODO {node_id}] Errore di conversione esadecimale: {e}", flush=True)
                       
@@ -175,22 +185,26 @@ jobs:
 
           # --- METODO 2: IN-CONTEXT JSON FETCHING ---
           def estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50):
-              """Effettua le chiamate fetch all'endpoint nativo di Maps rpc ereditando la sessione reale."""
+              """Effettua le chiamate fetch all'endpoint nativo di Maps ereditando la sessione reale."""
               recensioni_estratte = []
               start_index = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro (RPC)...", flush=True)
+              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni:
                   ciclo += 1
                   
                   # Costruiamo il parametro pb nativo richiesto da Google Maps per le recensioni
                   pb_param = f"!1m2!1y{id_y}!2y{cid}!2m2!1i{start_index}!2i10!3e1!4m5!3b1!4b1!5b1!6b1!7b1"
-                  # URL corretto puntato sulla directory dei servizi rpc
-                  ajax_url = f"https://www.google.com/maps/rpc/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_param}"
                   
-                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata RPC fetch per indice {start_index}...", flush=True)
+                  # Eseguiamo la codifica URL in Python del parametro pb.
+                  # Questo trasforma i caratteri '!' in '%21' prevenendo il fallimento di routing (404) del server
+                  pb_encoded = urllib.parse.quote(pb_param, safe='')
+                  
+                  ajax_url = f"https://www.google.com/maps/preview/review/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_encoded}"
+                  
+                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
                   try:
                       json_raw = page.evaluate("""async (url) => {
                           try {
