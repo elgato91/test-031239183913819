@@ -1,4 +1,4 @@
-name: Test Standalone - Gemini 3.1 Live API (Only AI Journalistic)
+name: Test Standalone - Gemini 3.1 Live API (Granular AI Analysis)
 
 on: 
   workflow_dispatch:
@@ -66,7 +66,6 @@ jobs:
           EOF
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
-        # Creiamo lo script Python asincrono con l'approccio giornalistico ed empirico
         shell: bash
         run: |
           cat << 'EOF' > generate_guide.py
@@ -92,6 +91,7 @@ jobs:
               print(f"Impossibile leggere google_reviews.json: {e}")
               exit(1)
 
+          # Raggruppiamo gli URL delle immagini per locale
           immagini_per_locale = {}
           for r in reviews:
               company = r.get("company")
@@ -103,120 +103,96 @@ jobs:
 
           guida_turistica_visiva = {}
 
-          # Esecuzione della sessione asincrona Live WebSocket
-          async def analizza_locale_live(locale, urls_campione):
-              print(f"\n-> Avvio sessione Live WebSocket per {locale} con gemini-3.1-flash-live-preview...", flush=True)
-              
-              immagini_bytes = []
-              for idx, url in enumerate(urls_campione):
-                  try:
-                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w400-h400', url)
-                      response = requests.get(url_ottimizzato, timeout=10)
-                      if response.status_code == 200:
-                          immagini_bytes.append(response.content)
-                          print(f"   [Foto {idx+1}/{len(urls_campione)}] Scaricata.", flush=True)
-                  except Exception as e:
-                      print(f"   [Foto {idx+1}] Errore download: {e}", flush=True)
-
-              if not immagini_bytes:
-                  print(f"Nessuna immagine scaricata per {locale}.", flush=True)
-                  return None
-
-              # Configurazione WebSocket con response_modalities su AUDIO ed output_audio_transcription attivo
-              config = types.LiveConnectConfig(
-                  response_modalities=[types.Modality.AUDIO],
-                  output_audio_transcription=types.AudioTranscriptionConfig()
-              )
-
-              # Prompt analitico, oggettivo, senza aggettivi vuoti o espressioni poetiche
-              prompt = """
-              Sei un giornalista d'inchiesta e un ricercatore sul campo specializzato in reportage di viaggio, geomarketing e analisi del territorio. 
-              Il tuo compito è analizzare questo gruppo di immagini per ricostruire oggettivamente e scientificamente le caratteristiche reali del luogo. 
-              
-              Devi evitare ASSOLUTAMENTE qualsiasi tono poetico, metafora, espressione promozionale o aggettivo vuoto (es. evita formule come 'teatro di luci', 'protagonista indiscussa', 'magico', 'maestoso', 'immergiti nell'abbraccio di'). 
-              Mantieni un tono giornalistico, analitico, asciutto, distaccato e basato esclusivamente su prove visive concrete ed inferenze logiche rigorose.
-              
-              Analizza le immagini focalizzandoti su:
-              1. Ambiente geografico e geologico (tipo di paesaggio, vegetazione, fauna visibile come cavalli o pecore, meteo, elementi naturali come montagne, ghiacciai o corsi d'acqua).
-              2. Infrastrutture, architettura e materiali (materiali costruttivi visibili come legno scuro, pietra, metallo; layout spaziale; stato delle strutture, pulizia o recente ristrutturazione).
-              3. Presenza umana e dinamiche (attività delle persone, abbigliamento, densità di affollamento, comportamento).
-              4. OCR ed Estrazione Dati: estrai con la massima precisione qualsiasi testo leggibile nelle foto (cartelli, menu, orari, listini prezzi, regole).
-              
-              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
-              {
-                  "tipo_entita": "Categoria esatta identificata (es. Ristorante / Vasche geotermiche all'aperto / Monumento storico / Sentiero escursionistico / Spa / Hotel)",
-                  "analisi_ambiente_geografico": "Analisi analitica e dettagliata in 2 paragrafi degli elementi naturali, geografici e paesaggistici visibili nelle foto (es. catene montuose brulle, presenza di pascoli, vallata aperta, condizioni meteo). Descrivi solo i fatti visivi accertabili.",
-                  "analisi_strutture_e_materiali": "Analisi tecnica delle infrastrutture (es. vasche circolari rivestite in legno scuro, edificio adiacente dal design nordico minimalista con rivestimento nero, presenza di sauna panoramica con vetrata, livello percepito di manutenzione e pulizia).",
-                  "analisi_presenza_umana_e_vibe": "Rilevazione di persone, abbigliamento (es. costumi da bagno), densità (affollato o deserto), e orari della giornata deducibili dalle ombre o dalla luce (es. tramonto o cielo coperto).",
-                  "dati_estratti_e_ocr": "Trascrizione testuale accurata di qualsiasi scritta, cartello, menu o prezzo leggibile nelle foto (se presente, altrimenti scrivi 'Nessun cartello o menu con testo rilevato')"
+          # Funzione asincrona riutilizzabile per analizzare una singola immagine
+          async def analizza_singola_immagine_live(img_bytes, prompt):
+              config = {
+                  "response_modalities": ["AUDIO"],
+                  "output_audio_transcription": types.AudioTranscriptionConfig()
               }
-              
-              Rispondi esclusivamente in italiano per i testi. Mantieni un approccio puramente descrittivo, scientifico ed empirico.
-              """
-
               accumulated_text = ""
-
               try:
-                  # Connessione asincrona alla Live API
                   async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
-                      # Invio dei byte delle immagini come video input stream
-                      for img in immagini_bytes:
-                          await session.send_realtime_input(
-                              video=types.Blob(
-                                  data=img,
-                                  mime_type="image/jpeg"
-                              )
+                      # Inviamo i byte dell'immagine
+                      await session.send_realtime_input(
+                          video=types.Blob(
+                              data=img_bytes,
+                              mime_type="image/jpeg"
                           )
-                          await asyncio.sleep(0.5)
+                      )
+                      await asyncio.sleep(0.5)
                       
-                      # Invio del prompt testuale
+                      # Inviamo il prompt per l'analisi
                       await session.send_realtime_input(
                           text=prompt
                       )
 
-                      # Catturiamo lo stream ed estraiamo il testo dell'output_transcription piatto (.text)
+                      # Ricezione dello stream della trascrizione vocale
                       async for response in session.receive():
                           if response.server_content and response.server_content.output_transcription:
                               if response.server_content.output_transcription.text:
                                   accumulated_text += response.server_content.output_transcription.text
                           
-                          # Usciamo al completamento del turno
                           if response.server_content and response.server_content.turn_complete:
                               break
-
-                  print(f"-> Sessione Live completata con successo per {locale}!", flush=True)
-
-                  # Estrazione del JSON strutturato dal blocco di markdown
-                  match = re.search(r'```json\s*(.*?)\s*```', accumulated_text, re.DOTALL)
-                  if match:
-                      json_str = match.group(1)
-                      return json.loads(json_str)
-                  else:
-                      try:
-                          return json.loads(accumulated_text)
-                      except Exception:
-                          return {
-                              "tipo_entita": "N/D",
-                              "analisi_ambiente_geografico": accumulated_text,
-                              "analisi_strutture_e_materiali": "N/D",
-                              "analisi_presenza_umana_e_vibe": "N/D",
-                              "dati_estratti_e_ocr": "N/D"
-                          }
+                              
+                  return accumulated_text.strip()
               except Exception as e:
-                  print(f"Errore durante l'interrogazione WebSocket per {locale}: {e}", flush=True)
+                  print(f"Errore durante l'interrogazione WebSocket per la singola immagine: {e}", flush=True)
                   return None
 
           async def main():
               for locale, urls in immagini_per_locale.items():
+                  # Rimuoviamo i duplicati
                   urls_unici = list(set(urls))
-                  urls_campione = urls_unici[:5]
+                  # Limitiamo la coda di analisi a un massimo di 20 immagini per locale
+                  urls_campione = urls_unici[:20]
                   
                   if not urls_campione:
                       continue
                       
-                  json_res = await analizza_locale_live(locale, urls_campione)
-                  if json_res:
-                      guida_turistica_visiva[locale] = json_res
+                  print(f"\n-> Avvio analisi granulare di {len(urls_campione)} immagini per: {locale}...", flush=True)
+                  
+                  risultati_locale = []
+                  
+                  for idx, url in enumerate(urls_campione):
+                      try:
+                          # Richiediamo un formato a 600px per catturare meglio dettagli OCR piccoli
+                          url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
+                          response = requests.get(url_ottimizzato, timeout=10)
+                          
+                          if response.status_code == 200:
+                              img_bytes = response.content
+                              print(f"   [Immagine {idx+1}/{len(urls_campione)}] Scaricata. Interrogazione Live API...", flush=True)
+                              
+                              # Prompt scientifico, asciutto e strutturato per singola foto
+                              prompt_singolo = """
+                              Sei un analista scientifico e un giornalista d'inchiesta sul campo.
+                              Descrivi in modo estremamente approfondito, oggettivo, analitico e distaccato questa singola immagine.
+                              Evita qualsiasi aggettivo vuoto, metafora o tono promozionale.
+                              
+                              Documenta minuziosamente i seguenti punti basandoti solo su ciò che vedi:
+                              1. Elementi naturali e geologia (montagne, tipo di terreno, vegetazione, cielo, ora del giorno approssimativa, meteo, eventuale fauna).
+                              2. Infrastrutture, architettura e materiali (materiali visibili come assi di legno, pietra, metallo; layout spaziale; pulizia percepita, usura o recente ristrutturazione delle strutture).
+                              3. Presenza umana e dettagli operativi (abbigliamento esatto come costume da bagno, attività che stanno svolgendo le persone, densità di affollamento).
+                              4. OCR / Trascrizione testi: trascrivi con la massima precisione qualsiasi scritta, numero, menu o cartello leggibile nella foto.
+                              
+                              Rispondi esclusivamente in italiano in un unico paragrafo denso e ricco di dettagli puramente fattuali.
+                              """
+                              
+                              descrizione = await analizza_singola_immagine_live(img_bytes, prompt_singolo)
+                              if descrizione:
+                                  risultati_locale.append({
+                                      "url_immagine": url,
+                                      "descrizione_empirica": descrizione
+                                  })
+                                  print(f"   [Immagine {idx+1}/{len(urls_campione)}] Analisi completata.", flush=True)
+                          else:
+                              print(f"   [Immagine {idx+1}] Errore download (Status: {response.status_code})", flush=True)
+                      except Exception as e:
+                          print(f"   [Immagine {idx+1}] Errore generico: {e}", flush=True)
+                          
+                  if risultati_locale:
+                      guida_turistica_visiva[locale] = risultati_locale
 
               output_path = "guida_viaggio_visiva.json"
               with open(output_path, "w", encoding="utf-8") as f:
@@ -236,5 +212,5 @@ jobs:
       - name: Esporta Guida AI (JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: Risultato_Guida_AI_Live
+          name: Risultato_Guida_AI_Live_Granulare
           path: guida_viaggio_visiva.json
