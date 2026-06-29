@@ -193,7 +193,7 @@ jobs:
               
               print(f"   Elaborate {len(risultati_validi)}/{len(urls_unici)} foto per '{luogo}'. Avvio Sintesi...")
               
-              if non risultati_validi:
+              if not risultati_validi:
                   return {"avviso": "Errore nel download o analisi delle foto."}
                   
               # Sintesi Finale (Fase 2 della AI)
