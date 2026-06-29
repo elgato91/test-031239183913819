@@ -8,22 +8,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Font Moderni (Windows 10/11)
+      - name: Installazione Font (Specifiche CloakBrowser Kasada/CreepJS)
         run: |
           sudo apt-get update
+          
+          # 1. Font base richiesti dal manuale per aggirare Kasada e Akamai (rendering Emoji/Asia)
           sudo apt-get install -y cabextract curl wget \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
-          # Creazione cartella per i font di Windows
           mkdir -p ~/.local/share/fonts/windows
           
-          # Download di font Windows 10 reali da una repository pubblica (sostituisce i vecchi msttcorefonts)
-          echo "Scaricamento font moderni Windows 10..."
-          wget -qO- https://github.com/Boring-Boring/Win10-Fonts/archive/refs/heads/master.tar.gz | tar xz
-          cp Win10-Fonts-master/* ~/.local/share/fonts/windows/ || true
-          rm -rf Win10-Fonts-master
+          # 2. Font Windows Moderni (Segoe UI, Calibri, ecc.) per bypassare CreepJS
+          echo "Tentativo di download Font Windows 10 moderni..."
+          HTTP_CODE=$(curl -sL -w "%{http_code}" -o winfonts.tar.gz https://github.com/fphoenix88888/win10-fonts/archive/refs/heads/master.tar.gz)
+          if [ "$HTTP_CODE" = "200" ]; then
+            tar xzf winfonts.tar.gz -C ~/.local/share/fonts/windows/ --strip-components=1 || echo "Estrazione fallita."
+          else
+            echo "Repository Font Moderni non disponibile (HTTP $HTTP_CODE)."
+          fi
           
+          # 3. Fallback di Sicurezza (Font XP-era) in caso il pacchetto moderno fallisca
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer || true
+          
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ 2>/dev/null || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ 2>/dev/null || true
+          
+          # Aggiornamento Cache come da specifiche
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -279,7 +291,7 @@ jobs:
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
               # ATTENZIONE: Aggiunto --fingerprint-storage-quota=10000 per ingannare i controlli "Incognito Mode"
-              # Il resto mantiene il rumore nativo attivo, che è il comportamento corretto.
+              # Puntiamo alla cartella dei font generata nello step bash
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
