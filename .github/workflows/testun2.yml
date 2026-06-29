@@ -1,284 +1,158 @@
-name: Scraping Didattico Integrato Google Maps (English Only)
+name: Test Standalone - Gemini 3.1 Live API (Raw Vision Test 20 Images)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  scrape_maps_full:
+  test_gemini_live:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Setup 1 WARProxy Docker Container (IPv6)
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-          PORT=40001
-          docker run --name warproxy-1 --network host \
-            -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -d ghcr.io/kingcc/warproxy:latest
-          sleep 5
+      - name: Setup Ambiente Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-      - name: Verifica IP IPv6 (socks5h)
+      - name: Installazione Dipendenze Essenziali
         run: |
-          PORT=40001
-          for i in {1..3}; do
-            IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 2
-          done
-          echo "Proxy pronto. IP di uscita: $IP"
+          pip install google-genai requests
 
-      - name: Setup Ambiente e Dipendenze Essenziali
-        run: |
-          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
-          cd google-reviews-scraper-pro
-          pip install -r requirements.txt
-          pip install pyyaml seleniumbase
-          seleniumbase install chromedriver
-
-      - name: Avvio Xvfb (Display virtuale per Selenium)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Scrivi Script Risolutore (Fase 1)
+      - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
         shell: bash
         run: |
-          cat << 'EOF' > google-reviews-scraper-pro/resolve_maps.py
+          cat << 'EOF' > generate_guide.py
+          import os
           import json
-          import urllib.parse
-          import time
           import re
-          import yaml
-          from seleniumbase import Driver
+          import asyncio
+          import requests
+          from google import genai
+          from google.genai import types
 
-          nomi_attivita = [
-              'https://maps.app.goo.gl/wiUzh1s33RVfJYP39'
+          api_key = os.environ.get("GEMINI_API_KEY")
+          if not api_key:
+              print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
+              exit(1)
+
+          client = genai.Client(api_key=api_key)
+
+          # -----------------------------------------------------------------
+          # ELENCO COMPLETO ED ESATTO DI 20 IMMAGINI DA ANALIZZARE
+          # -----------------------------------------------------------------
+          immagini_test = [
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn03yI63nePNdRTjcmDMzu6M6_0Q0aplvd-AyD4KDrsC9JzJsgxe7ERwRPgIRhNJ_UZ2VhbMDiiT9OSPAxjZLeXKfCF4MJmqJwyE8zs2Z22Fyno2T8guUQqz4RxroIbNAJixl427n3HF_6w=w600-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn3zevpVc8sz636YOrnUhQ4_91nl6lrxjlA5HvTkKGHtNThSvv18Mlc6hhgJZsel4LMZFHfkwbwPi2xqFvp2ZJt8qy3y-5xAZJB2XOZNY5ZEdu1Um52GPlETwk0kl5TCP5glMqN0UwO_GzrD=w600-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn3tTh2inpiAIP221yKeLRrvGaxiVDaESqVpd--R1GFFxXy66shBVZJYSLeDzoYmMzgCCIndzLlcnOR2WztT9AAeCuFKtOXorazHHnehcaCwPfDY2kqRH3yew5Q41hjozc48BDrTs_TPhgIw=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn0lT3st43PWr3sqX9dZTEa0OGsJog54_c96TV5pHKZQBtejyjSYw3VNLs-TBSeSe-HmHP6ChGqAJs-_EFnWmfgI346oLxOuDgdrWu_aQAV9ox2yYe-3XOANA0No2u_SLrafhFUkUXMSHYo=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn2RmQa_kFNFvKJVEtLinTMZOHtF4V1X8-AROjkv1WDXHcDjUUtqFk_tCrPhTJqKjxkMbltTejx9Yywjjud1yLqc8uluCPUL8NGsGAHjRsw6SE2224i7ORHNvoFIYJd4ye3pFjeXqf3J6KJt=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn1S9iJKEIRgbDuPOQP1LDVVptud8vJd4DmWgixDLjX_naGsI8aJ19AEZlcHYtNLnQ2m9vTKJBSTPEhmV1RSn6Qyj1umnJD27Tz-GIAwrc-MMFa48_QloCR0xCwKjGtr4KCBtr-Cragzav2J=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn39xIoXYaoSRT6WaWDDrZWT56A0WFEgIKOftGrOJXXr1JH1W6Pd-mI-DO7qOfplmz_yuBeyxmrh71ZckLdncGLfbDzCy6t4KzC2K7eRIgNBRO8jY3md2ce1eUITnWfn-FoppJKanBM0w87_=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn0eB5sqajwK0HcQ_g5IeQfUDSMDn6d9Xy-OxeGkfY2ZeXB1mJIigKCBlSI5ZprijYPoW91IUxFCSuusZvtgq_XupWdTpHtcHI4FlgoM58wGTeLtoURUmRk-E7VCLvGXtpEHz5bz8e9j8srl=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn1YGpRTW8qbQ9nXyGXjyi0dD6je8-_aTDO6vwidhgP2aVIRLgHatNszd313HZNeHQ-PPRKzUHnbY8FoKS2ngmSF3YpSaedxt_M1LfI9cUZ7nmDusNryloHwot9zz6lCfvE2UEFPtlzYI3Cx=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn2RmQa_kFNFvKJVEtLinTMZOHtF4V1X8-AROjkv1WDXHcDjUUtqFk_tCrPhTJqKjxkMbltTejx9Yywjjud1yLqc8uluCPUL8NGsGAHjRsw6SE2224i7ORHNvoFIYJd4ye3pFjeXqf3J6KJt=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn1S9iJKEIRgbDuPOQP1LDVVptud8vJd4DmWgixDLjX_naGsI8aJ19AEZlcHYtNLnQ2m9vTKJBSTPEhmV1RSn6Qyj1umnJD27Tz-GIAwrc-MMFa48_QloCR0xCwKjGtr4KCBtr-Cragzav2J=w300-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn3txyRCW5C-VNUbuhSMMHWUGknvGnjPhiOoBhg2pmPKH2Flt90CrFX7Jb_BT_2nMLT8clL3P7efDIJDYRTbz5US1SdmktWxcFRvdFGT4dU3A-5AjgdXoM6eTGY91WopzxHOuI8ATQN2x9y6=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn1WlLZm_VNtqbbVYf3eZJJ1JjVlpoThpaWpmjob_quEcvYVe5_UCe6Uhr5my1Qhdd51ABQGwtSzB5aCCTUm9yEJcqnQSH7nOgwgNmzCv9diuLF-lRhflOFj1o5cvGf0cPanVCrppcB-iDQJ=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn0dVSO8EqCRZ8-hvPJ6EsXRPDd1puHCDDgk1BewLIokxKySxADbNvMVfPlqFlhfLVb-gYSXnY1PnLTOOeBrexhB-4SXf3IAGv-arfYHk38xgBjDY0A8JANfCJ1bOvXL5aJf4yzagshZ_jBW=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn2H2tqMXERZnlT_qeKV-NNl-9nOsZDW9ov0dwzgXbvgd8vBa7UI1Rz2yd-eJrtrKSgBMxOay9wHMg-4uM7mAMs7l3dng4Qlo06f3WJRr5fDvkKCmF4IJ6H2KQN4IgFjnJiIWLUfHDjWwPq4=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn1e-5mAwnPpChM1vdC8_fIIIK_YIgUie_Gqfi2_F1GKrEIhtekVHYBd7Xu1KAJPTT_TW1ttwZUp2NBwGw_iwHfj0Vq1Thls0Gz8Pt6Yengs3f24cSOgMp4RzagaNBKM0x63VFOBZ1kGehTt=w600-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn0OZKw_x0gzeOryoDSc3ToHUK3XfpiyN7axkJ6_bJOx8eblytpiPGC0U49f1W6OUQC0_Cst2bWggj5w-zOhqAdBjPa6_CzmVbbAVt-iGFs5-qoq6vCo5jxuSHU9nysdkvk53UhTbEQL70cz=w600-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn3cuiguLlGQaJuTVrSlLpRQXBGDiWOVQIDLw7V_sCXDMWaOmMXkoXlNOLqU1pT9NaR7S2BnoW217zoDZSpG740ZX6fyERhKqtZOy9yncBl4-rGKSXqg4C6kZPI3lyJ3dfa4gRrsvsG_ARI=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn0lkyiAu88CRbCdAGmTXXVW4lMsKvKj2rJ3IBFOKHhjjSU5Ly_1PIBv9LaT2tBjLiACDJdCSRuJcRLvupShLaggksxRtyH7f_aIopts03i0KPIVYTaxBB05273m9KBeqnBNG7dVD8Ofaa7S=w300-h225-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn2k5I5fmzp_MXQOpwtMnK9I23ak5T4uc5v4HDnkfadu4RMH4whs5DSueMmQoPph4lxYNI6LRpPdfYZ7YUH-aKk3M3f1wg6Et0SlxFTA9pAAvzWmovG5Wl4BJ8RBsYSmj22zfHz43pjMOmeR=w300-h225-p-k-no"
           ]
 
-          # Pulisce i testi dai glifi grafici di Maps (es:  o )
-          def pulisci_testo(testo):
-              if not testo:
-                  return 'N/D'
-              testo_pulito = re.sub(r'^[\s\W_]+', '', testo)
-              return testo_pulito.strip()
+          # Funzione asincrona riutilizzabile per analizzare una singola immagine
+          async def analizza_singola_immagine_live(img_bytes, prompt):
+              config = {
+                  "response_modalities": ["AUDIO"],
+                  "output_audio_transcription": {}
+              }
+              accumulated_text = ""
+              try:
+                  # Connessione asincrona alla Live API
+                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
+                      # Inviamo i byte dell'immagine come video input stream
+                      await session.send_realtime_input(
+                          video=types.Blob(
+                              data=img_bytes,
+                              mime_type="image/jpeg"
+                          )
+                      )
+                      await asyncio.sleep(0.5)
+                      
+                      # Inviamo il prompt testuale per elaborare l'input
+                      await session.send_realtime_input(
+                          text=prompt
+                      )
 
-          print('Avvio del browser controllato via SeleniumBase (English)...', flush=True)
-          driver = Driver(uc=True, headless=False, proxy='socks5://127.0.0.1:40001')
-          
-          risultati = []
-          businesses_list = []
-          cookie_accettati = False
-
-          try:
-              for nome in nomi_attivita:
-                  nome_trimmed = nome.strip()
-                  print(f'\n=== Risoluzione ed Estrazione Dati per: "{nome_trimmed}" ===', flush=True)
-                  
-                  # -----------------------------------------------------------------
-                  # STANDARDIDIZZAZIONE: FORZIAMO L'INGLESE (hl=en) FIN DALL'INIZIO
-                  # -----------------------------------------------------------------
-                  search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}?hl=en'
-                  driver.get(search_url)
-                  time.sleep(5)
-                  
-                  # Gestione Cookie
-                  if not cookie_accettati:
-                      try:
-                          consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
-                          consent_btn.click()
-                          cookie_accettati = True
-                          print('-> Cookie di Google accettati.', flush=True)
-                          time.sleep(2)
-                      except Exception:
-                          pass
-                  
-                  # Disambiguazione automatica se Google mostra una lista
-                  current_url = driver.current_url
-                  if '/maps/place/' not in current_url:
-                      try:
-                          first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
-                          resolved_url = first_result_el.get_attribute('href')
+                      # Catturiamo lo stream ed estraiamo il testo dell'output_transcription piatto (.text)
+                      async for response in session.receive():
+                          if response.server_content and response.server_content.output_transcription:
+                              if response.server_content.output_transcription.text:
+                                  accumulated_text += response.server_content.output_transcription.text
                           
-                          # Ci assicuriamo che anche l'URL risolto erediti hl=en
-                          if 'hl=' not in resolved_url:
-                              resolved_url += '&hl=en'
+                          # Usciamo al completamento del turno
+                          if response.server_content and response.server_content.turn_complete:
+                              break
+                              
+                  return accumulated_text.strip()
+              except Exception as e:
+                  print(f"Errore durante l'interrogazione WebSocket per la singola immagine: {e}", flush=True)
+                  return None
+
+          async def main():
+              locale = "Hoffell hot tub"
+              print(f"\n-> Avvio analisi granulare di {len(immagini_test)} immagini per: {locale}...", flush=True)
+              
+              risultati_locale = []
+              
+              for idx, url in enumerate(immagini_test):
+                  try:
+                      # Chiediamo un formato a 600px per i dettagli visivi
+                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
+                      response = requests.get(url_ottimizzato, timeout=10)
+                      
+                      if response.status_code == 200:
+                          img_bytes = response.content
+                          print(f"   [Immagine {idx+1}/{len(immagini_test)}] Scaricata. Interrogazione Live API...", flush=True)
+                          
+                          # PROMPT TOTALMENTE NEUTRO, PUREAMENTE DESCRITTIVO E NON SUGGESTIVO
+                          prompt_singolo = "Descrivi questa immagine in modo dettagliato, oggettivo ed approfondito. Evita qualsiasi riflessione poetica o commento personale."
+                          
+                          descrizione = await analizza_singola_immagine_live(img_bytes, prompt_singolo)
+                          if descrizione:
+                              risultati_locale.append({
+                                  "url_immagine": url,
+                                  "descrizione_dettagliata": descrizione
+                              })
+                              print(f"   [Immagine {idx+1}/{len(immagini_test)}] Analisi completata.", flush=True)
                           else:
-                              resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=en', resolved_url)
-                              
-                          print(f'-> Rilevata lista. Carico il primo risultato: {resolved_url}', flush=True)
-                          driver.get(resolved_url)
-                          time.sleep(5)
-                      except Exception:
-                          print('-> Nessuna corrispondenza diretta o lista trovata.', flush=True)
-                  
-                  info_locale = {
-                      'ricerca_originale': nome_trimmed,
-                      'url_mappa': driver.current_url,
-                      'nome': 'N/D',
-                      'categoria': 'N/D',
-                      'indirizzo': 'N/D',
-                      'telefono': 'N/D',
-                      'sito_web': 'N/D',
-                      'media_stelle': 'N/D',
-                      'totale_recensioni': 'N/D',
-                      'coordinate': {},
-                      'popular_times_affluenza': [],
-                      'caratteristiche_servizi': []
-                  }
-                  
-                  # Estrazione anagrafica base
-                  try:
-                      info_locale['nome'] = driver.find_element('css selector', 'h1').text
-                  except Exception: pass
-                  
-                  try:
-                      info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
-                  except Exception: pass
-
-                  try:
-                      raw_address = driver.find_element('css selector', '[data-item-id="address"]').text
-                      info_locale['indirizzo'] = pulisci_testo(raw_address)
-                  except Exception: pass
-                  
-                  try:
-                      raw_phone = driver.find_element('css selector', '[data-item-id^="phone:tel"]').text
-                      info_locale['telefono'] = pulisci_testo(raw_phone)
-                  except Exception: pass
-                  
-                  try:
-                      info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
-                  except Exception: pass
-                  
-                  # Coordinate con Fallback
-                  match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
-                  if match_at:
-                      info_locale['coordinate'] = {
-                          'latitudine': float(match_at.group(1)),
-                          'longitudine': float(match_at.group(2))
-                      }
-                  else:
-                      match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
-                      if match_data:
-                          info_locale['coordinate'] = {
-                              'latitudine': float(match_data.group(1)),
-                              'longitudine': float(match_data.group(2))
-                          }
-                      
-                  # Stelle e totale recensioni (Semplificato per l'inglese, es. "4.8 (496,163)")
-                  try:
-                      rating_text = driver.find_element('css selector', 'div.F7nice').text
-                      rating_text = rating_text.replace('\xa0', ' ')
-                      if '(' in rating_text:
-                          parts = rating_text.split('(')
-                          info_locale['media_stelle'] = float(parts[0].strip())
-                          reviews_raw = parts[1].split(')')[0]
-                          only_numbers = re.sub(r'[^\d]', '', reviews_raw)
-                          info_locale['totale_recensioni'] = int(only_numbers)
-                  except Exception: pass
-
-                  # Scorrimento progressivo della scheda per innescare i grafici (Bypass Lazy Loading)
-                  try:
-                      pannello = None
-                      for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
-                          try:
-                              el = driver.find_element('css selector', selector)
-                              if el.is_displayed():
-                                  pannello = el
-                                  break
-                          except Exception:
-                              pass
-                      
-                      if pannello:
-                          print('-> Scorrimento progressivo della scheda per sbloccare l\'affluenza...', flush=True)
-                          for pos in [300, 600, 900]:
-                              driver.execute_script(f"arguments[0].scrollTo(0, {pos});", pannello)
-                              time.sleep(1.5)
-                  except Exception:
-                      pass
-
-                  # Estrazione Grafici Affluenza (Query XPath su etichette inglesi)
-                  try:
-                      barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
-                      for b in barre:
-                          lbl = b.get_attribute('aria-label')
-                          if lbl and lbl not in info_locale['popular_times_affluenza']:
-                              info_locale['popular_times_affluenza'].append(lbl)
-                  except Exception: pass
-
-                  # Estrazione Caratteristiche ed etichette (Pulsante 'About' in inglese)
-                  try:
-                      url_scheda_corrente = driver.current_url
-                      # Cerchiamo esclusivamente 'About' o 'About this place'
-                      info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
-                      info_btn.click()
-                      time.sleep(2)
-                      
-                      # Parsing dei selettori per catturare l'elenco dei servizi
-                      elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                      for s in elementi_servizi:
-                          if s.text and s.text not in info_locale['caratteristiche_servizi']:
-                              info_locale['caratteristiche_servizi'].append(s.text)
-                              
-                      driver.get(url_scheda_corrente)
-                      time.sleep(2)
+                              print(f"   [Immagine {idx+1}] Errore nell'ottenere la risposta da Gemini Live.", flush=True)
+                      else:
+                          print(f"   [Immagine {idx+1}] Errore download (Status: {response.status_code})", flush=True)
                   except Exception as e:
-                      print(f'-> Avviso: scheda informazioni non accessibile per {nome_trimmed}: {e}', flush=True)
-                  
-                  print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
-                  risultati.append(info_locale)
-                  
-                  # L'URL è già in inglese (hl=en), lo aggiungiamo così com'è per la Fase 2
-                  businesses_list.append({
-                      'url': driver.current_url,
-                      'custom_params': {'company': nome_trimmed}
-                  })
-                  
-          finally:
-              driver.quit()
+                      print(f"   [Immagine {idx+1}] Errore generico: {e}", flush=True)
+                      
+              guida_turistica_visiva = {locale: risultati_locale}
 
-          # 1. Salvataggio Anagrafica e Dati Mappe
-          with open('dati_completi_mappe.json', 'w', encoding='utf-8') as f:
-              json.dump(risultati, f, indent=4, ensure_ascii=False)
+              output_path = "guida_viaggio_visiva.json"
+              with open(output_path, "w", encoding="utf-8") as f:
+                  json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
+              print(f"\nAnalisi completata e salvata in {output_path}.", flush=True)
 
-          # 2. Generazione dinamica della configurazione config.yaml per lo scraper ufficiale
-          config_data = {
-              'headless': False,                       
-              'sort_by': 'newest',                     # <-- Ordina cronologicamente
-              'scrape_mode': 'full',                   
-              'max_reviews': 50,                       
-              'proxy': 'socks5://127.0.0.1:40001',     
-              'db_path': ':memory:',                   
-              'download_images': False,                
-              'use_mongodb': False,                    
-              'backup_to_json': True,                  
-              'json_path': 'google_reviews.json',      
-              'log_level': 'WARNING',                  
-              'businesses': businesses_list
-          }
-
-          with open('config.yaml', 'w') as f:
-              yaml.dump(config_data, f)
-
-          print('\nFase 1 conclusa: generati dati_completi_mappe.json e config.yaml.', flush=True)
+          if __name__ == "__main__":
+              asyncio.run(main())
           EOF
 
-      - name: Esecuzione Fase 1 (Risolutore ed Estrazione Dati Maps)
+      - name: Esecuzione Fase 3 (Generazione Guida Turistica con Gemini AI Live)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cd google-reviews-scraper-pro
-          python resolve_maps.py
+          python generate_guide.py
 
-      - name: Esecuzione Fase 2 (Scraper Recensioni Ufficiale)
-        run: |
-          cd google-reviews-scraper-pro
-          python start.py
-
-      - name: Organizzazione File per l'Esportazione
-        run: |
-          cp google-reviews-scraper-pro/dati_completi_mappe.json ./dati_completi_mappe.json
-          cp google-reviews-scraper-pro/google_reviews.json ./google_reviews.json
-
-      - name: Esporta Risultati (Due JSON)
+      - name: Esporta Guida AI (JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Mappe_e_Recensioni
-          path: |
-            dati_completi_mappe.json
-            google_reviews.json
+          name: Risultato_Vision_Test_Granulare
+          path: guida_viaggio_visiva.json
