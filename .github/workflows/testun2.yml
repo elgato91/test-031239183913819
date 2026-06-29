@@ -40,8 +40,8 @@ jobs:
           # ELENCO COMPLETO ED ESATTO DI 20 IMMAGINI DA ANALIZZARE
           # -----------------------------------------------------------------
           immagini_test = [
-              "https://lh3.googleusercontent.com/grass-cs/ANxoTn03yI63nePNdRTjcmDMzu6M6_0Q0aplvd-AyD4KDrsC9JzJsgxe7ERwRPgIRhNJ_UZ2VhbMDiiT9OSPAxjZLeXKfCF4MJmqJwyE8zs2Z22Fyno2T8guUQqz4RxroIbNAJixl427n3HF_6w=w600-h450-p-k-no",
-              "https://lh3.googleusercontent.com/grass-cs/ANxoTn3zevpVc8sz636YOrnUhQ4_91nl6lrxjlA5HvTkKGHtNThSvv18Mlc6hhgJZsel4LMZFHfkwbwPi2xqFvp2ZJt8qy3y-5xAZJB2XOZNY5ZEdu1Um52GPlETwk0kl5TCP5glMqN0UwO_GzrD=w600-h450-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn2nikKKf0tccFSld6MfPaA3ptpr5UL6KIGzl4YcV4KJJMHff0t34FQbBdndHHCjp81_iX4hWtpijmq1rAgirXVF7WcLVcMajiQEVAqHIzuKbGd-UbtVF3IIm3U3UWxjffWRN4-7ug=w600-h900-p-k-no",
+              "https://lh3.googleusercontent.com/grass-cs/ANxoTn0Vt3B0gX-7b4VvbsvZIxBmkQXiTuLCLhnWz_9fp7NtrR0ex9K82mLqnDUlsH2pvO61bpRSRWql2RmaTWBwYoOL7u0-DVeY15MF24jarfJB6npzzFUTEUPYUsIvnWxznl9YcixY=w600-h900-p-k-no",
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn3tTh2inpiAIP221yKeLRrvGaxiVDaESqVpd--R1GFFxXy66shBVZJYSLeDzoYmMzgCCIndzLlcnOR2WztT9AAeCuFKtOXorazHHnehcaCwPfDY2kqRH3yew5Q41hjozc48BDrTs_TPhgIw=w300-h450-p-k-no",
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn0lT3st43PWr3sqX9dZTEa0OGsJog54_c96TV5pHKZQBtejyjSYw3VNLs-TBSeSe-HmHP6ChGqAJs-_EFnWmfgI346oLxOuDgdrWu_aQAV9ox2yYe-3XOANA0No2u_SLrafhFUkUXMSHYo=w300-h450-p-k-no",
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn2RmQa_kFNFvKJVEtLinTMZOHtF4V1X8-AROjkv1WDXHcDjUUtqFk_tCrPhTJqKjxkMbltTejx9Yywjjud1yLqc8uluCPUL8NGsGAHjRsw6SE2224i7ORHNvoFIYJd4ye3pFjeXqf3J6KJt=w300-h450-p-k-no",
