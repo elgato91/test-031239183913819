@@ -39,7 +39,7 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Scrivi Script Risolutore (Fase 1)
-        # Scriviamo il file Python isolandolo completamente da Bash usando cat << 'EOF'
+        # Utilizziamo cat << 'EOF' per scrivere il codice Python direttamente nel file
         shell: bash
         run: |
           cat << 'EOF' > google-reviews-scraper-pro/resolve_maps.py
@@ -56,6 +56,7 @@ jobs:
               'Hoffell hot tub'
           ]
 
+          # Pulisce i testi dai glifi grafici di Maps (es:  o )
           def pulisci_testo(testo):
               if not testo:
                   return 'N/D'
@@ -74,7 +75,7 @@ jobs:
                   nome_trimmed = nome.strip()
                   print(f'\n=== Risoluzione ed Estrazione Dati per: "{nome_trimmed}" ===', flush=True)
                   
-                  # Forziamo l'italiano per standardizzare l'estrazione
+                  # Forziamo l'italiano hl=it nell'URL di ricerca
                   search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}?hl=it'
                   driver.get(search_url)
                   time.sleep(5)
@@ -90,12 +91,13 @@ jobs:
                       except Exception:
                           pass
                   
-                  # Disambiguazione se Google mostra una lista
+                  # Disambiguazione automatica se Google mostra una lista
                   current_url = driver.current_url
                   if '/maps/place/' not in current_url:
                       try:
                           first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
                           resolved_url = first_result_el.get_attribute('href')
+                          # Aggreghiamo hl=it all'URL risolto se mancante
                           if 'hl=' not in resolved_url:
                               resolved_url += '&hl=it'
                           else:
@@ -122,7 +124,7 @@ jobs:
                       'caratteristiche_servizi': []
                   }
                   
-                  # Estrazione anagrafica base
+                  # Estrazione anagrafica base con pulizia dei caratteri unicode estranei
                   try:
                       info_locale['nome'] = driver.find_element('css selector', 'h1').text
                   except Exception: pass
@@ -145,15 +147,26 @@ jobs:
                       info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
                   except Exception: pass
                   
-                  # Coordinate
-                  match = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
-                  if match:
+                  # -----------------------------------------------------------------
+                  # ESTRAZIONE COORDINATE GEOGRAFICHE CON FALLBACK
+                  # -----------------------------------------------------------------
+                  # 1. Tentativo standard con pattern @lat,lng
+                  match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
+                  if match_at:
                       info_locale['coordinate'] = {
-                          'latitudine': float(match.group(1)),
-                          'longitudine': float(match.group(2))
+                          'latitudine': float(match_at.group(1)),
+                          'longitudine': float(match_at.group(2))
                       }
+                  else:
+                      # 2. Fallback per URL compressi (es. Colosseo) estraendo da !3d (lat) e !4d (lng)
+                      match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
+                      if match_data:
+                          info_locale['coordinate'] = {
+                              'latitudine': float(match_data.group(1)),
+                              'longitudine': float(match_data.group(2))
+                          }
                       
-                  # Stelle e totale recensioni (Regex-safe)
+                  # Stelle e totale recensioni complessive (Regex-safe)
                   try:
                       rating_text = driver.find_element('css selector', 'div.F7nice').text
                       rating_text = rating_text.replace('\xa0', ' ')
@@ -165,7 +178,18 @@ jobs:
                           info_locale['totale_recensioni'] = int(only_numbers)
                   except Exception: pass
 
-                  # Grafici Affluenza
+                  # -----------------------------------------------------------------
+                  # SCROLL DI SICUREZZA PER SBLOCCARE IL LAZY LOADING
+                  # -----------------------------------------------------------------
+                  try:
+                      pannello = driver.find_element('css selector', 'div[role="main"]')
+                      # Eseguiamo uno scroll verso il basso per innescare il caricamento asincrono
+                      driver.execute_script("arguments[0].scrollTo(0, 500);", pannello)
+                      time.sleep(2)
+                  except Exception:
+                      pass
+
+                  # Estrazione Grafici Affluenza (Popular Times)
                   try:
                       barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'affollato') or contains(@aria-label, 'affluenza') or contains(@aria-label, 'busy') or contains(@aria-label, 'popular')]")
                       for b in barre:
@@ -174,18 +198,21 @@ jobs:
                               info_locale['popular_times_affluenza'].append(lbl)
                   except Exception: pass
 
-                  # Caratteristiche (Informazioni)
+                  # Estrazione Caratteristiche ed etichette (Informazioni)
                   try:
                       url_scheda_corrente = driver.current_url
+                      # Forzando hl=it, il pulsante si chiamerà sicuramente 'Informazioni'
                       info_btn = driver.find_element('css selector', 'button[data-tooltip="Informazioni"], button[aria-label*="Informazioni"]')
                       info_btn.click()
                       time.sleep(2)
                       
+                      # Parsing dei selettori per catturare l'elenco dei servizi
                       elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
                       for s in elementi_servizi:
                           if s.text and s.text not in info_locale['caratteristiche_servizi']:
                               info_locale['caratteristiche_servizi'].append(s.text)
                               
+                      # Ritorniamo alla scheda principale per non compromettere il ciclo successivo
                       driver.get(url_scheda_corrente)
                       time.sleep(2)
                   except Exception as e:
@@ -203,11 +230,11 @@ jobs:
           finally:
               driver.quit()
 
-          # 1. Salvataggio Anagrafica e Dati Mappe
+          # 1. Esportiamo il JSON dei metadati generali
           with open('dati_completi_mappe.json', 'w', encoding='utf-8') as f:
               json.dump(risultati, f, indent=4, ensure_ascii=False)
 
-          # 2. Generazione dinamica del config.yaml per lo scraper di recensioni
+          # 2. Generazione dinamica della configurazione config.yaml per lo scraper ufficiale
           config_data = {
               'headless': False,                       
               'sort_by': 'newest',                     
@@ -234,7 +261,6 @@ jobs:
           python resolve_maps.py
 
       - name: Esecuzione Fase 2 (Scraper Recensioni Ufficiale)
-        # Lo scraper si avvia e legge il config.yaml generato dinamicamente dallo step precedente
         run: |
           cd google-reviews-scraper-pro
           python start.py
