@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (Estrazione Recensioni via OS Wheel Scroll)
+      - name: Creazione script Python (Estrazione via Google Search Modal)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -109,20 +109,26 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # --- METODO 1: RICERCA E APERTURA SCHEDA ---
-          def esegui_ricerca_e_apri_scheda(page, query):
-              """Esegue la ricerca su Maps attendendo il reindirizzamento definitivo."""
-              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-              print(f"[NODO {node_id}] Navigazione su: {search_url}", flush=True)
+          # --- METODO PRINCIPALE: BYPASS VIA GOOGLE SEARCH ---
+          def estrai_recensioni_via_search(page, query, max_recensioni=50):
+              # 1. Carichiamo Google Search invece di Maps per aggirare la "Limited View" del 2026
+              search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}&hl=it"
+              print(f"[NODO {node_id}] Navigazione su Google Search: {search_url}", flush=True)
               
               page.set_default_navigation_timeout(90000)
               page.set_default_timeout(90000)
               
-              # Nessun blocco di immagini/tile per questa sessione: permettiamo il caricamento
-              # nativo e completo dei Javascript e delle dipendenze di Maps
-              page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
+              # Impediamo il caricamento di immagini superflue per velocizzare l'esecuzione
+              def block_heavy_assets(route):
+                  url = route.request.url.lower()
+                  if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
+                      route.abort()
+                  else:
+                      route.continue_()
+              page.route("**/*", block_heavy_assets)
               
-              time.sleep(8)
+              page.goto(search_url, wait_until="commit", timeout=90000)
+              time.sleep(5)
               
               # Gestione del Cookie Consent di Google se presente
               try:
@@ -132,88 +138,55 @@ jobs:
                       time.sleep(3)
               except Exception:
                   pass
-
-              # Gestione della disambiguazione (se compare l'elenco dei risultati)
-              risultati_ricerca = page.locator("a[href*='/maps/place/']")
-              if risultati_ricerca.count() > 0:
-                  print(f"[NODO {node_id}] Rilevato elenco. Clicco sul primo risultato...", flush=True)
-                  risultati_ricerca.first.click()
-                  time.sleep(5)
-              else:
-                  print(f"[NODO {node_id}] Scheda aperta direttamente.", flush=True)
-
-              # Attendiamo l'assestamento definitivo dell'URL
-              try:
-                  page.wait_for_url("**/maps/place/**", timeout=25000)
-                  print(f"[NODO {node_id}] Reindirizzamento completato: {page.url}", flush=True)
-              except Exception:
-                  pass
-
-          # --- METODO 2: ESTRAZIONE CON OS-LEVEL WHEEL SCROLL ---
-          def estrai_recensioni_passo_passo_ui(page, max_recensioni=50):
-              """Estrae le recensioni simulando eventi fisici di scroll della rotellina del mouse."""
-              # 1. Clicchiamo sul tab delle recensioni usando il ruolo semantico ARIA tab, molto più stabile
-              tab_recensioni = page.locator("button[role='tab']:has-text('Recensioni'), button[role='tab']:has-text('Reviews')").first
+                  
+              # 2. Individuiamo il link delle recensioni nel Knowledge Graph di destra
+              # Utilizziamo l'attributo stabile 'data-async-trigger' che Google Search usa per far apparire il modal delle recensioni
+              review_trigger = page.locator("a[data-async-trigger^='reviewSort'], a:has-text('recensioni'), a:has-text('reviews')").first
+              review_trigger.wait_for(state="visible", timeout=20000)
+              print(f"[NODO {node_id}] Trovato link recensioni su Search. Clicco per aprire il modal...", flush=True)
+              review_trigger.click()
               
-              if tab_recensioni.is_visible(timeout=8000):
-                  print(f"[NODO {node_id}] Clicco sul tab Recensioni...", flush=True)
-                  tab_recensioni.click()
-              else:
-                  # Fallback su bottone classico se l'interfaccia è in modalità mista
-                  review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
-                  review_tab.wait_for(state="visible", timeout=15000)
-                  print(f"[NODO {node_id}] Clicco sul pulsante recensioni di ripiego...", flush=True)
-                  review_tab.click()
+              # 3. Attendiamo l'apertura del modal delle recensioni (.gws-localreviews__google-review)
+              print(f"[NODO {node_id}] Attendo il caricamento delle recensioni nel modal...", flush=True)
+              page.wait_for_selector(".gws-localreviews__google-review", timeout=20000)
               
-              # Attendiamo che appaia la prima recensione nel DOM per confermare l'apertura
-              print(f"[NODO {node_id}] Attendo caricamento della prima recensione (.jftiEf)...", flush=True)
-              first_card = page.locator(".jftiEf").first
-              first_card.wait_for(state="visible", timeout=30000)
+              # Identifichiamo il panel scrollabile e la prima card visibile
+              first_card = page.locator(".gws-localreviews__google-review").first
+              first_card.hover()
               
               recensioni_estratte = {}
               iterazioni_senza_novita = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
-              
-              # Hover iniziale sopra la prima recensione per focalizzare il puntatore sull'area delle recensioni
-              first_card.hover()
+              print(f"[NODO {node_id}] Avvio loop di scorrimento del modal...", flush=True)
               
               while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 15:
                   ciclo += 1
-                  # Recupera tutte le card delle recensioni attualmente caricate nel viewport (Playwright penetra nel Shadow DOM)
-                  cards = page.locator(".jftiEf").all()
+                  # Seleziona tutte le card recensione attualmente renderizzate nel modal di Search
+                  cards = page.locator(".gws-localreviews__google-review").all()
                   nuovi_elementi_trovati = 0
                   
                   for card in cards:
                       try:
-                          # Estrazione dell'attributo data-review-id con timeout minimo di sicurezza
-                          review_id = card.get_attribute("data-review-id", timeout=1000)
+                          # Creiamo una chiave unica robusta combinando il nome dell'autore con i primi caratteri del testo
+                          autore_el = card.locator(".TSv7un, .d470gc, [class*='name']").first
+                          autore = autore_el.inner_text(timeout=1000) if autore_el.count() > 0 else "Utente Google"
                           
-                          # Fallback di sicurezza se manca l'ID
-                          if not review_id:
-                              autore_testo = card.locator(".d470gc").inner_text(timeout=1000)
-                              testo_parziale = card.locator(".wiI7pd").inner_text(timeout=1000)[:20]
-                              review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
+                          # Espandiamo il testo lungo ("Altro") se presente
+                          altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
+                          if altro_btn.is_visible(timeout=300):
+                              altro_btn.click()
+                              time.sleep(0.1)
+                              
+                          testo_el = card.locator(".wiI7pd, [class*='text']").first
+                          testo_completo = testo_el.inner_text(timeout=1000) if testo_el.count() > 0 else ""
                           
-                          # Se non ancora estratto, leggiamo i dati con controlli non bloccanti (.count())
+                          review_id = f"id_{hash(autore + testo_completo[:30])}"
+                          
                           if review_id not in recensioni_estratte:
-                              autore_el = card.locator(".d470gc, .TSv7un, .X7N63e, [class*='name']").first
-                              autore = autore_el.inner_text(timeout=1000) if autore_el.count() > 0 else "Utente Google"
-                              
-                              # Espandiamo il testo lungo ("Altro") se presente
-                              altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
-                              if altro_btn.is_visible(timeout=300):
-                                  altro_btn.click() 
-                                  time.sleep(0.1)
-                                  
-                              testo_el = card.locator(".wiI7pd, [class*='text']").first
-                              testo_completo = testo_el.inner_text(timeout=1000) if testo_el.count() > 0 else ""
-                              
-                              stelle_el = card.locator("span.kv731.v37sz1, [class*='rating'], [class*='star']").first
+                              stelle_el = card.locator("span[aria-label*='stelle'], span[aria-label*='star']").first
                               stelle = stelle_el.get_attribute("aria-label", timeout=1000) or "N/D" if stelle_el.count() > 0 else "N/D"
                               
-                              # Salvataggio immediato nell'accumulatore
                               recensioni_estratte[review_id] = {
                                   "autore": autore,
                                   "testo": testo_completo,
@@ -225,24 +198,20 @@ jobs:
                                   break
                       except Exception:
                           continue
-                  
+                          
                   if nuovi_elementi_trovati > 0:
                       iterazioni_senza_novita = 0
                       print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuovi_elementi_trovati} nuove recensioni. Totale: {len(recensioni_estratte)}", flush=True)
                   else:
                       iterazioni_senza_novita += 1
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Nessun nuovo elemento rilevato. Tentativi a vuoto: {iterazioni_senza_novita}/15", flush=True)
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Nessun elemento rilevato. Tentativi a vuoto: {iterazioni_senza_novita}/15", flush=True)
                       
-                  # Simula lo scorrimento fisico della rotellina del mouse sopra l'area delle recensioni.
-                  # Muove il cursore sopra l'ultima recensione estratta per assicurare la messa a fuoco corretta.
+                  # Scroll fisico della rotellina del mouse sopra il pannello del modal per forzare il caricamento
                   try:
-                      last_card = page.locator(".jftiEf").last
+                      last_card = page.locator(".gws-localreviews__google-review").last
                       last_card.hover(timeout=2000)
-                      # Esegue lo scroll nativo della rotellina del mouse (deltaY = 800)
                       page.mouse.wheel(0, 800)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore durante lo scroll nativo: {e}. Uso tastiera...", flush=True)
-                      # Fallback alternativo via tastiera
+                  except Exception:
                       page.keyboard.press("PageDown")
                       
                   time.sleep(random.uniform(1.5, 2.2))
@@ -269,13 +238,10 @@ jobs:
               page = context.new_page()
               ricerca_target = "Coro Orvieto"
               
-              # 1. Trova ed apre il locale gestendo la disambiguazione
-              esegui_ricerca_e_apri_scheda(page, ricerca_target)
+              # Avviamo l'estrazione bypassando la Limited View di Maps
+              recensioni = estrai_recensioni_via_search(page, ricerca_target, max_recensioni=50)
               
-              # 2. Estrae le recensioni in tempo reale battendo il recycling del DOM con scorrimento fisico
-              recensioni = estrai_recensioni_passo_passo_ui(page, max_recensioni=50)
-              
-              # 3. Salvataggio su file
+              # Salvataggio su file
               output_file = f"output_node_{node_id}.txt"
               with open(output_file, "w", encoding="utf-8") as f:
                   f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
