@@ -8,24 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Font di Sistema
+      - name: Installazione Dipendenze Leggere (requests)
         run: |
           sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          
-          # COPIA DEI FONT WINDOWS (Essenziale per i controlli di fingerprinting sui font)
-          mkdir -p ~/.local/share/fonts/windows
-          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
-          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
-          fc-cache -f -v
-
-      - name: Installazione Dipendenze Scraper
-        run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
-          playwright install-deps chromium
+          # Installiamo solo requests con supporto SOCKS5 per il proxy e BeautifulSoup per il parsing JSON-HTML
+          pip install beautifulsoup4 requests "requests[socks]"
 
       - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
@@ -70,73 +57,144 @@ jobs:
           fi
           echo "=================================================="
 
-      - name: Avvio Xvfb (Virtual Display Headful per UC Mode)
+      - name: Creazione script Python (In-Socket listentitiesreviews)
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
+          cat << 'EOF' > m2_insocket.py
+          import time
+          import sys
+          import random
+          import os
+          import re
+          import json
+          import urllib.parse
+          import requests
 
-      - name: Clona e Configura George's Scraper
-        run: |
-          # 1. Cloniamo il repository di George
-          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
-          cd google-reviews-scraper-pro
-          
-          # 2. Installiamo le sue dipendenze
-          pip install -r requirements.txt
-          pip install pyyaml seleniumbase
-          
-          # 3. Armiamo il driver di SeleniumBase
-          seleniumbase install chromedriver
-          
-          # 4. Script Python inline per generare un config.yaml piatto da zero
-          # Questo evita conflitti e applica correttamente i filtri anti-overhead descritti nella documentazione
-          python -c "
-          import yaml
+          if len(sys.argv) < 2:
+              sys.exit(1)
 
-          config_data = {
-              'headless': False,                       # Headed obbligatorio per UC Mode sotto Xvfb
-              'sort_by': 'relevance',                  # Filtro ordinamento [5]
-              'max_reviews': 50,                       # Limite massimo di recensioni da estrarre (per velocizzare i test) [5]
-              'proxy': 'socks5://127.0.0.1:40001',     # Il nostro tunnel WARProxy
-              'db_path': 'reviews.db',                 # SQLite database [5]
-              'download_images': False,                # Disattiva completamente il download delle immagini (risparmio drastico di tempo e banda) [5]
-              'use_mongodb': False,                    # Esclude il sync MongoDB evitando il timeout di 30 secondi [5]
-              'backup_to_json': True,                  # Genera in automatico il backup JSON finale [5]
-              'json_path': 'google_reviews.json',       # Percorso di scrittura del JSON [5]
-              'log_level': 'INFO',
-              'businesses': [
-                  {
-                      'url': 'https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660',
-                      'custom_params': {
-                          'company': 'Coro Orvieto'
-                      }
-                  }
-              ]
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          # Configurazione del proxy locale fornito dal tuo container Docker
+          PROXIES = {
+              "http": f"socks5h://127.0.0.1:{ACTIVE_PORT}",
+              "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"
           }
 
-          with open('config.yaml', 'w') as f:
-              yaml.dump(config_data, f)
-          "
-          echo "Configurazione piatta generata con successo."
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "*/*",
+              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+              "Referer": "https://www.google.com/maps/",
+              "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+              "Sec-Ch-Ua-Mobile": "?0",
+              "Sec-Ch-Ua-Platform": '"Windows"',
+              "Sec-Fetch-Dest": "empty",
+              "Sec-Fetch-Mode": "cors",
+              "Sec-Fetch-Site": "same-origin"
+          }
 
-      - name: Esecuzione Scraping Professionale (George's Scraper)
+          def to_signed_64(hex_str):
+              """Converte una stringa esadecimale in un intero a 64-bit con segno."""
+              val = int(hex_str, 16)
+              if val >= 0x8000000000000000:
+                  val -= 0x10000000000000000
+              return str(val)
+
+          # URL diretto della scheda di Coro Orvieto contenente le coordinate esadecimali
+          target_url = "https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660"
+
+          print(f"[NODO {node_id}] Estrazione coordinate esadecimali dall'URL...", flush=True)
+          match = re.search(r"(0x[a-fA-F0-9]+):(0x[a-fA-F0-9]+)", target_url)
+          if not match:
+              print("[ERRORE] Impossibile trovare le coordinate nell'URL.", flush=True)
+              sys.exit(1)
+
+          hex_y = match.group(1)
+          hex_cid = match.group(2)
+          id_y = to_signed_64(hex_y)
+          cid = to_signed_64(hex_cid)
+          print(f"[NODO {node_id}] Coordinate convertite (Signed 64-bit): id_y={id_y}, cid={cid}", flush=True)
+
+          recensioni_estratte = []
+          max_recensioni = 50
+          start_index = 0
+          ciclo = 0
+
+          print(f"[NODO {node_id}] Avvio download rapido in-socket delle recensioni più recenti...", flush=True)
+
+          while len(recensioni_estratte) < max_recensioni:
+              ciclo += 1
+              # Costruiamo il parametro pb con ordinamento '3e2' (NEWEST / Più recenti) [10]
+              pb_param = f"!1m2!1y{id_y}!2y{cid}!2m2!1i{start_index}!2i10!3e2!4m5!3b1!4b1!5b1!6b1!7b1"
+              pb_encoded = urllib.parse.quote(pb_param, safe='')
+              
+              ajax_url = f"https://www.google.com/maps/preview/review/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_encoded}"
+              
+              try:
+                  response = requests.get(ajax_url, headers=HEADERS, proxies=PROXIES, timeout=15)
+                  if response.status_code != 200:
+                      print(f"[ERRORE] Chiamata HTTP fallita con stato {response.status_code}", flush=True)
+                      break
+                      
+                  json_text = response.text
+                  # Rimuoviamo il prefisso anti-XSSI di Google
+                  if json_text.startswith(")]}'"):
+                      json_text = json_text[4:].strip()
+                      
+                  data = json.loads(json_text)
+                  raw_reviews = data[2] if (len(data) > 2 and data[2] is not None) else []
+                  
+                  if not raw_reviews:
+                      print(f"[NODO {node_id}] Nessuna ulteriore recensione disponibile.", flush=True)
+                      break
+                      
+                  nuove_estratte = 0
+                  for r in raw_reviews:
+                      try:
+                          autore = r[0][1] if (len(r) > 0 and len(r[0]) > 1) else "Utente Google"
+                          testo = r[3] if len(r) > 3 else ""
+                          stelle = f"{r[4]} stelle" if len(r) > 4 else "N/D"
+                          data_relativa = r[1][1] if (len(r) > 1 and len(r[1]) > 1) else "N/D"
+                          
+                          recensioni_estratte.append({
+                              "autore": autore,
+                              "testo": testo,
+                              "stelle": stelle,
+                              "data_relativa": data_relativa
+                          })
+                          nuove_estratte += 1
+                          if len(recensioni_estratte) >= max_recensioni:
+                              break
+                      except Exception:
+                          continue
+                          
+                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuove_estratte} recensioni. Totale: {len(recensioni_estratte)}", flush=True)
+                  start_index += 10
+                  
+              except Exception as e:
+                  print(f"[ERRORE] Eccezione durante il download: {e}", flush=True)
+                  break
+
+          # Salvataggio dell'output in formato JSON
+          output_file = f"output_node_{node_id}.txt"
+          with open(output_file, "w", encoding="utf-8") as f:
+              f.write(json.dumps(recensioni_estratte, indent=4, ensure_ascii=False))
+
+          print(f"[NODO {node_id}] Estrazione completata con successo!", flush=True)
+          EOF
+
+      - name: Esecuzione Scraping Singolo Nodo (In-Socket)
         run: |
-          cd google-reviews-scraper-pro
-          # Avviamo lo scraper di George. Mostrerà i log in tempo reale sulla console.
-          python start.py
+          echo "Avvio processo su un singolo nodo (Nodo 1)..."
+          python -u m2_insocket.py 1
           
-          # Copiamo i file di output generati nella root della directory di lavoro
-          cp google_reviews.json ../output_macchina2_cdp.txt || true
-          cp reviews.db ../output_macchina2_cdp.db || true
+          # Consolidamento dell'output nel file finale
+          touch output_node_1.txt
+          cat output_node_1.txt > output_macchina2_cdp.json
 
       - name: Upload Artifact Macchina 2 (JSON)
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2_JSON
-          path: output_macchina2_cdp.txt
-
-      - name: Upload Artifact Macchina 2 (Database SQLite)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risultati_Macchina2_DB
-          path: output_macchina2_cdp.db
+          path: output_macchina2_cdp.json
