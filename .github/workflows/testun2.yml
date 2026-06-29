@@ -1,4 +1,4 @@
-name: Scraping Integrato e Guida Turistica Visiva con Gemini AI
+name: Scraping Integrato e Guida Turistica Visiva con Gemini AI Live
 
 on: 
   workflow_dispatch:
@@ -30,7 +30,6 @@ jobs:
           git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
           cd google-reviews-scraper-pro
           pip install -r requirements.txt
-          # Installiamo il NUOVO SDK ufficiale 'google-genai'
           pip install pyyaml seleniumbase google-genai requests
           seleniumbase install chromedriver
 
@@ -218,7 +217,6 @@ jobs:
                   print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
                   risultati.append(info_locale)
                   
-                  # Registriamo l'URL con hl=en per lo scraper di recensioni
                   businesses_list.append({
                       'url': driver.current_url,
                       'custom_params': {'company': nome_trimmed}
@@ -262,13 +260,13 @@ jobs:
           python start.py
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live (Fase 3)
-        # Questo script implementa il nuovo SDK 'google-genai' e il modello richiesto
         shell: bash
         run: |
           cat << 'EOF' > google-reviews-scraper-pro/generate_guide.py
           import os
           import json
           import re
+          import asyncio
           import requests
           from google import genai
           from google.genai import types
@@ -300,50 +298,40 @@ jobs:
 
           guida_turistica_visiva = {}
 
-          for locale, urls in immagini_per_locale.items():
-              urls_unici = list(set(urls))
-              urls_campione = urls_unici[:5]
+          # Esecuzione della sessione asincrona Live WebSocket
+          async def analizza_locale_live(locale, urls_campione):
+              print(f"\n-> Avvio sessione Live WebSocket per {locale} con gemini-3.1-flash-live-preview...", flush=True)
               
-              if not urls_campione:
-                  print(f"Nessuna immagine disponibile per {locale}.")
-                  continue
-
-              print(f"\n-> Analisi visiva per {locale} usando {len(urls_campione)} immagini con Gemini 3.1 Flash Live Preview...", flush=True)
-              
-              # Prepariamo la lista dei contenuti per la chiamata multimodale
-              contents_payload = []
-              
+              immagini_bytes = []
               for idx, url in enumerate(urls_campione):
                   try:
-                      # Ottimizziamo il download chiedendo a Google foto leggermente più piccole (es: 400x400)
                       url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w400-h400', url)
-                      
                       response = requests.get(url_ottimizzato, timeout=10)
                       if response.status_code == 200:
-                          # Creiamo la parte dall'array dei byte con il nuovo SDK google-genai
-                          image_part = types.Part.from_bytes(
-                              data=response.content,
-                              mime_type="image/jpeg"
-                          )
-                          contents_payload.append(image_part)
-                          print(f"   [Foto {idx+1}/{len(urls_campione)}] Scaricata con successo.", flush=True)
+                          immagini_bytes.append(response.content)
+                          print(f"   [Foto {idx+1}/{len(urls_campione)}] Scaricata.", flush=True)
                   except Exception as e:
-                      print(f"   [Foto {idx+1}] Errore durante il download: {e}", flush=True)
+                      print(f"   [Foto {idx+1}] Errore download: {e}", flush=True)
 
-              if not contents_payload:
-                  print(f"Nessuna immagine scaricata con successo per {locale}.")
-                  continue
+              if not immagini_bytes:
+                  print(f"Nessuna immagine scaricata per {locale}.", flush=True)
+                  return None
 
-              # Prompt flessibile per identificazione entità, analisi visiva ed estrazione OCR
+              # Configurazione WebSocket: indichiamo che vogliamo ricevere SOLO risposte in formato testo
+              config = {
+                  "response_modalities": ["TEXT"]
+              }
+
+              # Prompt esteso, flessibile e orientato all'OCR di orari, prezzi o cartelli
               prompt = """
               Sei un sistema di intelligenza artificiale multimodale specializzato in geomarketing, viaggi ed estrazione dati visivi.
               Analizza attentamente questo gruppo di immagini caricate dagli utenti per questa specifica attività commerciale o punto di interesse.
               
-              Devi capire dinamicamente che tipo di entità stai analizzando (es. ristorante, attrazione naturale, terme/spa, monumento storico, chiesa, sentiero, museo, hotel, ecc.) e adattare l'analisi in base alle peculiarità del luogo.
+              Devi capire dinamicamente che tipo di entità stai analizzando (es. ristorante, attrazione naturale, terme/spa, monumento storico, chiesa, sentiero, museo, hotel, ecc.) e adattare l'analisi in base alle caratteristiche del luogo.
               
-              Inoltre, effettua un'operazione di OCR (riconoscimento ottico dei caratteri): se nelle foto compaiono cartelli, menu, listini cartacei, lavagne con prezzi, orari di apertura o avvisi scritti, estrai queste informazioni con la massima precisione.
+              Inoltre, effettua un'operazione di OCR (riconoscimento ottico dei caratteri): se nelle foto compaiono cartelli, menu, listini, lavagne con prezzi, orari di apertura o avvisi scritti, estrai queste informazioni con precisione.
               
-              Restituisci l'output ESCLUSIVAMENTE in formato JSON con la seguente struttura:
+              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
               {
                   "tipo_entita": "Categoria identificata (es. Ristorante / Terme / Monumento Storico / Chiesa / Sentiero / Hotel)",
                   "descrizione_atmosfera": "Descrizione evocativa e professionale di 2 paragrafi in italiano sullo stile, l'atmosfera, il design, le luci e la 'vibe' del posto. Concentrati sulle emozioni visive.",
@@ -353,32 +341,78 @@ jobs:
               
               Importante: rispondi esclusivamente in italiano per i testi descrittivi, e non menzionare mai che stai analizzando dei file o delle immagini nella 'descrizione_atmosfera'. Scrivi come se descrivessi l'esperienza vissuta sul posto.
               """
-              
-              contents_payload.append(prompt)
+
+              accumulated_text = ""
 
               try:
-                  # Interroghiamo il modello specificato con la configurazione JSON attiva
-                  response = client.models.generate_content(
-                      model='gemini-3.1-flash-live-preview',
-                      contents=contents_payload,
-                      config=types.GenerateContentConfig(
-                          response_mime_type="application/json"
+                  # Avviamo la connessione asincrona WebSocket al modello gemini-3.1-flash-live-preview
+                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
+                      # Inviamo i frame delle immagini (video input) uno ad uno
+                      for img in immagini_bytes:
+                          await session.send_realtime_input(
+                              video=types.Blob(
+                                  data=img,
+                                  mime_type="image/jpeg"
+                              )
+                          )
+                          await asyncio.sleep(0.5) # Pausa minima per permettere l'elaborazione del frame
+                      
+                      # Inviamo il prompt testuale per avviare l'elaborazione del turno
+                      await session.send_realtime_input(
+                          text=prompt
                       )
-                  )
-                  
-                  # Validiamo la risposta verificando che sia un JSON valido
-                  json_data = json.loads(response.text)
-                  guida_turistica_visiva[locale] = json_data
-                  print(f"-> Analisi Gemini completata con successo per {locale}!", flush=True)
+
+                      # Leggiamo lo stream della risposta WebSocket in arrivo
+                      async for response in session.receive():
+                          if response.server_content and response.server_content.model_turn:
+                              for part in response.server_content.model_turn.parts:
+                                  if part.text:
+                                      accumulated_text += part.text
+                          
+                          # Terminiamo la ricezione quando il modello completa il turno di risposta
+                          if response.server_content and response.server_content.turn_complete:
+                              break
+
+                  print(f"-> Sessione Live completata con successo per {locale}!", flush=True)
+
+                  # Estraiamo il blocco JSON per formattarlo pulito nell'output finale
+                  match = re.search(r'```json\s*(.*?)\s*```', accumulated_text, re.DOTALL)
+                  if match:
+                      json_str = match.group(1)
+                      return json.loads(json_str)
+                  else:
+                      try:
+                          return json.loads(accumulated_text)
+                      except Exception:
+                          return {
+                              "tipo_entita": "N/D",
+                              "descrizione_atmosfera": accumulated_text,
+                              "analisi_visiva_dettagli": "N/D",
+                              "dati_estratti_da_cartelli": "N/D"
+                          }
               except Exception as e:
-                  print(f"Errore durante l'interrogazione di Gemini per {locale}: {e}", flush=True)
+                  print(f"Errore durante l'interrogazione WebSocket per {locale}: {e}", flush=True)
+                  return None
 
-          # Scrittura del file finale
-          output_path = "guida_viaggio_visiva.json"
-          with open(output_path, "w", encoding="utf-8") as f:
-              json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
+          async def main():
+              for locale, urls in immagini_per_locale.items():
+                  urls_unici = list(set(urls))
+                  urls_campione = urls_unici[:5]
+                  
+                  if not urls_campione:
+                      continue
+                      
+                  json_res = await analizza_locale_live(locale, urls_campione)
+                  if json_res:
+                      guida_turistica_visiva[locale] = json_res
 
-          print(f"\nGuida turistica visiva completata e salvata in {output_path}.", flush=True)
+              output_path = "guida_viaggio_visiva.json"
+              with open(output_path, "w", encoding="utf-8") as f:
+                  json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
+              print(f"\nGuida turistica visiva completata e salvata in {output_path}.", flush=True)
+
+          if __name__ == "__main__":
+              asyncio.run(main())
           EOF
 
       - name: Esecuzione Fase 3 (Generazione Guida Turistica con Gemini AI)
