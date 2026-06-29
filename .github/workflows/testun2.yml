@@ -50,11 +50,10 @@ jobs:
               'Hoffell hot tub'
           ]
 
-          # Funzione didattica per ripulire il testo dalle icone/glifi di Google Maps (es.  o )
+          # Pulisce i testi dai glifi grafici di Maps (, , ecc.)
           def pulisci_testo(testo):
               if not testo:
                   return 'N/D'
-              # Rimuove glifi non-ASCII e spazi/a-capo all'inizio della stringa
               testo_pulito = re.sub(r'^[\s\W_]+', '', testo)
               return testo_pulito.strip()
 
@@ -69,7 +68,11 @@ jobs:
                   nome_trimmed = nome.strip()
                   print(f'\n=== Estrazione per: \"{nome_trimmed}\" ===', flush=True)
                   
-                  search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}'
+                  # -----------------------------------------------------------------
+                  # FORZIAMO LA LINGUA ITALIANA ACCODANDO '?hl=it' ALL'URL DI RICERCA
+                  # Questo costringe Google a risponderci SEMPRE in italiano.
+                  # -----------------------------------------------------------------
+                  search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}?hl=it'
                   driver.get(search_url)
                   time.sleep(5)
                   
@@ -90,6 +93,12 @@ jobs:
                       try:
                           first_result_el = driver.find_element('css selector', 'a[href*=\"/maps/place/\"]')
                           resolved_url = first_result_el.get_attribute('href')
+                          # Ci assicuriamo che anche l'URL di destinazione utilizzi la lingua italiana
+                          if 'hl=' not in resolved_url:
+                              resolved_url += '&hl=it'
+                          else:
+                              resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=it', resolved_url)
+                              
                           print(f'-> Rilevata lista. Carico il primo risultato: {resolved_url}', flush=True)
                           driver.get(resolved_url)
                           time.sleep(5)
@@ -111,7 +120,7 @@ jobs:
                       'caratteristiche_servizi': []
                   }
                   
-                  # Estrazione dati anagrafici base (con pulizia dei glifi)
+                  # Estrazione dati anagrafici base
                   try:
                       info_locale['nome'] = driver.find_element('css selector', 'h1').text
                   except Exception: pass
@@ -134,7 +143,7 @@ jobs:
                       info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id=\"authority\"]').get_attribute('href')
                   except Exception: pass
                   
-                  # Coordinate
+                  # Coordinate geografiche
                   match = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
                   if match:
                       info_locale['coordinate'] = {
@@ -142,61 +151,50 @@ jobs:
                           'longitudine': float(match.group(2))
                       }
                       
-                  # Stelle e recensioni complessive
+                  # Parsing numerico robusto per Stelle e Recensioni
                   try:
                       rating_text = driver.find_element('css selector', 'div.F7nice').text
+                      # Esempio italiano: "4,8 (496.163)"
+                      rating_text = rating_text.replace('\xa0', ' ')  # Rimuove eventuali spazi unificatori
                       if '(' in rating_text:
                           parts = rating_text.split('(')
-                          info_locale['media_stelle'] = float(parts[0].replace(',', '.'))
-                          info_locale['totale_recensioni'] = int(parts[1].replace(')', '').replace('.', '').replace(',', ''))
+                          info_locale['media_stelle'] = float(parts[0].replace(',', '.').strip())
+                          
+                          # Pulizia regex: estrae SOLO le cifre numeriche dal totale recensioni
+                          reviews_raw = parts[1].split(')')[0]
+                          only_numbers = re.sub(r'[^\d]', '', reviews_raw)
+                          info_locale['totale_recensioni'] = int(only_numbers)
                   except Exception: pass
 
-                  # Estrazione Grafici Affluenza (Bypass Classi CSS tramite XPath Semantico)
-                  # Cerchiamo qualsiasi elemento nel DOM con aria-label che contiene indicatori di affluenza
+                  # Estrazione Grafici Affluenza (Ora infallibile grazie all'italiano forzato)
                   try:
-                      barre = driver.find_elements('xpath', \"//*[contains(@aria-label, 'busy') or contains(@aria-label, 'affollato') or contains(@aria-label, 'affluenza') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]\")
+                      barre = driver.find_elements('xpath', \"//*[contains(@aria-label, 'affollato') or contains(@aria-label, 'affluenza') or contains(@aria-label, 'busy') or contains(@aria-label, 'popular')]\")
                       for b in barre:
                           lbl = b.get_attribute('aria-label')
                           if lbl and lbl not in info_locale['popular_times_affluenza']:
                               info_locale['popular_times_affluenza'].append(lbl)
                   except Exception: pass
 
-                  # Estrazione Caratteristiche (Bypass Lingua del Browser)
-                  # Proviamo a cercare il pulsante Informazioni usando sia tag italiani che inglesi
+                  # Estrazione Caratteristiche e Servizi (Trovando 'Informazioni' in italiano)
                   try:
                       url_scheda_corrente = driver.current_url
-                      info_btn = None
-                      for selector in [
-                          'button[data-tooltip=\"Informazioni\"]', 
-                          'button[aria-label*=\"Informazioni\"]',
-                          'button[data-tooltip=\"About\"]', 
-                          'button[aria-label*=\"About\"]',
-                          'button[data-tooltip=\"Su questo luogo\"]', 
-                          'button[aria-label*=\"Su questo luogo\"]'
-                      ]:
-                          try:
-                              info_btn = driver.find_element('css selector', selector)
-                              break
-                          except Exception:
-                              pass
+                      # Avendo forzato l'italiano, il pulsante si chiamerà sicuramente 'Informazioni'
+                      info_btn = driver.find_element('css selector', 'button[data-tooltip=\"Informazioni\"], button[aria-label*=\"Informazioni\"]')
+                      
+                      info_btn.click()
+                      time.sleep(2)
+                      
+                      # Estraiamo gli elementi descrittivi dei servizi
+                      elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
+                      for s in elementi_servizi:
+                          if s.text and s.text not in info_locale['caratteristiche_servizi']:
+                              info_locale['caratteristiche_servizi'].append(s.text)
                               
-                      if info_btn:
-                          info_btn.click()
-                          time.sleep(2)
-                          
-                          # Estraiamo gli elementi descrittivi dei servizi
-                          elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                          for s in elementi_servizi:
-                              if s.text and s.text not in info_locale['caratteristiche_servizi']:
-                                  info_locale['caratteristiche_servizi'].append(s.text)
-                                  
-                          # Torniamo alla scheda principale
-                          driver.get(url_scheda_corrente)
-                          time.sleep(2)
-                      else:
-                          print('-> Pulsante Informazioni/About non trovato per questa scheda.', flush=True)
+                      # Ritorniamo alla scheda principale
+                      driver.get(url_scheda_corrente)
+                      time.sleep(2)
                   except Exception as e:
-                      print(f'-> Errore nell\'estrazione delle informazioni aggiuntive: {e}', flush=True)
+                      print(f'-> Avviso: scheda informazioni non trovata o non accessibile: {e}', flush=True)
                   
                   print(f'-> Dati estratti con successo per: {info_locale[\"nome\"]}', flush=True)
                   risultati.append(info_locale)
