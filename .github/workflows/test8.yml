@@ -1,4 +1,4 @@
-name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+name: Fast RAG Challenge 2026 Università di Roma
 
 on: 
   workflow_dispatch:
@@ -8,296 +8,75 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Dipendenze Leggere (Playwright & BS4)
-        run: |
-          sudo apt-get update
-          # Installiamo solo le librerie Python minime. Nessun font di sistema pesante.
-          pip install beautifulsoup4 playwright requests "requests[socks]"
-          # Installiamo solo il motore leggero di Chromium per Playwright
-          playwright install chromium
-
       - name: Setup 1 WARProxy Docker Container (IPv6)
+        # Il proxy serve per non far bannare l'IP di GitHub da Google.
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
           PORT=40001
-          echo "Avvio container warproxy-1 sulla porta $PORT..."
-          docker run --name warproxy-1 \
-            --network host \
-            -e SOCKS5_PORT=$PORT \
-            -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -e VERBOSE=true \
+          docker run --name warproxy-1 --network host \
+            -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
             -d ghcr.io/kingcc/warproxy:latest
-
-          echo "Attesa inizializzazione del tunnel..."
           sleep 5
 
-      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+      - name: Verifica IP IPv6 (socks5h)
         run: |
           PORT=40001
-          echo "=================================================="
-          echo "VERIFICA E AUTO-HEALING CONTAINER 1 (PORTA $PORT):"
-          
-          SUCCESS=false
-          for tentativo in {1..5}; do
-            echo "Tentativo $tentativo/5..."
-            IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
-            
-            if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
-              echo "Container 1 pronto! IP: $IP"
-              SUCCESS=true
-              break
-            else
-              echo "Container 1 non risponde. Riavvio in corso..."
-              docker restart warproxy-1
-              sleep 5
-            fi
+          for i in {1..3}; do
+            IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 2
           done
+          echo "Proxy pronto. IP di uscita: $IP"
 
-          if [ "$SUCCESS" = "false" ]; then
-            echo "ERRORE CRITICO: Il container 1 non è raggiungibile dopo 5 riavvii."
-            exit 1
-          fi
-          echo "=================================================="
+      - name: Setup Ambiente e Dipendenze Essenziali
+        # Rimosso Playwright, Cloakbrowser e Font. Scarichiamo solo il necessario.
+        run: |
+          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
+          cd google-reviews-scraper-pro
+          pip install -r requirements.txt
+          pip install pyyaml seleniumbase
+          seleniumbase install chromedriver
 
-      - name: Avvio Xvfb (Virtual Display Headful per bypass)
+      - name: Avvio Xvfb (Display virtuale per Selenium)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Creazione script Python (In-Context REST - 50 Recensioni Più Recenti)
+      - name: Genera Configurazione Ottimizzata
         run: |
-          cat << 'EOF' > m2_insocket.py
-          import time
-          import sys
-          import random
-          import os
-          import re
-          import json
-          import urllib.parse
-          from playwright.sync_api import sync_playwright
-          from bs4 import BeautifulSoup
+          cd google-reviews-scraper-pro
+          python -c "
+          import yaml
 
-          if len(sys.argv) < 2:
-              sys.exit(1)
-
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-
-          # Configurazione del proxy SOCKS5 per Playwright
-          proxy_settings = {
-              "server": f"socks5://127.0.0.1:{ACTIVE_PORT}"
+          config_data = {
+              'headless': False,                       # Serve 'False' per via di Xvfb/UC Mode
+              'sort_by': 'newest',                     # <-- MODIFICATO: Ordina per Più Recenti
+              'max_reviews': 50,                       # <-- LIMITA a 50
+              'proxy': 'socks5://127.0.0.1:40001',     
+              'db_path': ':memory:',                   # <-- SQLite forzato in RAM, sparirà
+              'download_images': False,                # Ottimizzazione velocità
+              'use_mongodb': False,                    
+              'backup_to_json': True,                  
+              'json_path': 'google_reviews.json',      # Unico output reale
+              'log_level': 'WARNING',                  # Meno spam nella console
+              'businesses': [
+                  {
+                      'url': 'https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660',
+                      'custom_params': {'company': 'Coro Orvieto'}
+                  }
+              ]
           }
 
-          # --- CONVERSIONE COORDINATE SIGNED 64-BIT ---
-          def to_signed_64(hex_str):
-              """Converte una stringa esadecimale in un intero a 64-bit con segno."""
-              val = int(hex_str, 16)
-              if val >= 0x8000000000000000:
-                  val -= 0x10000000000000000
-              return str(val)
+          with open('config.yaml', 'w') as f:
+              yaml.dump(config_data, f)
+          "
 
-          # --- METODO 1: RISOLUZIONE DELLE COORDINATE ---
-          def esegui_ricerca_e_risolvi_coordinate(page, query):
-              """Esegue la ricerca e isola id_y e cid in formato signed 64-bit."""
-              search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-              print(f"[NODO {node_id}] Navigazione su: {search_url}", flush=True)
-              
-              page.set_default_navigation_timeout(90000)
-              page.set_default_timeout(90000)
-              
-              # Blocco degli asset pesanti per ottimizzare banda e velocità di caricamento
-              def block_heavy_assets(route):
-                  url = route.request.url.lower()
-                  if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
-                      route.abort()
-                  else:
-                      route.continue_()
-                      
-              page.route("**/*", block_heavy_assets)
-              page.goto(search_url, wait_until="commit", timeout=90000)
-              
-              time.sleep(6)
-              
-              # Gestione del Cookie Consent di Google se presente
-              try:
-                  consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                  if consent_btn.is_visible(timeout=5000):
-                      consent_btn.click()
-                      time.sleep(3)
-              except Exception:
-                  pass
-
-              # Gestione della disambiguazione (se compare l'elenco dei risultati)
-              risultati_ricerca = page.locator("a[href*='/maps/place/']")
-              if risultati_ricerca.count() > 0:
-                  print(f"[NODO {node_id}] Rilevato elenco. Clicco sul primo risultato...", flush=True)
-                  risultati_ricerca.first.click()
-                  time.sleep(5)
-              else:
-                  print(f"[NODO {node_id}] Scheda aperta direttamente.", flush=True)
-
-              # Attendiamo che l'URL si stabilizzi sul reindirizzamento definitivo (/maps/place/...)
-              try:
-                  page.wait_for_url("**/maps/place/**", timeout=25000)
-                  print(f"[NODO {node_id}] Reindirizzamento completato: {page.url}", flush=True)
-              except Exception:
-                  print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
-
-              # Estrazione di id_y e cid convertendoli da esadecimale a signed 64-bit decimale
-              id_y = None
-              cid = None
-              current_url = page.url
-              match = re.search(r"(0x[a-fA-F0-9]+):(0x[a-fA-F0-9]+)", current_url)
-              
-              if match:
-                  try:
-                      hex_y = match.group(1)
-                      hex_cid = match.group(2)
-                      id_y = to_signed_64(hex_y)
-                      cid = to_signed_64(hex_cid)
-                      print(f"[NODO {node_id}] Coordinate convertite con successo! id_y={id_y}, cid={cid}", flush=True)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore di conversione esadecimale: {e}", flush=True)
-                      
-              return id_y, cid
-
-          # --- METODO 2: IN-CONTEXT JSON FETCHING ---
-          def estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50):
-              """Effettua le chiamate fetch all'endpoint nativo di Maps rpc ereditando la sessione reale."""
-              recensioni_estratte = []
-              start_index = 0
-              ciclo = 0
-              
-              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro...", flush=True)
-              
-              while len(recensioni_estratte) < max_recensioni:
-                  ciclo += 1
-                  
-                  # Costruiamo il parametro pb con ordinamento '3e2' (NEWEST / Più recenti) [10]
-                  pb_param = f"!1m2!1y{id_y}!2y{cid}!2m2!1i{start_index}!2i10!3e2!4m5!3b1!4b1!5b1!6b1!7b1"
-                  
-                  # URL-encoding obbligatorio in Python del parametro pb per bypassare i controlli GFE [10]
-                  pb_encoded = urllib.parse.quote(pb_param, safe='')
-                  
-                  # Usiamo un URL relativo per far sì che il browser risolva automaticamente il dominio regionale corretto (.com, .it, .de) [2]
-                  ajax_url = f"/maps/preview/review/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_encoded}"
-                  
-                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
-                  try:
-                      json_raw = page.evaluate("""async (url) => {
-                          try {
-                              const response = await fetch(url);
-                              return await response.text();
-                          } catch (e) {
-                              return "ERRORE: " + e.message;
-                          }
-                      }""", ajax_url)
-                      
-                      if json_raw.startswith("ERRORE:"):
-                          print(f"[NODO {node_id}] Errore nel fetch browser-side: {json_raw}", flush=True)
-                          break
-                          
-                      # Rimuoviamo il prefisso di sicurezza XSSI di Google )]}'\n prima del parsing JSON
-                      if json_raw.startswith(")]}'"):
-                          json_raw = json_raw[4:].strip()
-                          
-                      # Diagnostica log
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Risposta JSON ricevuta (lunghezza {len(json_raw)}): {json_raw[:180]}...", flush=True)
-                      
-                      data = json.loads(json_raw)
-                      
-                      # Nel JSON di Google, le recensioni sono caricate all'interno del terzo livello (indice 2)
-                      raw_reviews = data[2] if (len(data) > 2 and data[2] is not None) else []
-                      
-                      if not raw_reviews:
-                          print(f"[NODO {node_id}] Nessun elemento trovato nel JSON. Fine delle recensioni disponibili.", flush=True)
-                          break
-                          
-                      nuove_estratte = 0
-                      for r in raw_reviews:
-                          try:
-                              autore = r[0][1] if (len(r) > 0 and len(r[0]) > 1) else "Utente Google"
-                              testo = r[3] if len(r) > 3 else ""
-                              stelle = f"{r[4]} stelle" if len(r) > 4 else "N/D"
-                              data_relativa = r[1][1] if (len(r) > 1 and len(r[1]) > 1) else "N/D"
-                              
-                              recensioni_estratte.append({
-                                  "autore": autore,
-                                  "testo": testo,
-                                  "stelle": stelle,
-                                  "data_relativa": data_relativa
-                              })
-                              nuove_estratte += 1
-                              
-                              if len(recensioni_estratte) >= max_recensioni:
-                                  break
-                          except Exception:
-                              continue
-                              
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Elaborate {nuove_estratte} recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
-                      
-                      start_index += 10
-                      time.sleep(random.uniform(0.3, 0.7))
-                      
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore durante l'evaluate fetch: {e}", flush=True)
-                      break
-                      
-              return recensioni_estratte
-
-          # --- RUN PRINCIPALE ---
-          try:
-              with sync_playwright() as p:
-                  print(f"[NODO {node_id}] Avvio del browser Chromium...", flush=True)
-                  browser = p.chromium.launch(
-                      headless=False, # Headed sotto Xvfb per evitare facili rilevamenti bot
-                      proxy=proxy_settings
-                  )
-                  
-                  context = browser.new_context(
-                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                      viewport={"width": 1920, "height": 1080}
-                  )
-                  
-                  page = context.new_page()
-                  ricerca_target = "Coro Orvieto"
-                  
-                  # 1. Risoluzione delle coordinate esadecimali
-                  id_y, cid = esegui_ricerca_e_risolvi_coordinate(page, ricerca_target)
-                  
-                  if id_y and cid:
-                      # 2. Estrazione diretta dei payload JSON dal contesto (In-Context) con URL relativo e URL-encoding
-                      recensioni = estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50)
-                  else:
-                      raise ValueError("Impossibile risolvere le coordinate id_y o cid del locale.")
-                  
-                  # 3. Salvataggio su file
-                  output_file = f"output_node_{node_id}.txt"
-                  with open(output_file, "w", encoding="utf-8") as f:
-                      f.write(json.dumps(recensioni, indent=4, ensure_ascii=False))
-                      
-                  print(f"[NODO {node_id}] Esecuzione terminata. Salvate {len(recensioni)} recensioni.", flush=True)
-                  
-                  page.close()
-                  context.close()
-                  browser.close()
-
-          except Exception as e:
-              print(f"[NODO {node_id}] Errore critico nel processo: {e}", flush=True)
-              with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
-                  f.write(f"ERRORE CRITICO: {e}\n")
-          EOF
-
-      - name: Esecuzione Scraping Singolo Nodo (In-Context)
+      - name: Esecuzione Scraping
         run: |
-          echo "Avvio processo su un singolo nodo (Nodo 1)..."
-          python -u m2_insocket.py 1
-          
-          # Consolidamento dell'output nel file finale
-          touch output_node_1.txt
-          cat output_node_1.txt > output_macchina2_cdp.json
+          cd google-reviews-scraper-pro
+          python start.py
+          # Copiamo SOLO il file JSON, ignorando tutto il resto
+          cp google_reviews.json ../output_macchina2_cdp.json
 
-      - name: Upload Artifact Macchina 2 (JSON)
+      - name: Upload Artifact (SOLO JSON)
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2_JSON
