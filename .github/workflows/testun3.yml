@@ -9,7 +9,6 @@ jobs:
     steps:
 
       - name: Setup 1 WARProxy Docker Container (IPv6)
-        # Il proxy protegge l'IP di GitHub dai blocchi di Google Maps durante la ricerca
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
           PORT=40001
@@ -31,7 +30,6 @@ jobs:
           git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
           cd google-reviews-scraper-pro
           pip install -r requirements.txt
-          # Installiamo pyyaml per la configurazione, seleniumbase per Maps e google-genai per l'AI
           pip install pyyaml seleniumbase google-genai requests
           seleniumbase install chromedriver
 
@@ -41,7 +39,6 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Scrivi Script Risolutore (Fase 1)
-        # Risolve la lista in italiano, raccoglie i metadati e autogenera config.yaml in inglese
         shell: bash
         run: |
           cat << 'EOF' > google-reviews-scraper-pro/resolve_maps.py
@@ -171,7 +168,7 @@ jobs:
                           info_locale['totale_recensioni'] = int(only_numbers)
                   except Exception: pass
 
-                  # Scroll progressivo del pannello per sbloccare i grafici (Bypass Lazy Loading)
+                  # Scroll per caricamento asincrono
                   try:
                       pannello = None
                       for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
@@ -203,7 +200,7 @@ jobs:
                   # Caratteristiche ed etichette (Informazioni)
                   try:
                       url_scheda_corrente = driver.current_url
-                      info_btn = driver.find_element('css selector', 'button[data-tooltip="Informazioni"], button[aria-label*="Informazioni"]')
+                      info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
                       info_btn.click()
                       time.sleep(2)
                       
@@ -220,33 +217,22 @@ jobs:
                   print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
                   risultati.append(info_locale)
                   
-                  # -----------------------------------------------------------------
-                  # FORZATURA IN INGLESE (hl=en) PER LO SCRAPER DI RECENSIONI
-                  # -----------------------------------------------------------------
-                  scraper_url = driver.current_url
-                  if 'hl=' not in scraper_url:
-                      scraper_url += '&hl=en' if '?' in scraper_url else '?hl=en'
-                  else:
-                      scraper_url = re.sub(r'hl=[a-z]{2}', 'hl=en', scraper_url)
-
                   businesses_list.append({
-                      'url': scraper_url,
+                      'url': driver.current_url,
                       'custom_params': {'company': nome_trimmed}
                   })
                   
           finally:
               driver.quit()
 
-          # Salviamo l'output dell'anagrafica
           with open('dati_completi_mappe.json', 'w', encoding='utf-8') as f:
               json.dump(risultati, f, indent=4, ensure_ascii=False)
 
-          # Generazione dinamica della configurazione config.yaml per lo scraper ufficiale delle recensioni
           config_data = {
               'headless': False,                       
-              'sort_by': 'newest',                     # <-- Ordina cronologicamente
+              'sort_by': 'newest',                     
               'scrape_mode': 'full',                   
-              'max_reviews': 50,                       # Estrae fino a 50 recensioni
+              'max_reviews': 50,                       
               'proxy': 'socks5://127.0.0.1:40001',     
               'db_path': ':memory:',                   
               'download_images': False,                
@@ -269,13 +255,11 @@ jobs:
           python resolve_maps.py
 
       - name: Esecuzione Fase 2 (Scraper Recensioni Ufficiale)
-        # Scarica le recensioni vere ed estrae i link alle immagini "user_images" nel JSON
         run: |
           cd google-reviews-scraper-pro
           python start.py
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live (Fase 3)
-        # Questo script implementa il parallelismo ad alte prestazioni (Semaphore 20) per estrarre descrizioni di 20 immagini
         shell: bash
         run: |
           cat << 'EOF' > google-reviews-scraper-pro/generate_guide.py
@@ -301,7 +285,7 @@ jobs:
               print(f"Impossibile leggere google_reviews.json: {e}")
               exit(1)
 
-          # Raggruppiamo gli URL delle immagini estratti dallo scraper per ogni locale
+          # Raggruppiamo gli URL delle immagini per locale
           immagini_per_locale = {}
           for r in reviews:
               company = r.get("company")
@@ -316,10 +300,10 @@ jobs:
               "output_audio_transcription": {}
           }
 
-          # Sblocchiamo la concorrenza asincrona parallela a 20 connessioni simultanee (RPM illimitate)
+          # Concorrenza asincrona parallela impostata a 20 connessioni
           semaphore = asyncio.Semaphore(20)
 
-          # Funzione concorrente per l'analisi di una singola immagine
+          # Sotto-funzione asincrona per l'analisi di una singola immagine
           async def analizza_singola_immagine_concorrente(idx, url, prompt, totale):
               async with semaphore:
                   try:
@@ -362,7 +346,7 @@ jobs:
                       print(f"   [Foto {idx+1}/{totale}] Errore chiamata Live API: {e}", flush=True)
                       return None
 
-          # Funzione asincrona per eseguire la sintesi di secondo stadio
+          # Sotto-funzione asincrona per eseguire la sintesi di secondo stadio
           async def analizza_sintesi_globale_live(dati_json_str, prompt_fase2, locale):
               print(f"\n-> Connessione WebSocket avviata per la Sintesi Globale di {locale}...", flush=True)
               accumulated_text = ""
@@ -435,8 +419,7 @@ jobs:
                   Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
                   {
                       "tipologia_luogo": "Categoria generale del luogo identificata dall'analisi incrociata dei dati",
-                      "identita_visiva_e_vibe": "Una ricostruzione densa, evocativa e fluida di 2 paragrafi in italiano che descrive lo spazio, l'atmosfera, i contrasti cromatici e termici (il fumo dell'acqua, i cieli lividi o sereni, la lingua del ghiacciaio visibile). Scrivi con un tono narrativo ed elevato, ma rigorosamente agganciato ai fatti visivi reali.",
-                      "analisi_materica_e_design": "Un'analisi di come i materiali costruttivi (il legno scuro trattato di nero, le pietre piatte dei camminamenti, i muretti rosso mattone) e l'architettura minimalista si inseriscono e contrastano con il paesaggio naturale circostante.",
+                      "descrizione_globale_posto": "Una descrizione complessiva, dettagliata, fattuale e oggettiva del luogo ricavata sintetizzando gli elementi coerenti e ricorrenti presenti nelle descrizioni delle immagini.",
                       "fatti_rilevanti_accertati": [
                           "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti nelle descrizioni"
                       ],
@@ -454,7 +437,7 @@ jobs:
                   risultato_sintesi_raw = await analizza_sintesi_globale_live(dati_json_str, prompt_fase2, locale)
                   
                   sintesi_globale = {}
-                  if resultado_sintesi_raw:
+                  if risultato_sintesi_raw:
                       try:
                           match = re.search(r'```json\s*(.*?)\s*```', risultato_sintesi_raw, re.DOTALL)
                           json_str = match.group(1) if match else risultato_sintesi_raw
@@ -491,7 +474,6 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cd google-reviews-scraper-pro
           python generate_guide.py
 
       - name: Organizzazione File per l'Esportazione
