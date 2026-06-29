@@ -50,7 +50,7 @@ jobs:
           from seleniumbase import Driver
 
           nomi_attivita = [
-              'sulphur bath, apnia, georgia'
+              'https://maps.app.goo.gl/wiUzh1s33RVfJYP39'
           ]
 
           # Pulisce i testi dai glifi grafici di Maps (es:  o )
