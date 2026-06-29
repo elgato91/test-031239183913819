@@ -1,4 +1,4 @@
-name: Test Standalone - Gemini 3.1 Live API (Efficient 2-Request Pipeline)
+name: Test Standalone - Gemini 3.1 Live API (Parallel 2-Stage Analysis)
 
 on: 
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
           pip install google-genai requests
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
-        # Creiamo lo script Python asincrono ottimizzato a due fasi (solo 2 chiamate WS)
+        # Scriviamo lo script Python asincrono con elaborazione parallela concorrente
         shell: bash
         run: |
           cat << 'EOF' > generate_guide.py
@@ -38,7 +38,7 @@ jobs:
           client = genai.Client(api_key=api_key)
 
           # -----------------------------------------------------------------
-          # ELENCO DI 20 IMMAGINI DA ANALIZZARE IN STREAMING
+          # ELENCO COMPLETO ED ESATTO DELLE 20 IMMAGINI DA ANALIZZARE
           # -----------------------------------------------------------------
           immagini_test = [
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn2nikKKf0tccFSld6MfPaA3ptpr5UL6KIGzl4YcV4KJJMHff0t34FQbBdndHHCjp81_iX4hWtpijmq1rAgirXVF7WcLVcMajiQEVAqHIzuKbGd-UbtVF3IIm3U3UWxjffWRN4-7ug=w600-h900-p-k-no",
@@ -68,44 +68,61 @@ jobs:
               "output_audio_transcription": {}
           }
 
-          async def analizza_tutte_le_immagini_live(immagini_bytes, prompt_fase1):
-              print("-> Invio di 20 immagini in streaming via WebSocket (Fase 1)...", flush=True)
-              accumulated_text = ""
-              try:
-                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
-                      # Stream all 20 images as raw bytes
-                      for idx, img in enumerate(immagini_bytes):
+          # Semaforo per gestire al massimo 5 connessioni WebSocket parallele contemporanee
+          # Questo evita il superamento dei limiti di RPM (Richieste al Minuto) della chiave API
+          semaphore = asyncio.Semaphore(5)
+
+          # Sotto-funzione asincrona per elaborare una singola immagine tramite WebSocket dedicato
+          async def analizza_singola_immagine_concorrente(idx, url, prompt):
+              async with semaphore:
+                  # 1. Download dell'immagine
+                  try:
+                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
+                      response = requests.get(url_ottimizzato, timeout=10)
+                      if response.status_code != 200:
+                          print(f"   [Foto {idx+1}] Errore download (Status: {response.status_code})", flush=True)
+                          return None
+                      img_bytes = response.content
+                  except Exception as e:
+                      print(f"   [Foto {idx+1}] Errore download: {e}", flush=True)
+                      return None
+
+                  print(f"   [Foto {idx+1}/20] Download completato. Connessione WebSocket attiva...", flush=True)
+                  
+                  # 2. Connessione e recupero descrizione
+                  accumulated_text = ""
+                  try:
+                      async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
                           await session.send_realtime_input(
                               video=types.Blob(
-                                  data=img,
+                                  data=img_bytes,
                                   mime_type="image/jpeg"
                               )
                           )
-                          await asyncio.sleep(0.1) # Pausa minima per permettere l'ingestion asincrona
-                          
-                      # Inviamo il prompt per elaborare l'input
-                      await session.send_realtime_input(
-                          text=prompt_fase1
-                      )
+                          await asyncio.sleep(0.5)
+                          await session.send_realtime_input(
+                              text=prompt
+                          )
+                          async for response in session.receive():
+                              if response.server_content and response.server_content.output_transcription:
+                                  if response.server_content.output_transcription.text:
+                                      accumulated_text += response.server_content.output_transcription.text
+                              if response.server_content and response.server_content.turn_complete:
+                                  break
+                      print(f"   [Foto {idx+1}/20] Analisi completata.", flush=True)
+                      return {
+                          "url_immagine": url,
+                          "descrizione_dettagliata": accumulated_text.strip()
+                      }
+                  except Exception as e:
+                      print(f"   [Foto {idx+1}/20] Errore chiamata Live API: {e}", flush=True)
+                      return None
 
-                      # Catturiamo lo stream ed estraiamo la trascrizione dell'audio generato (output_transcription.text)
-                      async for response in session.receive():
-                          if response.server_content and response.server_content.output_transcription:
-                              if response.server_content.output_transcription.text:
-                                  accumulated_text += response.server_content.output_transcription.text
-                          
-                          # Usciamo al completamento del turno
-                          if response.server_content and response.server_content.turn_complete:
-                              break
-                  return accumulated_text.strip()
-              except Exception as e:
-                  print(f"Errore WebSocket in Fase 1: {e}", flush=True)
-                  return None
-
-          async def analizza_sintesi_live(dati_json_str, prompt_fase2):
-              print("-> Invio dati JSON per la Sintesi Globale via WebSocket (Fase 2)...", flush=True)
+          # Sotto-funzione asincrona per eseguire la sintesi di secondo stadio
+          async def analizza_sintesi_globale_live(dati_json_str, prompt_fase2):
+              print("\n-> Connessione WebSocket avviata per la Sintesi Globale (Fase 2)...", flush=True)
               accumulated_text = ""
-              # Combiniamo dati e istruzioni in un unico invio testuale per non saturare i turni del WebSocket
+              # Combiniamo i dati di input strutturati e le istruzioni in un unico pacchetto per massima stabilità
               combined_payload = f"DATI INPUT COMPLETI DA ANALIZZARE:\n{dati_json_str}\n\nISTRUZIONI DI ANALISI:\n{prompt_fase2}"
               try:
                   async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
@@ -125,76 +142,40 @@ jobs:
 
           async def main():
               locale = "Hoffell hot tub"
-              print(f"\n--- INIZIO PIPELINE A 2 RICHIESTE ---")
+              print(f"\n=== AVVIO PIPELINE CONCORRENTE AD ALTA EFFICIENZA ===", flush=True)
               
-              # 1. Scarichiamo tutte le 20 immagini
-              immagini_bytes = []
-              print(f"Download di {len(immagini_test)} immagini in corso...")
+              # PROMPT TOTALLY NEUTRO E NON SUGGESTIVO PER LA FASE 1
+              prompt_singolo = "Descrivi questa immagine in modo dettagliato, oggettivo ed approfondito. Evita qualsiasi riflessione poetica o commento personale."
+              
+              # Creiamo i 20 task concorrenti
+              tasks = []
               for idx, url in enumerate(immagini_test):
-                  try:
-                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
-                      response = requests.get(url_ottimizzato, timeout=10)
-                      if response.status_code == 200:
-                          immagini_bytes.append(response.content)
-                      else:
-                          print(f"   [Foto {idx+1}] Errore download (Status: {response.status_code})")
-                  except Exception as e:
-                      print(f"   [Foto {idx+1}] Errore download: {e}")
+                  tasks.append(analizza_singola_immagine_concorrente(idx, url, prompt_singolo))
+                  
+              print(f"-> Lancio di {len(immagini_test)} analisi parallele (Limite concorrenza: 5)...", flush=True)
+              
+              # Avviamo l'esecuzione concorrente
+              risultati_raw = await asyncio.gather(*tasks)
+              
+              # Filtriamo i risultati andati a buon fine
+              risultati_granulari = [r for r in risultati_raw if r is not None]
+              print(f"\n-> Fase 1 completata. Ricevute {len(risultati_granulari)} descrizioni su {len(immagini_test)}.", flush=True)
 
-              if len(immagini_bytes) < len(immagini_test):
-                  print(f"Attenzione: Scaricate solo {len(immagini_bytes)} immagini su {len(immagini_test)}.")
+              if not risultati_granulari:
+                  print("Errore: Nessuna immagine è stata analizzata con successo. Interruzione.")
+                  exit(1)
 
-              # -----------------------------------------------------------------
-              # RICHIESTA 1: ANALISI GRANULARE DELLE 20 IMMAGINI (1 sola chiamata WS)
-              # -----------------------------------------------------------------
-              prompt_fase1 = """
-              Ti ho appena inviato una sequenza di immagini di un luogo in tempo reale.
-              Descrivi ciascuna immagine in modo estremamente dettagliato, oggettivo, distaccato e approfondito, seguendo lo stesso ordine numerico in cui le ho inviate (da 1 a 20).
-              Evita qualsiasi aggettivo vuoto, metafora o tono promozionale. Concentrati solo sui fatti visibili.
-              
-              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
-              [
-                  {
-                      "numero_immagine": 1,
-                      "descrizione_dettagliata": "Descrizione oggettiva della prima immagine..."
-                  },
-                  ...
-              ]
-              """
-              
-              risultati_granulari_raw = await analizza_tutte_le_immagini_live(immagini_bytes, prompt_fase1)
-              
-              risultati_granulari = []
-              if risultati_granulari_raw:
-                  try:
-                      match = re.search(r'```json\s*(.*?)\s*```', risultati_granulari_raw, re.DOTALL)
-                      json_str = match.group(1) if match else risultati_granulari_raw
-                      lista_json = json.loads(json_str)
-                      
-                      # Mappiamo gli URL originali con le risposte basandoci sull'indice sequenziale
-                      for idx, item in enumerate(lista_json):
-                          if idx < len(immagini_test):
-                              risultati_granulari.append({
-                                  "url_immagine": immagini_test[idx],
-                                  "descrizione_dettagliata": item.get("descrizione_dettagliata", "N/D")
-                              })
-                      print("-> Fase 1 completata con successo!", flush=True)
-                  except Exception as e:
-                      print(f"Errore nel parsing JSON della Fase 1: {e}", flush=True)
-                      print(f"Risposta grezza ricevuta:\n{risultati_granulari_raw}", flush=True)
-                      exit(1)
-                      
               # -----------------------------------------------------------------
               # RICHIESTA 2: SINTESI AGNOSTICA E CONSOLIDAMENTO FATTI (1 sola chiamata WS)
               # -----------------------------------------------------------------
-              # Prepariamo la stringa JSON dei risultati da inviare
               dati_json_str = json.dumps(risultati_granulari, indent=2, ensure_ascii=False)
               
+              # PROMPT COMPLETAMENTE AGNOSTICO E NON SUGGESTIVO (NUGGET DI RICERCA EDITORIALE)
               prompt_fase2 = """
               Sei un analista senior e ricercatore d'archivio specializzato nel controllo incrociato di reportage sul campo e informazioni geomarketing.
               Ti viene fornito un elenco strutturato di descrizioni empiriche ed oggettive di diverse immagini relative a un singolo luogo geografico.
               
-              Il tuo compito NON è scrivere una guida turistica, un testo romanzato o promozionale, ma effettuare una sintesi e ricostruzione globale del posto basandoti esclusivamente sui fatti riportati.
+              Il tuo compito NON è scrivere una guida turistica, un testo romanzato o promozionale, ma effettuare una sintesi e ricostruzione globale del posto basandoti esclusivamente sui fatti riportati nelle descrizioni.
               Devi produrre un "nugget" informativo strutturato e oggettivo, pronto per essere utilizzato all'interno di un processo di deep research editoriale.
               
               Mantieni un approccio distaccato, puramente fattuale, analitico e non suggestivo. Evita qualsiasi tono lirico, enfatico, poetico o promozionale. Limita la tua analisi esclusivamente a quanto emerge in modo diretto, logico e comprovabile dalle descrizioni fornite.
@@ -208,7 +189,7 @@ jobs:
                       "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti nelle descrizioni"
                   ],
                   "discrepanze_o_incoerenze_rilevate": [
-                      "Eventuali elementi visivi contrastanti, dati contraddittori o descrizioni che appaino palesemente incoerenti con il resto del set di dati (se presenti, altrimenti lista vuota)"
+                      "Eventuali elementi visivi contrastanti, dati contraddittori o descrizioni che appaiono palesemente incoerenti con il resto del set di dati (se presenti, altrimenti lista vuota)"
                   ],
                   "testi_e_dati_ocr_aggregati": [
                       "Trascrizione o sintesi strutturata dei testi, cartelli, listini, regole o orari emersi dalla lettura ottica delle immagini (se presenti, altrimenti lista vuota)"
@@ -218,7 +199,7 @@ jobs:
               Rispondi esclusivamente in italiano per i testi descrittivi. Mantieni un approccio puramente analitico, oggettivo, distaccato e scientifico.
               """
               
-              risultato_sintesi_raw = await analizza_sintesi_live(dati_json_str, prompt_fase2)
+              risultato_sintesi_raw = await analizza_sintesi_globale_live(dati_json_str, prompt_fase2)
               
               sintesi_globale = {}
               if risultato_sintesi_raw:
