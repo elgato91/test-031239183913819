@@ -1,10 +1,10 @@
-name: Scraping Didattico Integrato Google Maps (English Only)
+name: Scraping Integrato e Guida Turistica Visiva con Gemini AI
 
 on: 
   workflow_dispatch:
 
 jobs:
-  scrape_maps_full:
+  scrape_and_generate_guide:
     runs-on: ubuntu-latest
     steps:
 
@@ -30,7 +30,8 @@ jobs:
           git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
           cd google-reviews-scraper-pro
           pip install -r requirements.txt
-          pip install pyyaml seleniumbase
+          # Installiamo il NUOVO SDK ufficiale 'google-genai'
+          pip install pyyaml seleniumbase google-genai requests
           seleniumbase install chromedriver
 
       - name: Avvio Xvfb (Display virtuale per Selenium)
@@ -55,7 +56,6 @@ jobs:
               'Hoffell hot tub'
           ]
 
-          # Pulisce i testi dai glifi grafici di Maps (es:  o )
           def pulisci_testo(testo):
               if not testo:
                   return 'N/D'
@@ -74,14 +74,10 @@ jobs:
                   nome_trimmed = nome.strip()
                   print(f'\n=== Risoluzione ed Estrazione Dati per: "{nome_trimmed}" ===', flush=True)
                   
-                  # -----------------------------------------------------------------
-                  # STANDARDIDIZZAZIONE: FORZIAMO L'INGLESE (hl=en) FIN DALL'INIZIO
-                  # -----------------------------------------------------------------
                   search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}?hl=en'
                   driver.get(search_url)
                   time.sleep(5)
                   
-                  # Gestione Cookie
                   if not cookie_accettati:
                       try:
                           consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
@@ -92,14 +88,12 @@ jobs:
                       except Exception:
                           pass
                   
-                  # Disambiguazione automatica se Google mostra una lista
                   current_url = driver.current_url
                   if '/maps/place/' not in current_url:
                       try:
                           first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
                           resolved_url = first_result_el.get_attribute('href')
                           
-                          # Ci assicuriamo che anche l'URL risolto erediti hl=en
                           if 'hl=' not in resolved_url:
                               resolved_url += '&hl=en'
                           else:
@@ -126,7 +120,6 @@ jobs:
                       'caratteristiche_servizi': []
                   }
                   
-                  # Estrazione anagrafica base
                   try:
                       info_locale['nome'] = driver.find_element('css selector', 'h1').text
                   except Exception: pass
@@ -149,7 +142,7 @@ jobs:
                       info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
                   except Exception: pass
                   
-                  # Coordinate con Fallback
+                  # Coordinate
                   match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
                   if match_at:
                       info_locale['coordinate'] = {
@@ -164,7 +157,7 @@ jobs:
                               'longitudine': float(match_data.group(2))
                           }
                       
-                  # Stelle e totale recensioni (Semplificato per l'inglese, es. "4.8 (496,163)")
+                  # Stelle e totale recensioni
                   try:
                       rating_text = driver.find_element('css selector', 'div.F7nice').text
                       rating_text = rating_text.replace('\xa0', ' ')
@@ -176,7 +169,7 @@ jobs:
                           info_locale['totale_recensioni'] = int(only_numbers)
                   except Exception: pass
 
-                  # Scorrimento progressivo della scheda per innescare i grafici (Bypass Lazy Loading)
+                  # Scroll per caricamento asincrono
                   try:
                       pannello = None
                       for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
@@ -196,7 +189,7 @@ jobs:
                   except Exception:
                       pass
 
-                  # Estrazione Grafici Affluenza (Query XPath su etichette inglesi)
+                  # Grafici Affluenza
                   try:
                       barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
                       for b in barre:
@@ -205,15 +198,13 @@ jobs:
                               info_locale['popular_times_affluenza'].append(lbl)
                   except Exception: pass
 
-                  # Estrazione Caratteristiche ed etichette (Pulsante 'About' in inglese)
+                  # Caratteristiche ed etichette (Informazioni)
                   try:
                       url_scheda_corrente = driver.current_url
-                      # Cerchiamo esclusivamente 'About' o 'About this place'
                       info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
                       info_btn.click()
                       time.sleep(2)
                       
-                      # Parsing dei selettori per catturare l'elenco dei servizi
                       elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
                       for s in elementi_servizi:
                           if s.text and s.text not in info_locale['caratteristiche_servizi']:
@@ -227,7 +218,7 @@ jobs:
                   print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
                   risultati.append(info_locale)
                   
-                  # L'URL è già in inglese (hl=en), lo aggiungiamo così com'è per la Fase 2
+                  # Registriamo l'URL con hl=en per lo scraper di recensioni
                   businesses_list.append({
                       'url': driver.current_url,
                       'custom_params': {'company': nome_trimmed}
@@ -236,14 +227,12 @@ jobs:
           finally:
               driver.quit()
 
-          # 1. Salvataggio Anagrafica e Dati Mappe
           with open('dati_completi_mappe.json', 'w', encoding='utf-8') as f:
               json.dump(risultati, f, indent=4, ensure_ascii=False)
 
-          # 2. Generazione dinamica della configurazione config.yaml per lo scraper ufficiale
           config_data = {
               'headless': False,                       
-              'sort_by': 'newest',                     # <-- Ordina cronologicamente
+              'sort_by': 'newest',                     
               'scrape_mode': 'full',                   
               'max_reviews': 50,                       
               'proxy': 'socks5://127.0.0.1:40001',     
@@ -272,15 +261,146 @@ jobs:
           cd google-reviews-scraper-pro
           python start.py
 
+      - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live (Fase 3)
+        # Questo script implementa il nuovo SDK 'google-genai' e il modello richiesto
+        shell: bash
+        run: |
+          cat << 'EOF' > google-reviews-scraper-pro/generate_guide.py
+          import os
+          import json
+          import re
+          import requests
+          from google import genai
+          from google.genai import types
+
+          api_key = os.environ.get("GEMINI_API_KEY")
+          if not api_key:
+              print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
+              exit(1)
+
+          # Inizializziamo il Client ufficiale google-genai
+          client = genai.Client(api_key=api_key)
+
+          try:
+              with open("google_reviews.json", "r", encoding="utf-8") as f:
+                  reviews = json.load(f)
+          except Exception as e:
+              print(f"Impossibile leggere google_reviews.json: {e}")
+              exit(1)
+
+          # Raggruppiamo gli URL delle immagini per locale
+          immagini_per_locale = {}
+          for r in reviews:
+              company = r.get("company")
+              images = r.get("user_images", [])
+              if company and images:
+                  if company not in immagini_per_locale:
+                      immagini_per_locale[company] = []
+                  immagini_per_locale[company].extend(images)
+
+          guida_turistica_visiva = {}
+
+          for locale, urls in immagini_per_locale.items():
+              urls_unici = list(set(urls))
+              urls_campione = urls_unici[:5]
+              
+              if not urls_campione:
+                  print(f"Nessuna immagine disponibile per {locale}.")
+                  continue
+
+              print(f"\n-> Analisi visiva per {locale} usando {len(urls_campione)} immagini con Gemini 3.1 Flash Live Preview...", flush=True)
+              
+              # Prepariamo la lista dei contenuti per la chiamata multimodale
+              contents_payload = []
+              
+              for idx, url in enumerate(urls_campione):
+                  try:
+                      # Ottimizziamo il download chiedendo a Google foto leggermente più piccole (es: 400x400)
+                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w400-h400', url)
+                      
+                      response = requests.get(url_ottimizzato, timeout=10)
+                      if response.status_code == 200:
+                          # Creiamo la parte dall'array dei byte con il nuovo SDK google-genai
+                          image_part = types.Part.from_bytes(
+                              data=response.content,
+                              mime_type="image/jpeg"
+                          )
+                          contents_payload.append(image_part)
+                          print(f"   [Foto {idx+1}/{len(urls_campione)}] Scaricata con successo.", flush=True)
+                  except Exception as e:
+                      print(f"   [Foto {idx+1}] Errore durante il download: {e}", flush=True)
+
+              if not contents_payload:
+                  print(f"Nessuna immagine scaricata con successo per {locale}.")
+                  continue
+
+              # Prompt flessibile per identificazione entità, analisi visiva ed estrazione OCR
+              prompt = """
+              Sei un sistema di intelligenza artificiale multimodale specializzato in geomarketing, viaggi ed estrazione dati visivi.
+              Analizza attentamente questo gruppo di immagini caricate dagli utenti per questa specifica attività commerciale o punto di interesse.
+              
+              Devi capire dinamicamente che tipo di entità stai analizzando (es. ristorante, attrazione naturale, terme/spa, monumento storico, chiesa, sentiero, museo, hotel, ecc.) e adattare l'analisi in base alle peculiarità del luogo.
+              
+              Inoltre, effettua un'operazione di OCR (riconoscimento ottico dei caratteri): se nelle foto compaiono cartelli, menu, listini cartacei, lavagne con prezzi, orari di apertura o avvisi scritti, estrai queste informazioni con la massima precisione.
+              
+              Restituisci l'output ESCLUSIVAMENTE in formato JSON con la seguente struttura:
+              {
+                  "tipo_entita": "Categoria identificata (es. Ristorante / Terme / Monumento Storico / Chiesa / Sentiero / Hotel)",
+                  "descrizione_atmosfera": "Descrizione evocativa e professionale di 2 paragrafi in italiano sullo stile, l'atmosfera, il design, le luci e la 'vibe' del posto. Concentrati sulle emozioni visive.",
+                  "analisi_visiva_dettagli": "Dettagli sugli elementi visibili (es. presentazione e cura dei piatti, stile degli arredi, panorama circostante, architettura, stato delle piscine o vasche termali, ecc.)",
+                  "dati_estratti_da_cartelli": "Eventuali prezzi, orari, regole o informazioni testuali letti direttamente dalle scritte, dai menu o dai cartelli presenti nelle foto (se presenti, altrimenti scrivi 'Nessun cartello o menu con testo rilevato')"
+              }
+              
+              Importante: rispondi esclusivamente in italiano per i testi descrittivi, e non menzionare mai che stai analizzando dei file o delle immagini nella 'descrizione_atmosfera'. Scrivi come se descrivessi l'esperienza vissuta sul posto.
+              """
+              
+              contents_payload.append(prompt)
+
+              try:
+                  # Interroghiamo il modello specificato con la configurazione JSON attiva
+                  response = client.models.generate_content(
+                      model='gemini-3.1-flash-live-preview',
+                      contents=contents_payload,
+                      config=types.GenerateContentConfig(
+                          response_mime_type="application/json"
+                      )
+                  )
+                  
+                  # Validiamo la risposta verificando che sia un JSON valido
+                  json_data = json.loads(response.text)
+                  guida_turistica_visiva[locale] = json_data
+                  print(f"-> Analisi Gemini completata con successo per {locale}!", flush=True)
+              except Exception as e:
+                  print(f"Errore durante l'interrogazione di Gemini per {locale}: {e}", flush=True)
+
+          # Scrittura del file finale
+          output_path = "guida_viaggio_visiva.json"
+          with open(output_path, "w", encoding="utf-8") as f:
+              json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
+
+          print(f"\nGuida turistica visiva completata e salvata in {output_path}.", flush=True)
+          EOF
+
+      - name: Esecuzione Fase 3 (Generazione Guida Turistica con Gemini AI)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          cd google-reviews-scraper-pro
+          python generate_guide.py
+
       - name: Organizzazione File per l'Esportazione
         run: |
           cp google-reviews-scraper-pro/dati_completi_mappe.json ./dati_completi_mappe.json
           cp google-reviews-scraper-pro/google_reviews.json ./google_reviews.json
+          if [ -f "google-reviews-scraper-pro/guida_viaggio_visiva.json" ]; then
+            cp google-reviews-scraper-pro/guida_viaggio_visiva.json ./guida_viaggio_visiva.json
+          fi
 
-      - name: Esporta Risultati (Due JSON)
+      - name: Esporta Risultati (Tre JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Mappe_e_Recensioni
+          name: Risultati_Mappe_Recensioni_e_GuidaAI
           path: |
             dati_completi_mappe.json
             google_reviews.json
+            guida_viaggio_visiva.json
