@@ -36,88 +36,94 @@ jobs:
           import json
 
           captured_requests = []
+          all_urls = []
 
           def handle_request(request):
-              # Catturiamo le chiamate API delle recensioni (listugcposts o preview/review)
-              if request.resource_type in ["xhr", "fetch"] and ("listugc" in request.url or "preview/review" in request.url):
-                  captured_requests.append({
-                      "url": request.url,
-                      "method": request.method,
-                      "headers": request.headers,
-                      "post_data": request.post_data
-                  })
+              url = request.url
+              if request.resource_type in ["xhr", "fetch"]:
+                  all_urls.append(url)
+                  # Cattura l'API delle recensioni o le chiamate di rendering associate
+                  if "listugc" in url or "preview/review" in url:
+                      captured_requests.append({
+                          "url": url,
+                          "method": request.method,
+                          "headers": request.headers,
+                          "post_data": request.post_data
+                      })
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True, proxy={"server": "socks5://127.0.0.1:40001"})
-              page = browser.new_page()
+              page = browser.new_page(viewport={"width": 1280, "height": 720})
               page.on("request", handle_request)
               
-              print("Apertura di Google Maps...")
-              # URL con parametro per aprire direttamente il tab recensioni
+              print("Navigazione su Google Maps...")
+              # URL diretto al pannello delle recensioni del ristorante
               url = "https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!4m8!3m7!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!9m1!1b1!16s%2Fg%2F11l23qq660"
-              page.goto(url, timeout=60000)
-              
-              # Attendiamo per verificare se appare la schermata di consenso cookie
-              page.wait_for_timeout(3000)
-              
-              # Gestione ed elusione del popup di consenso cookie di Google
-              try:
-                  if "consent.google.com" in page.url or page.locator('dialog').count() > 0 or page.locator('button:has-text("Accept")').count() > 0:
-                      print("Rilevato modulo di consenso di Google. Tento il bypass...")
-                      # Selettori comuni per i pulsanti di accettazione cookie (multilingua)
-                      selectors = [
-                          'button:has-text("Accetta tutto")',
-                          'button:has-text("Accept all")',
-                          'button:has-text("I agree")',
-                          'button:has-text("Agree")',
-                          'button:has-text("Tout accepter")',
-                          'button:has-text("Alle akzeptieren")',
-                          'form[action*="consent"] button',
-                          'button[aria-label*="Accetta"]',
-                          'button[aria-label*="Accept"]'
-                      ]
-                      clicked = False
-                      for selector in selectors:
-                          try:
-                              loc = page.locator(selector)
-                              if loc.count() > 0:
-                                  loc.first.click()
-                                  print(f"Cliccato pulsante di consenso: {selector}")
-                                  clicked = True
-                                  break
-                          except Exception:
-                              continue
-                      if clicked:
-                          page.wait_for_timeout(5000)  # Attendiamo il caricamento reale di Maps
-              except Exception as e:
-                  print(f"Nessun popup o errore durante il consenso: {e}")
+              page.goto(url, wait_until="domcontentloaded", timeout=60000)
+              page.wait_for_timeout(5000)
 
-              print("Simulazione dello scorrimento per forzare le chiamate di rete...")
-              # Tenta di scorrere il pannello specifico delle recensioni per innescare l'API
+              # Diagnosi e superamento della barriera dei cookie
+              print("Verifica della presenza di moduli di consenso...")
               try:
-                  review_feed = page.locator('div[role="feed"], div[tabindex="0"]')
-                  if review_feed.count() > 0:
-                      review_feed.first.focus()
-                      for _ in range(4):
-                          page.mouse.wheel(0, 1000)
-                          page.wait_for_timeout(1500)
-                  else:
+                  buttons = page.locator("button")
+                  button_count = buttons.count()
+                  for i in range(button_count):
+                      btn = buttons.nth(i)
+                      txt = (btn.inner_text() or "").lower()
+                      if any(word in txt for word in ["accetta tutto", "accept all", "i agree", "consento", "agree"]):
+                          print(f"Trovato pulsante di consenso: '{btn.inner_text()}'. Clicco...")
+                          btn.click()
+                          page.wait_for_timeout(5000)
+                          break
+              except Exception as e:
+                  print(f"Ricerca del consenso interrotta o non necessaria: {e}")
+
+              # Salvataggio screenshot per debugging visivo
+              page.screenshot(path="page_state.png")
+              print("Screenshot dello stato della pagina salvato come page_state.png")
+
+              # Individuazione ed attivazione dello scorrimento del feed delle recensioni
+              print("Tentativo di scorrimento del feed delle recensioni...")
+              try:
+                  # Prova diversi selettori comuni per il contenitore delle recensioni di Google Maps
+                  feed_selectors = ['div[role="feed"]', '.m6ZQ1b', 'div.DxyBCb']
+                  feed_found = False
+                  for selector in feed_selectors:
+                      feed_loc = page.locator(selector)
+                      if feed_loc.count() > 0:
+                          print(f"Contenitore recensioni individuato via selettore: {selector}")
+                          # Forza lo scorrimento del contenitore specifico via DOM JavaScript
+                          for step in range(5):
+                              page.evaluate(f"document.querySelector('{selector}').scrollTop += 1500")
+                              page.wait_for_timeout(1500)
+                          feed_found = True
+                          break
+                  
+                  if not feed_found:
+                      print("Nessun contenitore specifico trovato. Tento scorrimento generico...")
                       page.mouse.wheel(0, 3000)
                       page.wait_for_timeout(4000)
               except Exception as e:
-                  print(f"Errore di scorrimento specifico: {e}")
+                  print(f"Errore durante lo scorrimento del DOM: {e}")
                   page.mouse.wheel(0, 3000)
                   page.wait_for_timeout(4000)
               
               browser.close()
 
+          # Valutazione dei risultati dell'intercettazione
           if captured_requests:
               best_request = captured_requests[0]
               with open("intercepted.json", "w") as f:
                   json.dump(best_request, f)
               print(f"Richiesta intercettata con successo! URL: {best_request['url'][:80]}...")
           else:
-              print("ERRORE: NESSUNA RICHIESTA 'listugc' INTERCETTATA.")
+              print("\nERRORE: NESSUNA RICHIESTA 'listugc' INTERCETTATA.")
+              print("Elenco parziale degli URL intercettati durante l'esecuzione per diagnostica:")
+              for u in all_urls[:15]:
+                  print(f" - {u[:90]}")
+              # Genera un file vuoto per evitare il crash immediato del workflow prima dell'upload degli artefatti
+              with open("intercepted.json", "w") as f:
+                  json.dump({}, f)
           EOF
           python interceptor.py
 
@@ -139,7 +145,6 @@ jobs:
 
               client = genai.Client(api_key=api_key)
               
-              # Configurazione per gemini-3.1-flash-live-preview
               config = types.LiveConnectConfig(
                   response_modalities=["AUDIO"],
                   output_audio_transcription=types.AudioTranscriptionConfig()
@@ -148,9 +153,13 @@ jobs:
 
               try:
                   with open("intercepted.json", "r") as f:
-                      req_data = f.read()
-              except FileNotFoundError:
-                  print("Nessun dato intercettato. Interrompo.")
+                      content = json.load(f)
+                      if not content:
+                          print("Il file delle intercettazioni è vuoto. Impossibile procedere con l'AI.")
+                          sys.exit(1)
+                  req_data = json.dumps(content, indent=2)
+              except Exception as e:
+                  print(f"Errore di lettura del file intercepted.json: {e}")
                   sys.exit(1)
 
               prompt = f"""
@@ -208,14 +217,16 @@ jobs:
 
       - name: Fase 3 - Velocità della Luce (Esecuzione Codice AI)
         run: |
-          echo "==================================="
-          echo "Eseguo lo script scritto da Gemini 3.1 Live..."
-          cat fast_scraper.py
-          echo "==================================="
-          
-          python fast_scraper.py
-          
-          echo "Esecuzione completata!"
+          if [ -f fast_scraper.py ]; then
+            echo "==================================="
+            echo "Eseguo lo script scritto da Gemini 3.1 Live..."
+            cat fast_scraper.py
+            echo "==================================="
+            python fast_scraper.py
+            echo "Esecuzione completata!"
+          else
+            echo "Nessuno script generato dall'AI da eseguire."
+          fi
 
       - name: Upload Artefatti Finali
         uses: actions/upload-artifact@v4
@@ -225,3 +236,4 @@ jobs:
             intercepted.json
             fast_scraper.py
             raw_data.txt
+            page_state.png
