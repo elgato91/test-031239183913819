@@ -86,11 +86,14 @@ jobs:
                   print("ERRORE CRITICO: API Key non trovata. Aggiungi GEMINI_API_KEY nei secrets.")
                   sys.exit(1)
 
-              # Creiamo il client ufficiale
               client = genai.Client(api_key=api_key)
               
-              # Configurazione per ricevere risposte testuali in WebSocket
-              config = types.LiveConnectConfig(response_modalities=[types.Modality.TEXT])
+              # Configurazione obbligatoria per modelli nativi audio (come gemini-3.1-flash-live-preview)
+              # Usiamo AUDIO come modalità e catturiamo la trascrizione del testo generata in tempo reale
+              config = types.LiveConnectConfig(
+                  response_modalities=["AUDIO"],
+                  output_audio_transcription=types.AudioTranscriptionConfig()
+              )
               model = "gemini-3.1-flash-live-preview"
 
               try:
@@ -116,32 +119,33 @@ jobs:
               RESTITUISCI SOLO IL CODICE PYTHON PURO VALIDO. Non usare blocchi markdown (come ```python), nessuna spiegazione iniziale o finale. Solo codice.
               """
 
-              print("Connessione in corso a Gemini 3 Live API tramite WebSocket...")
+              print("Connessione in corso a Gemini 3.1 Live API tramite WebSocket...")
               generated_code = []
 
-              # Apriamo la connessione bidirezionale WebSocket asincrona
               async with client.aio.live.connect(model=model, config=config) as session:
-                  print("Connessione asincrona stabilita.")
+                  print("Connessione asincrona stabilita con successo.")
                   
-                  # Inviamo il prompt testuale in tempo reale
+                  # Invio del prompt in tempo reale
                   await session.send_realtime_input(text=prompt)
-                  print("Prompt inviato. Ricezione dello stream di dati in tempo reale...")
+                  print("Prompt inviato. Ricezione della trascrizione del codice...")
 
-                  # Ascoltiamo la risposta in streaming
+                  # Lettura dello stream asincrono delle risposte
                   async for response in session.receive():
                       server_content = response.server_content
                       if server_content:
-                          model_turn = server_content.model_turn
-                          if model_turn and model_turn.parts:
-                              for part in model_turn.parts:
-                                  if part.text:
-                                      print(part.text, end="", flush=True)
-                                      generated_code.append(part.text)
+                          # Estraiamo il testo trascritto dall'output audio del modello
+                          if server_content.output_transcription and server_content.output_transcription.text:
+                              text_chunk = server_content.output_transcription.text
+                              print(text_chunk, end="", flush=True)
+                              generated_code.append(text_chunk)
+                          
+                          # Se il turno di generazione del modello è completato, usciamo dal ciclo
+                          if server_content.turn_complete:
+                              break
 
-              # Uniamo i pezzi di testo ricevuti
               code = "".join(generated_code).strip()
               
-              # Rimozione di eventuali blocchi markdown inseriti dal modello
+              # Pulizia di sicurezza per rimuovere eventuali tag markdown
               if code.startswith("```python"): code = code[9:]
               if code.startswith("```"): code = code[3:]
               if code.endswith("```"): code = code[:-3]
@@ -159,7 +163,7 @@ jobs:
       - name: Fase 3 - Velocità della Luce (Esecuzione Codice AI)
         run: |
           echo "==================================="
-          echo "Eseguo lo script scritto da Gemini 3 Live..."
+          echo "Eseguo lo script scritto da Gemini 3.1 Live..."
           cat fast_scraper.py
           echo "==================================="
           
