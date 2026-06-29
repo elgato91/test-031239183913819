@@ -22,6 +22,11 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
+
       - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
@@ -83,52 +88,48 @@ jobs:
           # 3. Armiamo il driver di SeleniumBase
           seleniumbase install chromedriver
           
-          # 4. Copiamo i file di configurazione campione
-          cp config.sample.yaml config.yaml
-          cp config.businesses.sample.yaml config.businesses.yaml
-
-          # 5. Script Python inline per modificare dinamicamente i file YAML con il nostro proxy e target
+          # 4. Script Python inline per generare un config.yaml pulito da zero
+          # Questo evita conflitti con i file sample preesistenti e assicura l'uso del nostro proxy
           python -c "
           import yaml
 
-          # Configurazione generale dello Scraper (Headed per Xvfb, Proxy, Limitatori)
-          with open('config.yaml', 'r') as f:
-              cfg = yaml.safe_load(f) or {}
-
-          if 'scraper' not in cfg:
-              cfg['scraper'] = {}
-              
-          cfg['scraper']['headless'] = False  # Deve essere headed per far funzionare l'UC mode sotto Xvfb
-          cfg['scraper']['proxy'] = 'socks5://127.0.0.1:40001'
-          cfg['scraper']['max_reviews'] = 50  # Limitiamo l'estrazione a 50 recensioni per i test didattici
-          cfg['scraper']['sort_by'] = 'relevance'
-
-          with open('config.yaml', 'w') as f:
-              yaml.dump(cfg, f)
-
-          # Configurazione dell'attività commerciale target (Coro Orvieto)
-          biz_cfg = {
+          config_data = {
+              'scraper': {
+                  'headless': False,               # Headed obbligatorio per UC Mode sotto Xvfb
+                  'sort_by': 'relevance',         # Ordine di rilevanza [5]
+                  'max_reviews': 50,              # Limite massimo di recensioni da estrarre [5]
+                  'proxy': 'socks5://127.0.0.1:40001', # Il nostro tunnel WARProxy
+                  'log_level': 'INFO'
+              },
+              'database': {
+                  'db_path': 'reviews.db'         # Nome del database autogenerato [5]
+              },
+              'json': {
+                  'backup_to_json': True,         # Abilita il backup automatico in JSON [5]
+                  'json_path': 'google_reviews.json'
+              },
               'businesses': [
                   {
-                      'name': 'Coro Orvieto',
-                      'url': 'https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660'
+                      'url': 'https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660',
+                      'custom_params': {
+                          'company': 'Coro Orvieto'
+                      }
                   }
               ]
           }
 
-          with open('config.businesses.yaml', 'w') as f:
-              yaml.dump(biz_cfg, f)
+          with open('config.yaml', 'w') as f:
+              yaml.dump(config_data, f)
           "
-          echo "Configurazione completata con successo."
+          echo "Configurazione pulita generata con successo."
 
       - name: Esecuzione Scraping Professionale (George's Scraper)
         run: |
           cd google-reviews-scraper-pro
-          # Avviamo lo scraper di George. Mostrerà i log in tempo reale sulla console.
+          # Avviamo lo scraper di George. L'output mostrerà l'avanzamento dei cicli in tempo reale.
           python start.py
           
-          # Copiamo i file di output generati nella root della directory di lavoro
-          # George salva i file di backup in formato JSON
+          # Spostiamo i file prodotti dall'esecuzione nella root della nostra cartella di lavoro
           cp google_reviews.json ../output_macchina2_cdp.txt || true
           cp reviews.db ../output_macchina2_cdp.db || true
 
