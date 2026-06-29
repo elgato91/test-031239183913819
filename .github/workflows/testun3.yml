@@ -18,11 +18,16 @@ jobs:
           sleep 5
 
       - name: Verifica IP IPv6 (socks5h)
+        # Questo step ora è bloccante ed esegue fino a 10 tentativi prima di fallire
         run: |
           PORT=40001
-          for i in {1..3}; do
-            IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 2
+          for i in {1..10}; do
+            IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 3
           done
+          if [ -z "$IP" ]; then
+            echo "Errore: Il proxy SOCKS5 non si è avviato correttamente o non risponde."
+            exit 1
+          fi
           echo "Proxy pronto. IP di uscita: $IP"
 
       - name: Setup Ambiente e Dipendenze Essenziali
@@ -39,6 +44,7 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Scrivi Script Risolutore (Fase 1)
+        # Ripristinato il parametro proxy all'interno di Driver()
         shell: bash
         run: |
           cat << 'EOF' > google-reviews-scraper-pro/resolve_maps.py
@@ -62,7 +68,7 @@ jobs:
               return testo_pulito.strip()
 
           print('Avvio del browser controllato via SeleniumBase (English)...', flush=True)
-          driver = Driver(uc=True, headless=False, proxy='socks5://127.0.0.1:40001')
+          driver = Driver(uc=True, headless=False, proxy='socks5://127.0.0.1:40001') # Proxy ripristinato correttamente
           
           risultati = []
           businesses_list = []
@@ -301,7 +307,7 @@ jobs:
               "output_audio_transcription": {}
           }
 
-          # Concorrenza asincrona parallela impostata a 20 connessioni
+          # Concorrenza parallela totale a 20 connessioni simultanee
           semaphore = asyncio.Semaphore(20)
 
           # Sotto-funzione asincrona per l'analisi di una singola immagine
