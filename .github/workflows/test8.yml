@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Creazione script Python (In-Context API listentitiesreviews)
+      - name: Creazione script Python (Estrazione Recensioni via OS Wheel Scroll)
         run: |
           cat << 'EOF' > m2_insocket.py
           import time
@@ -88,7 +88,6 @@ jobs:
           import os
           import re
           import json
-          import urllib.parse
           from cloakbrowser import launch_persistent_context
 
           if len(sys.argv) < 2:
@@ -110,35 +109,20 @@ jobs:
               f"--fingerprint-fonts-dir={windows_fonts_dir}"
           ]
 
-          # --- SUPPORTO INTERI A 64 BIT CON SEGNO (Complemento a Due) ---
-          def to_signed_64(hex_str):
-              """Converte una stringa esadecimale in un intero a 64-bit con segno."""
-              val = int(hex_str, 16)
-              # Se il bit più significativo è attivo, la coordinata è negativa in memoria
-              if val >= 0x8000000000000000:
-                  val -= 0x10000000000000000
-              return str(val)
-
-          # --- METODO 1: RICERCA E RISOLUZIONE COORDINATE ---
-          def esegui_ricerca_e_risolvi_coordinate(page, query):
-              """Esegue la ricerca e isola id_y e cid in formato signed 64-bit."""
+          # --- METODO 1: RICERCA E APERTURA SCHEDA ---
+          def esegui_ricerca_e_apri_scheda(page, query):
+              """Esegue la ricerca su Maps attendendo il reindirizzamento definitivo."""
               search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
               print(f"[NODO {node_id}] Navigazione su: {search_url}", flush=True)
               
               page.set_default_navigation_timeout(90000)
               page.set_default_timeout(90000)
               
-              def block_heavy_assets(route):
-                  url = route.request.url.lower()
-                  if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", "/vt/", "/cbk", "/kh"]):
-                      route.abort()
-                  else:
-                      route.continue_()
-                      
-              page.route("**/*", block_heavy_assets)
-              page.goto(search_url, wait_until="commit", timeout=90000)
+              # Nessun blocco di immagini/tile per questa sessione: permettiamo il caricamento
+              # nativo e completo dei Javascript e delle dipendenze di Maps
+              page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
               
-              time.sleep(6)
+              time.sleep(8)
               
               # Gestione del Cookie Consent di Google se presente
               try:
@@ -158,116 +142,112 @@ jobs:
               else:
                   print(f"[NODO {node_id}] Scheda aperta direttamente.", flush=True)
 
-              # Attendiamo che l'URL si stabilizzi sul reindirizzamento definitivo (/maps/place/...)
+              # Attendiamo l'assestamento definitivo dell'URL
               try:
                   page.wait_for_url("**/maps/place/**", timeout=25000)
                   print(f"[NODO {node_id}] Reindirizzamento completato: {page.url}", flush=True)
               except Exception:
-                  print(f"[NODO {node_id}] Timeout attesa URL place. URL attuale: {page.url}", flush=True)
+                  pass
 
-              # Estrazione di id_y e cid convertendoli da esadecimale a signed 64-bit decimale
-              id_y = None
-              cid = None
-              current_url = page.url
-              match = re.search(r"(0x[a-fA-F0-9]+):(0x[a-fA-F0-9]+)", current_url)
+          # --- METODO 2: ESTRAZIONE CON OS-LEVEL WHEEL SCROLL ---
+          def estrai_recensioni_passo_passo_ui(page, max_recensioni=50):
+              """Estrae le recensioni simulando eventi fisici di scroll della rotellina del mouse."""
+              # 1. Clicchiamo sul tab delle recensioni usando il ruolo semantico ARIA tab, molto più stabile
+              tab_recensioni = page.locator("button[role='tab']:has-text('Recensioni'), button[role='tab']:has-text('Reviews')").first
               
-              if match:
-                  try:
-                      hex_y = match.group(1)
-                      hex_cid = match.group(2)
-                      id_y = to_signed_64(hex_y)
-                      cid = to_signed_64(hex_cid)
-                      print(f"[NODO {node_id}] Coordinate convertite (Signed 64-bit): id_y={id_y}, cid={cid}", flush=True)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore di conversione esadecimale: {e}", flush=True)
-                      
-              return id_y, cid
-
-          # --- METODO 2: IN-CONTEXT JSON FETCHING ---
-          def estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50):
-              """Effettua le chiamate fetch all'endpoint nativo di Maps ereditando la sessione reale."""
-              recensioni_estratte = []
-              start_index = 0
+              if tab_recensioni.is_visible(timeout=8000):
+                  print(f"[NODO {node_id}] Clicco sul tab Recensioni...", flush=True)
+                  tab_recensioni.click()
+              else:
+                  # Fallback su bottone classico se l'interfaccia è in modalità mista
+                  review_tab = page.locator("button[aria-label*='recensioni'], button[aria-label*='Reviews'], div.F7nice button").first
+                  review_tab.wait_for(state="visible", timeout=15000)
+                  print(f"[NODO {node_id}] Clicco sul pulsante recensioni di ripiego...", flush=True)
+                  review_tab.click()
+              
+              # Attendiamo che appaia la prima recensione nel DOM per confermare l'apertura
+              print(f"[NODO {node_id}] Attendo caricamento della prima recensione (.jftiEf)...", flush=True)
+              first_card = page.locator(".jftiEf").first
+              first_card.wait_for(state="visible", timeout=30000)
+              
+              recensioni_estratte = {}
+              iterazioni_senza_novita = 0
               ciclo = 0
               
-              print(f"[NODO {node_id}] Inizio fetch asincroni JSON dal contesto di lavoro...", flush=True)
+              print(f"[NODO {node_id}] Avvio loop di scorrimento ed estrazione in tempo reale...", flush=True)
               
-              while len(recensioni_estratte) < max_recensioni:
+              # Hover iniziale sopra la prima recensione per focalizzare il puntatore sull'area delle recensioni
+              first_card.hover()
+              
+              while len(recensioni_estratte) < max_recensioni and iterazioni_senza_novita < 15:
                   ciclo += 1
+                  # Recupera tutte le card delle recensioni attualmente caricate nel viewport (Playwright penetra nel Shadow DOM)
+                  cards = page.locator(".jftiEf").all()
+                  nuovi_elementi_trovati = 0
                   
-                  # Costruiamo il parametro pb nativo richiesto da Google Maps per le recensioni
-                  pb_param = f"!1m2!1y{id_y}!2y{cid}!2m2!1i{start_index}!2i10!3e1!4m5!3b1!4b1!5b1!6b1!7b1"
-                  
-                  # Eseguiamo la codifica URL in Python del parametro pb.
-                  # Questo trasforma i caratteri '!' in '%21' prevenendo il fallimento di routing (404) del server
-                  pb_encoded = urllib.parse.quote(pb_param, safe='')
-                  
-                  ajax_url = f"https://www.google.com/maps/preview/review/listentitiesreviews?authuser=0&hl=it&gl=it&pb={pb_encoded}"
-                  
-                  print(f"[NODO {node_id}] [Ciclo {ciclo}] Chiamata fetch per indice {start_index}...", flush=True)
-                  try:
-                      json_raw = page.evaluate("""async (url) => {
-                          try {
-                              const response = await fetch(url);
-                              return await response.text();
-                          } catch (e) {
-                              return "ERRORE: " + e.message;
-                          }
-                      }""", ajax_url)
-                      
-                      if json_raw.startswith("ERRORE:"):
-                          print(f"[NODO {node_id}] Errore nel fetch browser-side: {json_raw}", flush=True)
-                          break
+                  for card in cards:
+                      try:
+                          # Estrazione dell'attributo data-review-id con timeout minimo di sicurezza
+                          review_id = card.get_attribute("data-review-id", timeout=1000)
                           
-                      # Rimuoviamo il prefisso di sicurezza XSSI di Google )]}'\n prima del parsing JSON
-                      if json_raw.startswith(")]}'"):
-                          json_raw = json_raw[4:].strip()
+                          # Fallback di sicurezza se manca l'ID
+                          if not review_id:
+                              autore_testo = card.locator(".d470gc").inner_text(timeout=1000)
+                              testo_parziale = card.locator(".wiI7pd").inner_text(timeout=1000)[:20]
+                              review_id = f"custom_id_{hash(autore_testo + testo_parziale)}"
                           
-                      # Diagnostica log
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Risposta JSON ricevuta (lunghezza {len(json_raw)}): {json_raw[:180]}...", flush=True)
-                      
-                      data = json.loads(json_raw)
-                      
-                      # Nel JSON di Google, le recensioni sono caricate all'interno del terzo livello (indice 2)
-                      raw_reviews = data[2] if (len(data) > 2 and data[2] is not None) else []
-                      
-                      if not raw_reviews:
-                          print(f"[NODO {node_id}] Nessun elemento trovato nel JSON. Fine delle recensioni disponibili.", flush=True)
-                          break
-                          
-                      nuove_estratte = 0
-                      for r in raw_reviews:
-                          try:
-                              # Struttura del JSON di listentitiesreviews:
-                              # r[3] -> Testo della recensione
-                              # r[0][1] -> Autore
-                              # r[4] -> Stelle (valutazione numerica da 1 a 5)
-                              autore = r[0][1] if (len(r) > 0 and len(r[0]) > 1) else "Utente Google"
-                              testo = r[3] if len(r) > 3 else ""
-                              stelle = f"{r[4]} stelle" if len(r) > 4 else "N/D"
+                          # Se non ancora estratto, leggiamo i dati con controlli non bloccanti (.count())
+                          if review_id not in recensioni_estratte:
+                              autore_el = card.locator(".d470gc, .TSv7un, .X7N63e, [class*='name']").first
+                              autore = autore_el.inner_text(timeout=1000) if autore_el.count() > 0 else "Utente Google"
                               
-                              recensioni_estratte.append({
+                              # Espandiamo il testo lungo ("Altro") se presente
+                              altro_btn = card.locator("button:has-text('Altro'), button:has-text('More')").first
+                              if altro_btn.is_visible(timeout=300):
+                                  altro_btn.click() 
+                                  time.sleep(0.1)
+                                  
+                              testo_el = card.locator(".wiI7pd, [class*='text']").first
+                              testo_completo = testo_el.inner_text(timeout=1000) if testo_el.count() > 0 else ""
+                              
+                              stelle_el = card.locator("span.kv731.v37sz1, [class*='rating'], [class*='star']").first
+                              stelle = stelle_el.get_attribute("aria-label", timeout=1000) or "N/D" if stelle_el.count() > 0 else "N/D"
+                              
+                              # Salvataggio immediato nell'accumulatore
+                              recensioni_estratte[review_id] = {
                                   "autore": autore,
-                                  "testo": testo,
+                                  "testo": testo_completo,
                                   "stelle": stelle
-                              })
-                              nuove_estratte += 1
+                              }
+                              nuovi_elementi_trovati += 1
                               
                               if len(recensioni_estratte) >= max_recensioni:
                                   break
-                          except Exception:
-                              continue
-                              
-                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Elaborate {nuove_estratte} recensioni. Totale in memoria: {len(recensioni_estratte)}", flush=True)
+                      except Exception:
+                          continue
+                  
+                  if nuovi_elementi_trovati > 0:
+                      iterazioni_senza_novita = 0
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Scaricate {nuovi_elementi_trovati} nuove recensioni. Totale: {len(recensioni_estratte)}", flush=True)
+                  else:
+                      iterazioni_senza_novita += 1
+                      print(f"[NODO {node_id}] [Ciclo {ciclo}] Nessun nuovo elemento rilevato. Tentativi a vuoto: {iterazioni_senza_novita}/15", flush=True)
                       
-                      start_index += 10
-                      time.sleep(random.uniform(0.3, 0.7))
-                      
+                  # Simula lo scorrimento fisico della rotellina del mouse sopra l'area delle recensioni.
+                  # Muove il cursore sopra l'ultima recensione estratta per assicurare la messa a fuoco corretta.
+                  try:
+                      last_card = page.locator(".jftiEf").last
+                      last_card.hover(timeout=2000)
+                      # Esegue lo scroll nativo della rotellina del mouse (deltaY = 800)
+                      page.mouse.wheel(0, 800)
                   except Exception as e:
-                      print(f"[NODO {node_id}] Errore durante l'evaluate fetch: {e}", flush=True)
-                      break
+                      print(f"[NODO {node_id}] Errore durante lo scroll nativo: {e}. Uso tastiera...", flush=True)
+                      # Fallback alternativo via tastiera
+                      page.keyboard.press("PageDown")
                       
-              return recensioni_estratte
+                  time.sleep(random.uniform(1.5, 2.2))
+                  
+              return list(recensioni_estratte.values())
 
           # --- RUN PRINCIPALE ---
           try:
@@ -289,14 +269,11 @@ jobs:
               page = context.new_page()
               ricerca_target = "Coro Orvieto"
               
-              # 1. Risoluzione delle coordinate esadecimali
-              id_y, cid = esegui_ricerca_e_risolvi_coordinate(page, ricerca_target)
+              # 1. Trova ed apre il locale gestendo la disambiguazione
+              esegui_ricerca_e_apri_scheda(page, ricerca_target)
               
-              if id_y and cid:
-                  # 2. Estrazione diretta dei payload JSON dal contesto (In-Context) senza cliccare alcun tasto
-                  recensioni = estrai_recensioni_in_context(page, id_y, cid, max_recensioni=50)
-              else:
-                  raise ValueError("Impossibile risolvere le coordinate id_y o cid del locale.")
+              # 2. Estrae le recensioni in tempo reale battendo il recycling del DOM con scorrimento fisico
+              recensioni = estrai_recensioni_passo_passo_ui(page, max_recensioni=50)
               
               # 3. Salvataggio su file
               output_file = f"output_node_{node_id}.txt"
