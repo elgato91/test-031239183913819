@@ -1,266 +1,94 @@
-name: AI Agentic Scraper PoC (CloakBrowser + Gemini 3 Live)
+name: Fast RAG Challenge 2026 Università di Roma
 
 on: 
   workflow_dispatch:
 
 jobs:
-  agentic_scraping:
+  machine2_cdp_insocket:
     runs-on: ubuntu-latest
-    
-    env:
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
     steps:
-      - name: Installazione Font di Sistema
-        # Essenziale per i controlli di fingerprinting sui font eseguiti da CloakBrowser
-        run: |
-          sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          
-          mkdir -p ~/.local/share/fonts/windows
-          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
-          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
-          fc-cache -f -v
 
-      - name: Installazione Dipendenze (CloakBrowser, GenAI SDK e SOCKS)
+      - name: Setup 1 WARProxy Docker Container (IPv6)
         run: |
-          pip install "cloakbrowser[geoip]" google-genai "requests[socks]" PySocks beautifulsoup4 playwright curl-cffi
-          playwright install-deps chromium
+          docker pull ghcr.io/kingcc/warproxy:latest
+          PORT=40001
+          docker run --name warproxy-1 --network host \
+            -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+            -d ghcr.io/kingcc/warproxy:latest
+          sleep 5
 
-      - name: Avvio Xvfb (Virtual Display Headful per CloakBrowser)
+      - name: Verifica IP IPv6 (socks5h)
+        run: |
+          PORT=40001
+          for i in {1..3}; do
+            IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 2
+          done
+          echo "Proxy pronto. IP di uscita: $IP"
+
+      - name: Setup Ambiente e Dipendenze Essenziali
+        run: |
+          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
+          cd google-reviews-scraper-pro
+          pip install -r requirements.txt
+          pip install pyyaml seleniumbase
+          seleniumbase install chromedriver
+
+      - name: Avvio Xvfb (Display virtuale per Selenium)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Pre-inizializzazione Cache CloakBrowser
+      - name: Genera Configurazione Ottimizzata
         run: |
-          python -m cloakbrowser install
+          cd google-reviews-scraper-pro
+          python -c "
+          import yaml
+          import urllib.parse
 
-      - name: Setup Container WARP (IPv6 - Porta 40001)
+          # -----------------------------------------------------------------
+          # INSERISCI QUI LA TUA LISTA DI ATTIVITÀ O PUNTI DI INTERESSE
+          # -----------------------------------------------------------------
+          nomi_attivita = [
+              'Colosseo, Roma',
+              'Da Enzo al 29, Roma',
+              'Hoffell hot tub'
+          ]
+
+          businesses_list = []
+          for nome in nomi_attivita:
+              # Trasforma il nome testuale in un URL di ricerca (es. spazi diventano %20)
+              url_ricerca = f'https://www.google.com/maps/search/{urllib.parse.quote(nome)}'
+              businesses_list.append({
+                  'url': url_ricerca,
+                  'custom_params': {'company': nome}
+              })
+
+          config_data = {
+              'headless': False,                       # Richiesto False per UC Mode e Xvfb
+              'sort_by': 'newest',                     # Ordina per Più Recenti
+              'max_reviews': 50,                       # Limite di recensioni per attività
+              'proxy': 'socks5://127.0.0.1:40001',     
+              'db_path': ':memory:',                   
+              'download_images': False,                
+              'use_mongodb': False,                    
+              'backup_to_json': True,                  
+              'json_path': 'google_reviews.json',      
+              'log_level': 'WARNING',                  
+              'businesses': businesses_list
+          }
+
+          with open('config.yaml', 'w') as f:
+              yaml.dump(config_data, f)
+          "
+
+      - name: Esecuzione Scraping
         run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-          docker run --name warproxy-1 --network host \
-            -e SOCKS5_PORT=40001 -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -d ghcr.io/kingcc/warproxy:latest
-          sleep 6
+          cd google-reviews-scraper-pro
+          python start.py
+          cp google_reviews.json ../output_macchina2_cdp.json
 
-      - name: Fase 1 - L'Ariete (Intercettazione Rete con CloakBrowser)
-        run: |
-          cat << 'EOF' > interceptor.py
-          import asyncio
-          import os
-          import random
-          import json
-          from cloakbrowser import launch_persistent_context_async
-
-          async def main():
-              home_dir = os.path.expanduser("~")
-              profile_dir = os.path.join(home_dir, ".cloak_profiles/interceptor_node")
-              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-              
-              # Configurazione dei fingerprint di CloakBrowser
-              base_args = [
-                  "--no-sandbox",
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=10000",
-                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
-              ]
-
-              print("Avvio di CloakBrowser per l'intercettazione...")
-              context = await launch_persistent_context_async(
-                  profile_dir,
-                  headless=False, # Modalità headed reale supportata dal display virtuale Xvfb
-                  humanize=True,
-                  proxy="socks5://127.0.0.1:40001",
-                  geoip=True,
-                  viewport={"width": 1920, "height": 1080},
-                  args=base_args
-              )
-              page = await context.new_page()
-
-              captured_requests = []
-
-              async def handle_request(request):
-                  url = request.url
-                  # Cattura l'API delle recensioni (listugcposts o preview/review)
-                  if "listugc" in url or "preview/review" in url:
-                      try:
-                          headers = await request.all_headers()
-                          captured_requests.append({
-                              "url": url,
-                              "method": request.method,
-                              "headers": headers,
-                              "post_data": request.post_data
-                          })
-                      except Exception:
-                          pass
-
-              # Registriamo l'ascoltatore asincrono di Playwright sulle richieste di rete
-              page.on("request", handle_request)
-
-              url = "https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!4m8!3m7!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!9m1!1b1!16s%2Fg%2F11l23qq660"
-              print("Apertura di Google Maps...")
-              await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-              await asyncio.sleep(5)
-
-              # Bypass automatico e humanized dei moduli di consenso cookie
-              try:
-                  consent_button = page.locator('button:has-text("Accetta tutto"), button:has-text("Accept all"), button:has-text("I agree"), button:has-text("Agree")')
-                  if await consent_button.count() > 0:
-                      print("Modulo cookie rilevato. Accetto...")
-                      await consent_button.first.click()
-                      await asyncio.sleep(5)
-              except Exception as e:
-                  print(f"Errore o assenza del modulo cookie: {e}")
-
-              # Generazione dello scorrimento sul feed delle recensioni
-              print("Simulazione dello scorrimento per forzare le chiamate di rete...")
-              try:
-                  feed = page.locator('div[role="feed"]')
-                  if await feed.count() > 0:
-                      await feed.first.focus()
-                      for _ in range(4):
-                          await page.keyboard.press("PageDown")
-                          await asyncio.sleep(2)
-                  else:
-                      for _ in range(4):
-                          await page.keyboard.press("PageDown")
-                          await asyncio.sleep(2)
-              except Exception as e:
-                  print(f"Errore durante lo scorrimento: {e}")
-
-              # Screenshot visivo per diagnosi
-              await page.screenshot(path="page_state.png")
-              await context.close()
-
-              if captured_requests:
-                  # Selezioniamo la richiesta con l'URL più lungo (contiene il payload completo)
-                  best_request = max(captured_requests, key=lambda r: len(r['url']))
-                  with open("intercepted.json", "w") as f:
-                      json.dump(best_request, f)
-                  print(f"Richiesta intercettata con successo! URL: {best_request['url'][:80]}...")
-              else:
-                  print("ERRORE: NESSUNA RICHIESTA 'listugc' INTERCETTATA.")
-                  with open("intercepted.json", "w") as f:
-                      json.dump({}, f)
-
-          if __name__ == "__main__":
-              asyncio.run(main())
-          EOF
-          python interceptor.py
-
-      - name: Fase 2 - Il Cervello (AI Agent via Gemini 3 Live API)
-        run: |
-          cat << 'EOF' > ai_agent.py
-          import asyncio
-          import os
-          import sys
-          import json
-          from google import genai
-          from google.genai import types
-
-          async def main():
-              api_key = os.environ.get("GEMINI_API_KEY")
-              if not api_key:
-                  print("ERRORE CRITICO: API Key non trovata. Aggiungi GEMINI_API_KEY nei secrets.")
-                  sys.exit(1)
-
-              client = genai.Client(api_key=api_key)
-              
-              config = types.LiveConnectConfig(
-                  response_modalities=["AUDIO"],
-                  output_audio_transcription=types.AudioTranscriptionConfig()
-              )
-              model = "gemini-3.1-flash-live-preview"
-
-              try:
-                  with open("intercepted.json", "r") as f:
-                      content = json.load(f)
-                      if not content:
-                          print("Il file delle intercettazioni è vuoto. Impossibile procedere.")
-                          sys.exit(1)
-                  req_data = json.dumps(content, indent=2)
-              except Exception as e:
-                  print(f"Errore di lettura del file intercepted.json: {e}")
-                  sys.exit(1)
-
-              prompt = f"""
-              Sei un programmatore Python esperto di web scraping e reverse engineering.
-              Il mio browser ha intercettato questa richiesta HTTP interna verso le API di Google Maps:
-              
-              {req_data}
-              
-              Il tuo compito è scrivere uno script Python usando la libreria 'requests' che replica questa chiamata HTTP (usando lo stesso URL e headers intercettati).
-              Lo script deve:
-              1. Importare la libreria 'requests'.
-              2. Impostare le variabili url e headers (copiando i dati intercettati).
-              3. Fare la richiesta HTTP (GET o POST in base al method). Usa proxies={{"http": "socks5://127.0.0.1:40001", "https": "socks5://127.0.0.1:40001"}} per il proxy.
-              4. Salvare il testo crudo della risposta (response.text) in un file chiamato 'raw_data.txt'.
-              
-              RESTITUISCI SOLO IL CODICE PYTHON PURO VALIDO. Non usare blocchi markdown (come ```python), nessuna spiegazione iniziale o finale. Solo codice.
-              """
-
-              print("Connessione in corso a Gemini 3.1 Live API tramite WebSocket...")
-              generated_code = []
-
-              async with client.aio.live.connect(model=model, config=config) as session:
-                  print("Connessione asincrona stabilita.")
-                  
-                  await session.send_realtime_input(text=prompt)
-                  print("Prompt inviato. Ricezione della trascrizione del codice...")
-
-                  async_for = session.receive()
-                  async_for = session.receive()
-                  async for response in async_for:
-                      server_content = response.server_content
-                      if server_content:
-                          if server_content.output_transcription and server_content.output_transcription.text:
-                              text_chunk = server_content.output_transcription.text
-                              print(text_chunk, end="", flush=True)
-                              generated_code.append(text_chunk)
-                          
-                          if server_content.turn_complete:
-                              break
-
-              code = "".join(generated_code).strip()
-              
-              if code.startswith("```python"): code = code[9:]
-              if code.startswith("```"): code = code[3:]
-              if code.endswith("```"): code = code[:-3]
-              code = code.strip()
-
-              with open("fast_scraper.py", "w") as f:
-                  f.write(code)
-              print("\n[AI Agent] Codice Python salvato in fast_scraper.py!")
-
-          if __name__ == "__main__":
-              asyncio.run(main())
-          EOF
-          python ai_agent.py
-
-      - name: Fase 3 - Velocità della Luce (Esecuzione Codice AI)
-        run: |
-          if [ -f fast_scraper.py ]; then
-            echo "==================================="
-            echo "Eseguo lo script scritto da Gemini 3.1 Live..."
-            cat fast_scraper.py
-            echo "==================================="
-            python fast_scraper.py
-            echo "Esecuzione completata!"
-          else
-            echo "Nessuno script generato dall'AI da eseguire."
-          fi
-
-      - name: Upload Artefatti Finali
+      - name: Upload Artifact (SOLO JSON)
         uses: actions/upload-artifact@v4
         with:
-          name: AI_Reverse_Engineering_PoC
-          path: |
-            intercepted.json
-            fast_scraper.py
-            raw_data.txt
-            page_state.png
+          name: Risultati_Macchina2_JSON
+          path: output_macchina2_cdp.json
