@@ -217,6 +217,7 @@ jobs:
                   print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
                   risultati.append(info_locale)
                   
+                  # Registriamo l'URL con hl=en per lo scraper di recensioni
                   businesses_list.append({
                       'url': driver.current_url,
                       'custom_params': {'company': nome_trimmed}
@@ -276,7 +277,6 @@ jobs:
               print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
               exit(1)
 
-          # Inizializziamo il Client ufficiale google-genai
           client = genai.Client(api_key=api_key)
 
           try:
@@ -317,12 +317,14 @@ jobs:
                   print(f"Nessuna immagine scaricata per {locale}.", flush=True)
                   return None
 
-              # Configurazione WebSocket: indichiamo che vogliamo ricevere SOLO risposte in formato testo
+              # -----------------------------------------------------------------
+              # RISOLUZIONE: IMPOSTIAMO LA MODALITA' DI RISPOSTA SU "AUDIO"
+              # Questo sblocca la connessione WebSocket del modello gemini-3.1-flash-live-preview
+              # -----------------------------------------------------------------
               config = {
-                  "response_modalities": ["TEXT"]
+                  "response_modalities": ["AUDIO"]
               }
 
-              # Prompt esteso, flessibile e orientato all'OCR di orari, prezzi o cartelli
               prompt = """
               Sei un sistema di intelligenza artificiale multimodale specializzato in geomarketing, viaggi ed estrazione dati visivi.
               Analizza attentamente questo gruppo di immagini caricate dagli utenti per questa specifica attività commerciale o punto di interesse.
@@ -336,7 +338,7 @@ jobs:
                   "tipo_entita": "Categoria identificata (es. Ristorante / Terme / Monumento Storico / Chiesa / Sentiero / Hotel)",
                   "descrizione_atmosfera": "Descrizione evocativa e professionale di 2 paragrafi in italiano sullo stile, l'atmosfera, il design, le luci e la 'vibe' del posto. Concentrati sulle emozioni visive.",
                   "analisi_visiva_dettagli": "Dettagli sugli elementi visibili (es. presentazione e cura dei piatti, stile degli arredi, panorama circostante, architettura, stato delle piscine o vasche termali, ecc.)",
-                  "dati_estratti_da_cartelli": "Eventuali prezzi, orari, regole o informazioni testuali letti direttamente dalle scritte, dai menu o dai cartelli presenti nelle foto (se presenti, altrimenti scrivi 'Nessun cartello o menu con testo rilevato')"
+                  "dati_estratti_da_cartelli": "Eventuali prezzi, orari, regole o informazioni testuali letti direttamente dalle scritte e dai cartelli nelle foto (se presenti, altrimenti scrivi 'Nessun cartello o menu con testo rilevato')"
               }
               
               Importante: rispondi esclusivamente in italiano per i testi descrittivi, e non menzionare mai che stai analizzando dei file o delle immagini nella 'descrizione_atmosfera'. Scrivi come se descrivessi l'esperienza vissuta sul posto.
@@ -363,6 +365,7 @@ jobs:
                       )
 
                       # Leggiamo lo stream della risposta WebSocket in arrivo
+                      # Catturiamo la trascrizione automatica del parlato generato (part.text)
                       async for response in session.receive():
                           if response.server_content and response.server_content.model_turn:
                               for part in response.server_content.model_turn.parts:
