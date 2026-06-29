@@ -24,9 +24,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Installazione Dipendenze (Playwright, Google GenAI SDK)
+      - name: Installazione Dipendenze (Playwright, Google GenAI SDK con supporto SOCKS)
         run: |
-          pip install playwright google-genai requests
+          # Aggiunto "requests[socks]" e PySocks per risolvere l'errore InvalidSchema
+          pip install playwright google-genai "requests[socks]" PySocks
           playwright install chromium
 
       - name: Fase 1 - L'Ariete (Intercettazione Rete con Playwright)
@@ -38,7 +39,8 @@ jobs:
           captured_requests = []
 
           def handle_request(request):
-              if request.resource_type in ["xhr", "fetch"] and "pb=" in request.url:
+              # Filtriamo esplicitamente per 'listugc' che contiene i dati delle recensioni
+              if request.resource_type in ["xhr", "fetch"] and "listugc" in request.url:
                   captured_requests.append({
                       "url": request.url,
                       "method": request.method,
@@ -52,21 +54,23 @@ jobs:
               page.on("request", handle_request)
               
               print("Apertura di Google Maps per intercettare l'API...")
-              page.goto("https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!3m1!4b1!4m6!3m5!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!16s%2Fg%2F11l23qq660", timeout=60000)
+              # URL modificato con l'indicatore !9m1!1b1 alla fine per forzare l'apertura immediata del tab recensioni
+              page.goto("https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!4m8!3m7!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!9m1!1b1!16s%2Fg%2F11l23qq660", timeout=60000)
               
+              page.wait_for_timeout(5000)
+              # Scrolliamo il box per forzare la chiamata successiva
+              page.mouse.wheel(0, 3000)
               page.wait_for_timeout(4000)
-              page.mouse.wheel(0, 2000)
-              page.wait_for_timeout(3000)
               
               browser.close()
 
           if captured_requests:
-              best_request = max(captured_requests, key=lambda r: len(r['url']))
+              best_request = captured_requests[0]
               with open("intercepted.json", "w") as f:
                   json.dump(best_request, f)
-              print(f"Richiesta intercettata con successo! URL: {best_request['url'][:50]}...")
+              print(f"Richiesta intercettata con successo! URL: {best_request['url'][:80]}...")
           else:
-              print("ERRORE: NESSUNA RICHIESTA UTILE INTERCETTATA.")
+              print("ERRORE: NESSUNA RICHIESTA 'listugc' INTERCETTATA.")
           EOF
           python interceptor.py
 
@@ -88,8 +92,7 @@ jobs:
 
               client = genai.Client(api_key=api_key)
               
-              # Configurazione obbligatoria per modelli nativi audio (come gemini-3.1-flash-live-preview)
-              # Usiamo AUDIO come modalità e catturiamo la trascrizione del testo generata in tempo reale
+              # Configurazione per gemini-3.1-flash-live-preview
               config = types.LiveConnectConfig(
                   response_modalities=["AUDIO"],
                   output_audio_transcription=types.AudioTranscriptionConfig()
@@ -123,29 +126,25 @@ jobs:
               generated_code = []
 
               async with client.aio.live.connect(model=model, config=config) as session:
-                  print("Connessione asincrona stabilita con successo.")
+                  print("Connessione asincrona stabilita.")
                   
-                  # Invio del prompt in tempo reale
                   await session.send_realtime_input(text=prompt)
                   print("Prompt inviato. Ricezione della trascrizione del codice...")
 
-                  # Lettura dello stream asincrono delle risposte
-                  async for response in session.receive():
+                  async_for = session.receive()
+                  async for response in async_for:
                       server_content = response.server_content
                       if server_content:
-                          # Estraiamo il testo trascritto dall'output audio del modello
                           if server_content.output_transcription and server_content.output_transcription.text:
                               text_chunk = server_content.output_transcription.text
                               print(text_chunk, end="", flush=True)
                               generated_code.append(text_chunk)
                           
-                          # Se il turno di generazione del modello è completato, usciamo dal ciclo
                           if server_content.turn_complete:
                               break
 
               code = "".join(generated_code).strip()
               
-              # Pulizia di sicurezza per rimuovere eventuali tag markdown
               if code.startswith("```python"): code = code[9:]
               if code.startswith("```"): code = code[3:]
               if code.endswith("```"): code = code[:-3]
