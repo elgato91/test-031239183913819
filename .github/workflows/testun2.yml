@@ -1,4 +1,4 @@
-name: Test Standalone - Gemini 3.1 Live API (Agnostic Dual-Stage Analysis)
+name: Test Standalone - Gemini 3.1 Live API (Efficient 2-Request Pipeline)
 
 on: 
   workflow_dispatch:
@@ -18,6 +18,7 @@ jobs:
           pip install google-genai requests
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
+        # Creiamo lo script Python asincrono ottimizzato a due fasi (solo 2 chiamate WS)
         shell: bash
         run: |
           cat << 'EOF' > generate_guide.py
@@ -37,8 +38,7 @@ jobs:
           client = genai.Client(api_key=api_key)
 
           # -----------------------------------------------------------------
-          # ELENCO DI 20 IMMAGINI DA ANALIZZARE
-          # (Incluso le foto test inserite per verificare la capacità di analisi)
+          # ELENCO DI 20 IMMAGINI DA ANALIZZARE IN STREAMING
           # -----------------------------------------------------------------
           immagini_test = [
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn2nikKKf0tccFSld6MfPaA3ptpr5UL6KIGzl4YcV4KJJMHff0t34FQbBdndHHCjp81_iX4hWtpijmq1rAgirXVF7WcLVcMajiQEVAqHIzuKbGd-UbtVF3IIm3U3UWxjffWRN4-7ug=w600-h900-p-k-no",
@@ -63,95 +63,134 @@ jobs:
               "https://lh3.googleusercontent.com/grass-cs/ANxoTn2k5I5fmzp_MXQOpwtMnK9I23ak5T4uc5v4HDnkfadu4RMH4whs5DSueMmQoPph4lxYNI6LRpPdfYZ7YUH-aKk3M3f1wg6Et0SlxFTA9pAAvzWmovG5Wl4BJ8RBsYSmj22zfHz43pjMOmeR=w300-h225-p-k-no"
           ]
 
-          # Funzione asincrona riutilizzabile per interrogare la Live API WebSocket
-          async def interroga_live_api(payload_item, prompt, is_image=True):
-              config = {
-                  "response_modalities": ["AUDIO"],
-                  "output_audio_transcription": {}
-              }
+          config_live = {
+              "response_modalities": ["AUDIO"],
+              "output_audio_transcription": {}
+          }
+
+          async def analizza_tutte_le_immagini_live(immagini_bytes, prompt_fase1):
+              print("-> Invio di 20 immagini in streaming via WebSocket (Fase 1)...", flush=True)
               accumulated_text = ""
               try:
-                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
-                      if is_image:
-                          # Fase 1: Inviamo l'immagine come video frame
+                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
+                      # Stream all 20 images as raw bytes
+                      for idx, img in enumerate(immagini_bytes):
                           await session.send_realtime_input(
                               video=types.Blob(
-                                  data=payload_item,
+                                  data=img,
                                   mime_type="image/jpeg"
                               )
                           )
-                          await asyncio.sleep(0.5)
-                      else:
-                          # Fase 2: Inviamo la lista testuale delle descrizioni
-                          await session.send_realtime_input(
-                              text=payload_item
-                          )
-                          await asyncio.sleep(0.5)
-                      
-                      # Inviamo il prompt per l'elaborazione
+                          await asyncio.sleep(0.1) # Pausa minima per permettere l'ingestion asincrona
+                          
+                      # Inviamo il prompt per elaborare l'input
                       await session.send_realtime_input(
-                          text=prompt
+                          text=prompt_fase1
                       )
 
-                      # Ricezione dello stream della trascrizione vocale (.text)
+                      # Catturiamo lo stream ed estraiamo la trascrizione dell'audio generato (output_transcription.text)
                       async for response in session.receive():
                           if response.server_content and response.server_content.output_transcription:
                               if response.server_content.output_transcription.text:
                                   accumulated_text += response.server_content.output_transcription.text
                           
+                          # Usciamo al completamento del turno
                           if response.server_content and response.server_content.turn_complete:
                               break
-                              
                   return accumulated_text.strip()
               except Exception as e:
-                  print(f"Errore durante l'interrogazione WebSocket: {e}", flush=True)
+                  print(f"Errore WebSocket in Fase 1: {e}", flush=True)
+                  return None
+
+          async def analizza_sintesi_live(dati_json_str, prompt_fase2):
+              print("-> Invio dati JSON per la Sintesi Globale via WebSocket (Fase 2)...", flush=True)
+              accumulated_text = ""
+              # Combiniamo dati e istruzioni in un unico invio testuale per non saturare i turni del WebSocket
+              combined_payload = f"DATI INPUT COMPLETI DA ANALIZZARE:\n{dati_json_str}\n\nISTRUZIONI DI ANALISI:\n{prompt_fase2}"
+              try:
+                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
+                      await session.send_realtime_input(
+                          text=combined_payload
+                      )
+                      async for response in session.receive():
+                          if response.server_content and response.server_content.output_transcription:
+                              if response.server_content.output_transcription.text:
+                                  accumulated_text += response.server_content.output_transcription.text
+                          if response.server_content and response.server_content.turn_complete:
+                              break
+                  return accumulated_text.strip()
+              except Exception as e:
+                  print(f"Errore WebSocket in Fase 2: {e}", flush=True)
                   return None
 
           async def main():
               locale = "Hoffell hot tub"
-              print(f"\n[Fase 1] Avvio analisi granulare delle {len(immagini_test)} immagini...", flush=True)
+              print(f"\n--- INIZIO PIPELINE A 2 RICHIESTE ---")
               
-              risultati_granulari = []
-              
+              # 1. Scarichiamo tutte le 20 immagini
+              immagini_bytes = []
+              print(f"Download di {len(immagini_test)} immagini in corso...")
               for idx, url in enumerate(immagini_test):
                   try:
-                      # Richiediamo un formato a 600px per i dettagli visivi
                       url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
                       response = requests.get(url_ottimizzato, timeout=10)
-                      
                       if response.status_code == 200:
-                          img_bytes = response.content
-                          print(f"   [Immagine {idx+1}/{len(immagini_test)}] Scaricata. Interrogazione Live API...", flush=True)
-                          
-                          # PROMPT TOTALMENTE NEUTRO E NON SUGGESTIVO PER SINGOLA FOTO
-                          prompt_singolo = "Descrivi questa immagine in modo dettagliato, oggettivo ed approfondito. Evita qualsiasi riflessione poetica o commento personale."
-                          
-                          descrizione = await interroga_live_api(img_bytes, prompt_singolo, is_image=True)
-                          if descrizione:
-                              risultati_granulari.append({
-                                  "url_immagine": url,
-                                  "descrizione_dettagliata": descrizione
-                              })
-                              print(f"   [Immagine {idx+1}/{len(immagini_test)}] Analisi completata.", flush=True)
-                          else:
-                              print(f"   [Immagine {idx+1}] Errore nell'ottenere la risposta da Gemini Live.", flush=True)
+                          immagini_bytes.append(response.content)
                       else:
-                          print(f"   [Immagine {idx+1}] Errore download (Status: {response.status_code})", flush=True)
+                          print(f"   [Foto {idx+1}] Errore download (Status: {response.status_code})")
                   except Exception as e:
-                      print(f"   [Immagine {idx+1}] Errore generico: {e}", flush=True)
+                      print(f"   [Foto {idx+1}] Errore download: {e}")
+
+              if len(immagini_bytes) < len(immagini_test):
+                  print(f"Attenzione: Scaricate solo {len(immagini_bytes)} immagini su {len(immagini_test)}.")
+
+              # -----------------------------------------------------------------
+              # RICHIESTA 1: ANALISI GRANULARE DELLE 20 IMMAGINI (1 sola chiamata WS)
+              # -----------------------------------------------------------------
+              prompt_fase1 = """
+              Ti ho appena inviato una sequenza di immagini di un luogo in tempo reale.
+              Descrivi ciascuna immagine in modo estremamente dettagliato, oggettivo, distaccato e approfondito, seguendo lo stesso ordine numerico in cui le ho inviate (da 1 a 20).
+              Evita qualsiasi aggettivo vuoto, metafora o tono promozionale. Concentrati solo sui fatti visibili.
+              
+              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
+              [
+                  {
+                      "numero_immagine": 1,
+                      "descrizione_dettagliata": "Descrizione oggettiva della prima immagine..."
+                  },
+                  ...
+              ]
+              """
+              
+              risultati_granulari_raw = await analizza_tutte_le_immagini_live(immagini_bytes, prompt_fase1)
+              
+              risultati_granulari = []
+              if risultati_granulari_raw:
+                  try:
+                      match = re.search(r'```json\s*(.*?)\s*```', risultati_granulari_raw, re.DOTALL)
+                      json_str = match.group(1) if match else risultati_granulari_raw
+                      lista_json = json.loads(json_str)
+                      
+                      # Mappiamo gli URL originali con le risposte basandoci sull'indice sequenziale
+                      for idx, item in enumerate(lista_json):
+                          if idx < len(immagini_test):
+                              risultati_granulari.append({
+                                  "url_immagine": immagini_test[idx],
+                                  "descrizione_dettagliata": item.get("descrizione_dettagliata", "N/D")
+                              })
+                      print("-> Fase 1 completata con successo!", flush=True)
+                  except Exception as e:
+                      print(f"Errore nel parsing JSON della Fase 1: {e}", flush=True)
+                      print(f"Risposta grezza ricevuta:\n{risultati_granulari_raw}", flush=True)
+                      exit(1)
                       
               # -----------------------------------------------------------------
-              # FASE 2: SINTESI SCIENTIFICO-GIORNALISTICA COMPLETAMENTE AGNOSTICA
+              # RICHIESTA 2: SINTESI AGNOSTICA E CONSOLIDAMENTO FATTI (1 sola chiamata WS)
               # -----------------------------------------------------------------
-              print(f"\n[Fase 2] Avvio sintesi globale e consolidamento dei fatti per {locale}...", flush=True)
+              # Prepariamo la stringa JSON dei risultati da inviare
+              dati_json_str = json.dumps(risultati_granulari, indent=2, ensure_ascii=False)
               
-              # Prepariamo l'input testuale per il secondo stadio
-              input_fase2_str = ""
-              for i, r in enumerate(risultati_granulari):
-                  input_fase2_str += f"--- DETTAGLI IMMAGINE {i+1} ({r['url_immagine']}) ---\n{r['descrizione_dettagliata']}\n\n"
-
-              # PROMPT COMPLETAMENTE AGNOSTICO E NON SUGGESTIVO
-              prompt_stadio2 = """
+              prompt_fase2 = """
               Sei un analista senior e ricercatore d'archivio specializzato nel controllo incrociato di reportage sul campo e informazioni geomarketing.
               Ti viene fornito un elenco strutturato di descrizioni empiriche ed oggettive di diverse immagini relative a un singolo luogo geografico.
               
@@ -166,39 +205,39 @@ jobs:
                   "tipologia_luogo": "Categoria generale del luogo identificata dall'analisi incrociata dei dati",
                   "descrizione_globale_posto": "Una descrizione complessiva, dettagliata, fattuale e oggettiva del luogo ricavata sintetizzando gli elementi coerenti e ricorrenti presenti nelle descrizioni delle immagini.",
                   "fatti_rilevanti_accertati": [
-                      "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti"
+                      "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti nelle descrizioni"
                   ],
                   "discrepanze_o_incoerenze_rilevate": [
-                      "Eventuali elementi visivi contrastanti, dati contraddittori o descrizioni che appaiono palesemente incoerenti con il resto del set di dati (se presenti, altrimenti lista vuota)"
+                      "Eventuali elementi visivi contrastanti, dati contraddittori o descrizioni che appaino palesemente incoerenti con il resto del set di dati (se presenti, altrimenti lista vuota)"
                   ],
                   "testi_e_dati_ocr_aggregati": [
                       "Trascrizione o sintesi strutturata dei testi, cartelli, listini, regole o orari emersi dalla lettura ottica delle immagini (se presenti, altrimenti lista vuota)"
                   ]
               }
               
-              Rispondi esclusivamente in italiano per i testi. Mantieni un tono enciclopedico, rigoroso ed empirico.
+              Rispondi esclusivamente in italiano per i testi descrittivi. Mantieni un approccio puramente analitico, oggettivo, distaccato e scientifico.
               """
-
-              sintesi_globale = {}
-              descrizione_sintesi = await interroga_live_api(input_fase2_str, prompt_stadio2, is_image=False)
               
-              if descrizione_sintesi:
+              risultato_sintesi_raw = await analizza_sintesi_live(dati_json_str, prompt_fase2)
+              
+              sintesi_globale = {}
+              if risultato_sintesi_raw:
                   try:
-                      match = re.search(r'```json\s*(.*?)\s*```', descrizione_sintesi, re.DOTALL)
-                      if match:
-                          sintesi_globale = json.loads(match.group(1))
-                      else:
-                          sintesi_globale = json.loads(descrizione_sintesi)
-                  except Exception:
+                      match = re.search(r'```json\s*(.*?)\s*```', risultato_sintesi_raw, re.DOTALL)
+                      json_str = match.group(1) if match else risultato_sintesi_raw
+                      sintesi_globale = json.loads(json_str)
+                      print("-> Fase 2 completata con successo!", flush=True)
+                  except Exception as e:
+                      print(f"Errore nel parsing JSON della Fase 2: {e}", flush=True)
                       sintesi_globale = {
                           "tipologia_luogo": "N/D",
-                          "descrizione_globale_posto": descrizione_sintesi,
+                          "descrizione_globale_posto": risultato_sintesi_raw,
                           "fatti_rilevanti_accertati": [],
                           "discrepanze_o_incoerenze_rilevate": [],
                           "testi_e_dati_ocr_aggregati": []
                       }
-                      
-              # Strutturiamo l'output finale contenente sia la sintesi che le descrizioni granulari
+
+              # 3. Strutturiamo l'output finale integrato
               output_finale = {
                   locale: {
                       "ricostruzione_globale_analitica": sintesi_globale,
@@ -206,10 +245,11 @@ jobs:
                   }
               }
 
+              # Salvataggio su disco
               output_path = "guida_viaggio_visiva.json"
               with open(output_path, "w", encoding="utf-8") as f:
                   json.dump(output_finale, f, indent=4, ensure_ascii=False)
-              print(f"\nAnalisi globale completata e salvata in {output_path}.", flush=True)
+              print(f"\nAnalisi globale completata e salvata con successo in {output_path}.", flush=True)
 
           if __name__ == "__main__":
               asyncio.run(main())
