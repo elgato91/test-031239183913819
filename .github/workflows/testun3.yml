@@ -217,6 +217,7 @@ jobs:
                   print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
                   risultati.append(info_locale)
                   
+                  # Registriamo l'URL con hl=en per lo scraper di recensioni
                   businesses_list.append({
                       'url': driver.current_url,
                       'custom_params': {'company': nome_trimmed}
@@ -419,7 +420,8 @@ jobs:
                   Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
                   {
                       "tipologia_luogo": "Categoria generale del luogo identificata dall'analisi incrociata dei dati",
-                      "descrizione_globale_posto": "Una descrizione complessiva, dettagliata, fattuale e oggettiva del luogo ricavata sintetizzando gli elementi coerenti e ricorrenti presenti nelle descrizioni delle immagini.",
+                      "identita_visiva_e_vibe": "Una ricostruzione densa, evocativa e fluida di 2 paragrafi in italiano che descrive lo spazio, l'atmosfera, i contrasti cromatici e termici (il fumo dell'acqua, i cieli lividi o sereni, la lingua del ghiacciaio visibile). Scrivi con un tono narrativo ed elevato, ma rigorosamente agganciato ai fatti visivi reali.",
+                      "analisi_materica_e_design": "Un'analisi di come i materiali costruttivi (il legno scuro trattato di nero, le pietre piatte dei camminamenti, i muretti rosso mattone) e l'architettura minimalista si inseriscono e contrastano con il paesaggio naturale circostante.",
                       "fatti_rilevanti_accertati": [
                           "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti nelle descrizioni"
                       ],
@@ -474,6 +476,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          cd google-reviews-scraper-pro
           python generate_guide.py
 
       - name: Organizzazione File per l'Esportazione
