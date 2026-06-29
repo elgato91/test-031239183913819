@@ -26,7 +26,6 @@ jobs:
 
       - name: Installazione Dipendenze (Playwright, Google GenAI SDK con supporto SOCKS)
         run: |
-          # Aggiunto "requests[socks]" e PySocks per risolvere l'errore InvalidSchema
           pip install playwright google-genai "requests[socks]" PySocks
           playwright install chromium
 
@@ -39,8 +38,8 @@ jobs:
           captured_requests = []
 
           def handle_request(request):
-              # Filtriamo esplicitamente per 'listugc' che contiene i dati delle recensioni
-              if request.resource_type in ["xhr", "fetch"] and "listugc" in request.url:
+              # Catturiamo le chiamate API delle recensioni (listugcposts o preview/review)
+              if request.resource_type in ["xhr", "fetch"] and ("listugc" in request.url or "preview/review" in request.url):
                   captured_requests.append({
                       "url": request.url,
                       "method": request.method,
@@ -53,14 +52,62 @@ jobs:
               page = browser.new_page()
               page.on("request", handle_request)
               
-              print("Apertura di Google Maps per intercettare l'API...")
-              # URL modificato con l'indicatore !9m1!1b1 alla fine per forzare l'apertura immediata del tab recensioni
-              page.goto("https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!4m8!3m7!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!9m1!1b1!16s%2Fg%2F11l23qq660", timeout=60000)
+              print("Apertura di Google Maps...")
+              # URL con parametro per aprire direttamente il tab recensioni
+              url = "https://www.google.com/maps/place/Coro/@42.7179111,12.1116244,17z/data=!4m8!3m7!1s0x132ecd778417bda5:0x4e6e6043f0ea67e1!8m2!3d42.7179111!4d12.1116244!9m1!1b1!16s%2Fg%2F11l23qq660"
+              page.goto(url, timeout=60000)
               
-              page.wait_for_timeout(5000)
-              # Scrolliamo il box per forzare la chiamata successiva
-              page.mouse.wheel(0, 3000)
-              page.wait_for_timeout(4000)
+              # Attendiamo per verificare se appare la schermata di consenso cookie
+              page.wait_for_timeout(3000)
+              
+              # Gestione ed elusione del popup di consenso cookie di Google
+              try:
+                  if "consent.google.com" in page.url or page.locator('dialog').count() > 0 or page.locator('button:has-text("Accept")').count() > 0:
+                      print("Rilevato modulo di consenso di Google. Tento il bypass...")
+                      # Selettori comuni per i pulsanti di accettazione cookie (multilingua)
+                      selectors = [
+                          'button:has-text("Accetta tutto")',
+                          'button:has-text("Accept all")',
+                          'button:has-text("I agree")',
+                          'button:has-text("Agree")',
+                          'button:has-text("Tout accepter")',
+                          'button:has-text("Alle akzeptieren")',
+                          'form[action*="consent"] button',
+                          'button[aria-label*="Accetta"]',
+                          'button[aria-label*="Accept"]'
+                      ]
+                      clicked = False
+                      for selector in selectors:
+                          try:
+                              loc = page.locator(selector)
+                              if loc.count() > 0:
+                                  loc.first.click()
+                                  print(f"Cliccato pulsante di consenso: {selector}")
+                                  clicked = True
+                                  break
+                          except Exception:
+                              continue
+                      if clicked:
+                          page.wait_for_timeout(5000)  # Attendiamo il caricamento reale di Maps
+              except Exception as e:
+                  print(f"Nessun popup o errore durante il consenso: {e}")
+
+              print("Simulazione dello scorrimento per forzare le chiamate di rete...")
+              # Tenta di scorrere il pannello specifico delle recensioni per innescare l'API
+              try:
+                  review_feed = page.locator('div[role="feed"], div[tabindex="0"]')
+                  if review_feed.count() > 0:
+                      review_feed.first.focus()
+                      for _ in range(4):
+                          page.mouse.wheel(0, 1000)
+                          page.wait_for_timeout(1500)
+                  else:
+                      page.mouse.wheel(0, 3000)
+                      page.wait_for_timeout(4000)
+              except Exception as e:
+                  print(f"Errore di scorrimento specifico: {e}")
+                  page.mouse.wheel(0, 3000)
+                  page.wait_for_timeout(4000)
               
               browser.close()
 
