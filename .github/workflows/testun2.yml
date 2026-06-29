@@ -39,7 +39,6 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Scrivi Script Risolutore (Fase 1)
-        # Utilizziamo cat << 'EOF' per scrivere il codice Python direttamente nel file
         shell: bash
         run: |
           cat << 'EOF' > google-reviews-scraper-pro/resolve_maps.py
@@ -56,7 +55,7 @@ jobs:
               'Hoffell hot tub'
           ]
 
-          # Pulisce i testi dai glifi grafici di Maps (es:  o )
+          # Funzione di pulizia per eliminare glifi e a-capo indesiderati
           def pulisci_testo(testo):
               if not testo:
                   return 'N/D'
@@ -75,7 +74,7 @@ jobs:
                   nome_trimmed = nome.strip()
                   print(f'\n=== Risoluzione ed Estrazione Dati per: "{nome_trimmed}" ===', flush=True)
                   
-                  # Forziamo l'italiano hl=it nell'URL di ricerca
+                  # 1. Ricerca forzata in italiano per avere i dati anagrafici in italiano
                   search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}?hl=it'
                   driver.get(search_url)
                   time.sleep(5)
@@ -91,13 +90,12 @@ jobs:
                       except Exception:
                           pass
                   
-                  # Disambiguazione automatica se Google mostra una lista
+                  # Disambiguazione se Google mostra una lista
                   current_url = driver.current_url
                   if '/maps/place/' not in current_url:
                       try:
                           first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
                           resolved_url = first_result_el.get_attribute('href')
-                          # Aggreghiamo hl=it all'URL risolto se mancante
                           if 'hl=' not in resolved_url:
                               resolved_url += '&hl=it'
                           else:
@@ -124,7 +122,7 @@ jobs:
                       'caratteristiche_servizi': []
                   }
                   
-                  # Estrazione anagrafica base con pulizia dei caratteri unicode estranei
+                  # Estrazione anagrafica base
                   try:
                       info_locale['nome'] = driver.find_element('css selector', 'h1').text
                   except Exception: pass
@@ -147,10 +145,7 @@ jobs:
                       info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
                   except Exception: pass
                   
-                  # -----------------------------------------------------------------
-                  # ESTRAZIONE COORDINATE GEOGRAFICHE CON FALLBACK
-                  # -----------------------------------------------------------------
-                  # 1. Tentativo standard con pattern @lat,lng
+                  # Coordinate con Fallback
                   match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
                   if match_at:
                       info_locale['coordinate'] = {
@@ -158,7 +153,6 @@ jobs:
                           'longitudine': float(match_at.group(2))
                       }
                   else:
-                      # 2. Fallback per URL compressi (es. Colosseo) estraendo da !3d (lat) e !4d (lng)
                       match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
                       if match_data:
                           info_locale['coordinate'] = {
@@ -166,7 +160,7 @@ jobs:
                               'longitudine': float(match_data.group(2))
                           }
                       
-                  # Stelle e totale recensioni complessive (Regex-safe)
+                  # Stelle e recensioni complessive (Regex-safe)
                   try:
                       rating_text = driver.find_element('css selector', 'div.F7nice').text
                       rating_text = rating_text.replace('\xa0', ' ')
@@ -179,17 +173,29 @@ jobs:
                   except Exception: pass
 
                   # -----------------------------------------------------------------
-                  # SCROLL DI SICUREZZA PER SBLOCCARE IL LAZY LOADING
+                  # SCROLL GRADUALE DEL PANNELLO LATERALE PER ABILITARE L'AFFLUENZA
                   # -----------------------------------------------------------------
                   try:
-                      pannello = driver.find_element('css selector', 'div[role="main"]')
-                      # Eseguiamo uno scroll verso il basso per innescare il caricamento asincrono
-                      driver.execute_script("arguments[0].scrollTo(0, 500);", pannello)
-                      time.sleep(2)
+                      pannello = None
+                      # Troviamo l'elemento scrollabile corretto
+                      for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
+                          try:
+                              el = driver.find_element('css selector', selector)
+                              if el.is_displayed():
+                                  pannello = el
+                                  break
+                          except Exception:
+                              pass
+                      
+                      if pannello:
+                          print('-> Effettuo uno scorrimento progressivo della scheda per sbloccare l\'affluenza...', flush=True)
+                          for pos in [300, 600, 900]:
+                              driver.execute_script(f"arguments[0].scrollTo(0, {pos});", pannello)
+                              time.sleep(1.5)
                   except Exception:
                       pass
 
-                  # Estrazione Grafici Affluenza (Popular Times)
+                  # Estrazione Grafici Affluenza
                   try:
                       barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'affollato') or contains(@aria-label, 'affluenza') or contains(@aria-label, 'busy') or contains(@aria-label, 'popular')]")
                       for b in barre:
@@ -198,21 +204,18 @@ jobs:
                               info_locale['popular_times_affluenza'].append(lbl)
                   except Exception: pass
 
-                  # Estrazione Caratteristiche ed etichette (Informazioni)
+                  # Caratteristiche (Informazioni)
                   try:
                       url_scheda_corrente = driver.current_url
-                      # Forzando hl=it, il pulsante si chiamerà sicuramente 'Informazioni'
                       info_btn = driver.find_element('css selector', 'button[data-tooltip="Informazioni"], button[aria-label*="Informazioni"]')
                       info_btn.click()
                       time.sleep(2)
                       
-                      # Parsing dei selettori per catturare l'elenco dei servizi
                       elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
                       for s in elementi_servizi:
                           if s.text and s.text not in info_locale['caratteristiche_servizi']:
                               info_locale['caratteristiche_servizi'].append(s.text)
                               
-                      # Ritorniamo alla scheda principale per non compromettere il ciclo successivo
                       driver.get(url_scheda_corrente)
                       time.sleep(2)
                   except Exception as e:
@@ -221,24 +224,33 @@ jobs:
                   print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
                   risultati.append(info_locale)
                   
-                  # Registriamo l'URL finale per il config.yaml dello scraper ufficiale
+                  # -----------------------------------------------------------------
+                  # FORZATURA IN INGLESE (hl=en) SOLO PER IL CONFIG.YAML DELLO SCRAPER
+                  # -----------------------------------------------------------------
+                  scraper_url = driver.current_url
+                  if 'hl=' not in scraper_url:
+                      scraper_url += '&hl=en' if '?' in scraper_url else '?hl=en'
+                  else:
+                      scraper_url = re.sub(r'hl=[a-z]{2}', 'hl=en', scraper_url)
+
                   businesses_list.append({
-                      'url': driver.current_url,
+                      'url': scraper_url,
                       'custom_params': {'company': nome_trimmed}
                   })
                   
           finally:
               driver.quit()
 
-          # 1. Esportiamo il JSON dei metadati generali
+          # 1. Salvataggio Anagrafica e Dati Mappe
           with open('dati_completi_mappe.json', 'w', encoding='utf-8') as f:
               json.dump(risultati, f, indent=4, ensure_ascii=False)
 
           # 2. Generazione dinamica della configurazione config.yaml per lo scraper ufficiale
           config_data = {
               'headless': False,                       
-              'sort_by': 'newest',                     
-              'max_reviews': 50,                       # Limitato a 50 recensioni per attività
+              'sort_by': 'newest',                     # <-- Ordina per Più Recenti
+              'scrape_mode': 'full',                   
+              'max_reviews': 50,                       
               'proxy': 'socks5://127.0.0.1:40001',     
               'db_path': ':memory:',                   
               'download_images': False,                
