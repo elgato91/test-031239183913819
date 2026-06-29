@@ -314,16 +314,8 @@ jobs:
                       query_to_search = get_query_from_url(url)
                       
                       # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
-                      if "bing.com" in url:
-                          await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.5, 4.0))
-                          try:
-                              search_box = page.locator("textarea[name='q'], input[name='q']").first
-                              await search_box.fill(query_to_search) 
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                               
-                      elif "startpage.com" in url:
+                      if "startpage.com" in url:
                           await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
                           try:
@@ -350,12 +342,6 @@ jobs:
                       except: pass
                           
                       await asyncio.sleep(6) 
-                      
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
-                      await page.keyboard.press("PageDown")
-                      await asyncio.sleep(1)
-                      await page.keyboard.press("PageDown")
-                      await asyncio.sleep(2)
                       
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
