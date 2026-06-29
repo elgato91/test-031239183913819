@@ -8,30 +8,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Font (Specifiche CloakBrowser Kasada/CreepJS)
+      - name: Installazione Font di Sistema (Originale)
         run: |
           sudo apt-get update
-          
-          # 1. Font base per aggirare Kasada e Akamai (rendering Emoji)
-          sudo apt-get install -y cabextract curl wget \
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
           
           mkdir -p ~/.local/share/fonts/windows
-          
-          # 2. Download DIRETTO (no tar) dei font moderni essenziali per bypassare l'avviso v0.4.5
-          echo "Scaricamento dei font moderni Windows essenziali (Segoe UI, Calibri)..."
-          wget -qO ~/.local/share/fonts/windows/segoeui.ttf "https://raw.githubusercontent.com/mrbvrz/segoe-ui-linux/master/font/segoeui.ttf" || true
-          wget -qO ~/.local/share/fonts/windows/segoeuib.ttf "https://raw.githubusercontent.com/mrbvrz/segoe-ui-linux/master/font/segoeuib.ttf" || true
-          wget -qO ~/.local/share/fonts/windows/calibri.ttf "https://raw.githubusercontent.com/mrbvrz/segoe-ui-linux/master/font/calibri.ttf" || true
-          
-          # 3. Fallback di Sicurezza (Font XP-era)
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer || true
-          
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ 2>/dev/null || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ 2>/dev/null || true
-          
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -147,7 +134,8 @@ jobs:
                   "please enter in the characters you see below", "access to this page is forbidden",
                   "error 1020", "you have been blocked", "pardon our interruption",
                   "se non vieni reindirizzato", "se hai problemi ad accedere", 
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
+                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
+                  "checking the site connection security", "solving the above captcha"
               ]
               
               for ind in blocking_indicators:
@@ -242,11 +230,11 @@ jobs:
               with open(f"/tmp/step2_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
                   
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare.")
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Strict CloakBrowser Specs)
+      - name: Creazione Script Python - STEP 2 (Pura Evasione Senza Rumore CDP)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -259,7 +247,7 @@ jobs:
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
 
-          # Silenziamo l'avviso sui Font della nuova versione 0.4.5 di CloakBrowser
+          # Silenziamo l'avviso introdotto oggi in CloakBrowser 0.4.5, noi usiamo i font di base in ~/.local
           os.environ["CLOAKBROWSER_SUPPRESS_FONT_WARNING"] = "1"
 
           if len(sys.argv) < 2: sys.exit(1)
@@ -288,21 +276,21 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
+              # TORNATO ORIGINALE: Nessuna quota storage forzata. Impronta pulita pura.
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  f"--fingerprint-fonts-dir={windows_fonts_dir}",
-                  "--fingerprint-storage-quota=10000"
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Impronta Pulita)...", flush=True)
               try:
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
                       humanize=True,
-                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
+                      human_config={"typing_delay": 90, "mistype_chance": 0.02, "idle_between_actions": True},
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
                       viewport={"width": 1920, "height": 1080},
@@ -310,7 +298,7 @@ jobs:
                   )
                   page = await context.new_page()
                   
-                  # WARMUP Integrato - Creazione di cronologia valida (Nessun JS Iniettato)
+                  # WARMUP Integrato
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
                   await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
@@ -355,13 +343,16 @@ jobs:
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                       else:
+                          # TORNATO ORIGINALE: Google e tutti gli altri siti vengono aperti DIRETTAMENTE via URL
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
+                      # --- VERO SILENZIO RADIO ---
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
                       await asyncio.sleep(6) 
                       
+                      # Scorrimento hardware (no page.evaluate)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
@@ -373,10 +364,16 @@ jobs:
                       text_lower = text.lower()
                       
                       blocking_indicators = [
-                          "just a moment", "are you a robot", "prove your humanity",
+                          "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
+                          "just a moment", "security verification", "please enable js", "enable javascript",
+                          "are you a robot", "please wait for verification", "we've detected unusual activity",
+                          "unusual traffic from your computer network", "robot challenge screen",
+                          "checking the site connection security", "solving the above captcha",
+                          "if you are not redirected", "checking your browser", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
-                          "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity"
+                          "access to this page is forbidden", "error 1020", "you have been blocked",
+                          "pardon our interruption", "se non vieni reindirizzato", "se hai problemi ad accedere", 
+                          "ci siamo quasi", "verifica di sicurezza"
                       ]
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
