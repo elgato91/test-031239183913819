@@ -40,13 +40,15 @@ jobs:
 
       - name: Genera Configurazione Ottimizzata
         run: |
-          cd google-reviews-scraper-pro
           python -c "
           import yaml
           import urllib.parse
+          import time
+          from seleniumbase import Driver
 
           # -----------------------------------------------------------------
-          # INSERISCI QUI LA TUA LISTA DI ATTIVITÀ O PUNTI DI INTERESSE
+          # INSERISCI QUI LA TUA LISTA DI NOMI SEMPLICI
+          # Lo script si occuperà di trovare l'URL esatto per ognuno di essi
           # -----------------------------------------------------------------
           nomi_attivita = [
               'Colosseo, Roma',
@@ -54,19 +56,76 @@ jobs:
               'Hoffell hot tub'
           ]
 
+          print('Avvio del risolutore automatico di indirizzi...')
+          # Utilizziamo SeleniumBase in modalità UC per bypassare i controlli
+          driver = Driver(uc=True, headless=False, proxy='socks5://127.0.0.1:40001')
+          
           businesses_list = []
-          for nome in nomi_attivita:
-              # Trasforma il nome testuale in un URL di ricerca (es. spazi diventano %20)
-              url_ricerca = f'https://www.google.com/maps/search/{urllib.parse.quote(nome)}'
-              businesses_list.append({
-                  'url': url_ricerca,
-                  'custom_params': {'company': nome}
-              })
 
+          try:
+              for nome in nomi_attivita:
+                  nome_trimmed = nome.strip()
+                  
+                  # Se è già un URL, lo saltiamo e lo inseriamo direttamente
+                  if nome_trimmed.startswith('http://') or nome_trimmed.startswith('https://'):
+                      print(f'Rilevato URL diretto: {nome_trimmed}')
+                      businesses_list.append({
+                          'url': nome_trimmed,
+                          'custom_params': {'company': nome_trimmed}
+                      })
+                      continue
+                      
+                  print(f'Risoluzione in corso per: \"{nome_trimmed}\"...', flush=True)
+                  search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}'
+                  
+                  try:
+                      driver.get(search_url)
+                      time.sleep(6)  # Tempo necessario per il caricamento e l'eventuale reindirizzamento
+                      
+                      # Gestione del banner dei cookie se presente
+                      try:
+                          consent_btn = driver.find_element('css selector', 'button[aria-label*=\"Accetta\"], button[aria-label*=\"Accept\"], [aria-label*=\"Agree\"]')
+                          consent_btn.click()
+                          time.sleep(3)
+                      except Exception:
+                          pass
+                      
+                      current_url = driver.current_url
+                      
+                      if '/maps/place/' in current_url:
+                          # Caso 1: Google Maps ha aperto direttamente la scheda
+                          print(f'-> Trovata corrispondenza univoca diretta: {current_url}', flush=True)
+                          resolved_url = current_url
+                      else:
+                          # Caso 2: Google Maps mostra una lista di risultati
+                          # Estraiamo il link del primo risultato utile nell'elenco
+                          try:
+                              first_result_el = driver.find_element('css selector', 'a[href*=\"/maps/place/\"]')
+                              resolved_url = first_result_el.get_attribute('href')
+                              print(f'-> Disambiguato con successo (preso il primo risultato della lista): {resolved_url}', flush=True)
+                          except Exception:
+                              print(f'-> Impossibile disambiguare. Fallback all\'URL di ricerca originale.', flush=True)
+                              resolved_url = search_url
+                              
+                      businesses_list.append({
+                          'url': resolved_url,
+                          'custom_params': {'company': nome_trimmed}
+                      })
+                      
+                  except Exception as e:
+                      print(f'Errore durante la risoluzione di \"{nome_trimmed}\": {e}', flush=True)
+                      businesses_list.append({
+                          'url': search_url,
+                          'custom_params': {'company': nome_trimmed}
+                      })
+          finally:
+              driver.quit()
+
+          # Scrittura del file config.yaml per lo scraper
           config_data = {
-              'headless': False,                       # Richiesto False per UC Mode e Xvfb
-              'sort_by': 'newest',                     # Ordina per Più Recenti
-              'max_reviews': 50,                       # Limite di recensioni per attività
+              'headless': False,                       
+              'sort_by': 'newest',                     
+              'max_reviews': 50,                       
               'proxy': 'socks5://127.0.0.1:40001',     
               'db_path': ':memory:',                   
               'download_images': False,                
@@ -77,7 +136,7 @@ jobs:
               'businesses': businesses_list
           }
 
-          with open('config.yaml', 'w') as f:
+          with open('google-reviews-scraper-pro/config.yaml', 'w') as f:
               yaml.dump(config_data, f)
           "
 
