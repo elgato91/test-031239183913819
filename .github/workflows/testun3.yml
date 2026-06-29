@@ -1,4 +1,4 @@
-name: Pipeline Completa - Scraping, Estrazione e Analisi AI Live
+name: Pipeline Completa Parallela - Scraping & AI Live
 
 on: 
   workflow_dispatch:
@@ -8,33 +8,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Setup 1 WARProxy Docker Container (IPv6)
+      - name: Setup 3 WARProxy Docker Container (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
-          PORT=40001
-          docker run --name warproxy-1 --network host \
-            -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-            -d ghcr.io/kingcc/warproxy:latest
-          sleep 5
-
-      - name: Verifica IP IPv6 (socks5h)
-        run: |
-          PORT=40001
-          for i in {1..10}; do
-            IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 3
+          
+          # Avvia 3 proxy su 3 porte diverse
+          for PORT in 40001 40002 40003; do
+            docker run --name warproxy-$PORT --network host \
+              -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -d ghcr.io/kingcc/warproxy:latest
           done
-          if [ -z "$IP" ]; then
-            echo "Errore: Il proxy SOCKS5 non si è avviato correttamente o non risponde."
-            exit 1
-          fi
-          echo "Proxy pronto. IP di uscita: $IP"
+          echo "Attesa inizializzazione proxy..."
+          sleep 10
 
-      - name: Setup Ambiente e Dipendenze Essenziali
+      - name: Verifica IP dei 3 Proxy
         run: |
-          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git
-          cd google-reviews-scraper-pro
+          for PORT in 40001 40002 40003; do
+            echo "Verifica proxy su porta $PORT..."
+            IP=""
+            for i in {1..5}; do
+              IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 3
+            done
+            if [ -z "$IP" ]; then
+              echo "Errore: Proxy su porta $PORT non risponde."
+              exit 1
+            fi
+            echo "Proxy $PORT pronto. IP: $IP"
+          done
+
+      - name: Setup Ambiente e Dipendenze
+        run: |
+          # Cloniamo lo scraper in una cartella "base" che poi i worker copieranno
+          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git base-scraper
+          cd base-scraper
           pip install -r requirements.txt
-          pip install pyyaml seleniumbase google-genai requests
+          pip install pyyaml seleniumbase google-genai requests aiohttp
           seleniumbase install chromedriver
 
       - name: Avvio Xvfb (Display virtuale per Selenium)
@@ -42,460 +50,266 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Scrivi Script Risolutore (Fase 1)
+      - name: Scrittura Orchestratore Asincrono (Il Motore del Sistema)
         shell: bash
         run: |
-          cat << 'EOF' > google-reviews-scraper-pro/resolve_maps.py
+          cat << 'EOF' > orchestrator.py
+          import asyncio
           import json
-          import urllib.parse
-          import time
-          import re
           import yaml
+          import os
+          import shutil
+          import re
+          import urllib.parse
           from seleniumbase import Driver
+          from google import genai
+          from google.genai import types
+          import requests
 
-          nomi_attivita = [
+          # --- CONFIGURAZIONE LUOGHI ---
+          LUOGHI_DA_ANALIZZARE = [
               'Colosseo, Roma',
               'Da Enzo al 29, Roma',
-              'Hoffell hot tub'
+              'Hoffell hot tub',
+              'Fontana di Trevi, Roma',
+              'Pantheon, Roma'
+              # Aggiungi qui quanti luoghi vuoi...
           ]
 
-          def pulisci_testo(testo):
-              if not testo:
-                  return 'N/D'
-              testo_pulito = re.sub(r'^[\s\W_]+', '', testo)
-              return testo_pulito.strip()
+          # --- SETUP DEI 6 RUNNER E DEI PROXY ---
+          # 3 Porte proxy. 2 Runner per porta = 6 Runner totali.
+          WORKER_CONFIGS = [
+              {"id": 1, "proxy_port": 40001}, {"id": 2, "proxy_port": 40001},
+              {"id": 3, "proxy_port": 40002}, {"id": 4, "proxy_port": 40002},
+              {"id": 5, "proxy_port": 40003}, {"id": 6, "proxy_port": 40003}
+          ]
 
-          print('Avvio del browser controllato via SeleniumBase (English)...', flush=True)
-          driver = Driver(uc=True, headless=False, proxy='socks5://127.0.0.1:40001')
-          
-          risultati = []
-          businesses_list = []
-          cookie_accettati = False
+          # Limite di chiamate simultanee Gemini per tutto il sistema per evitare Rate Limit (429)
+          api_semaphore = asyncio.Semaphore(50)
 
-          try:
-              for nome in nomi_attivita:
-                  nome_trimmed = nome.strip()
-                  print(f'\n=== Risoluzione ed Estrazione Dati per: "{nome_trimmed}" ===', flush=True)
-                  
-                  search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome_trimmed)}?hl=it'
-                  driver.get(search_url)
-                  time.sleep(5)
-                  
-                  if not cookie_accettati:
+          async def fase1_risolvi_mappa(luogo, proxy_url):
+              print(f"[Fase 1] Risoluzione URL per '{luogo}' usando proxy {proxy_url}...")
+              
+              # Eseguiamo Selenium in un thread separato per non bloccare l'event loop asincrono
+              def run_selenium():
+                  # IMPORTANTE: headless=True è obbligatorio in esecuzione parallela massiva su GitHub Actions
+                  driver = Driver(uc=True, headless=True, proxy=proxy_url)
+                  resolved_url = None
+                  try:
+                      search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(luogo)}?hl=it'
+                      driver.get(search_url)
+                      driver.sleep(5)
+                      
                       try:
-                          consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
+                          consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"]')
                           consent_btn.click()
-                          cookie_accettati = True
-                          print('-> Cookie di Google accettati.', flush=True)
-                          time.sleep(2)
-                      except Exception:
-                          pass
-                  
-                  current_url = driver.current_url
-                  if '/maps/place/' not in current_url:
-                      try:
-                          first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
-                          resolved_url = first_result_el.get_attribute('href')
+                          driver.sleep(2)
+                      except: pass
+                      
+                      current_url = driver.current_url
+                      if '/maps/place/' not in current_url:
+                          try:
+                              first_result = driver.find_element('css selector', 'a[href*="/maps/place/"]')
+                              resolved_url = first_result.get_attribute('href')
+                          except: pass
+                      else:
+                          resolved_url = current_url
                           
+                      if resolved_url:
                           if 'hl=' not in resolved_url:
                               resolved_url += '&hl=it'
                           else:
                               resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=it', resolved_url)
-                              
-                          print(f'-> Rilevata lista. Carico il primo risultato: {resolved_url}', flush=True)
-                          driver.get(resolved_url)
-                          time.sleep(5)
-                      except Exception:
-                          print('-> Nessuna corrispondenza diretta o lista trovata.', flush=True)
-                  
-                  info_locale = {
-                      'ricerca_originale': nome_trimmed,
-                      'url_mappa': driver.current_url,
-                      'nome': 'N/D',
-                      'categoria': 'N/D',
-                      'indirizzo': 'N/D',
-                      'telefono': 'N/D',
-                      'sito_web': 'N/D',
-                      'media_stelle': 'N/D',
-                      'totale_recensioni': 'N/D',
-                      'coordinate': {},
-                      'popular_times_affluenza': [],
-                      'caratteristiche_servizi': []
-                  }
-                  
-                  try:
-                      info_locale['nome'] = driver.find_element('css selector', 'h1').text
-                  except Exception: pass
-                  
-                  try:
-                      info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
-                  except Exception: pass
+                  finally:
+                      driver.quit()
+                  return resolved_url
 
+              loop = asyncio.get_running_loop()
+              url = await loop.run_in_executor(None, run_selenium)
+              return url
+
+          async def analizza_immagine_gemini(client, config_live, url_immagine, prompt):
+              async with api_semaphore:
                   try:
-                      raw_address = driver.find_element('css selector', '[data-item-id="address"]').text
-                      info_locale['indirizzo'] = pulisci_testo(raw_address)
-                  except Exception: pass
-                  
-                  try:
-                      raw_phone = driver.find_element('css selector', '[data-item-id^="phone:tel"]').text
-                      info_locale['telefono'] = pulisci_testo(raw_phone)
-                  except Exception: pass
-                  
-                  try:
-                      info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
-                  except Exception: pass
-                  
-                  # Coordinate
-                  match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
-                  if match_at:
-                      info_locale['coordinate'] = {
-                          'latitudine': float(match_at.group(1)),
-                          'longitudine': float(match_at.group(2))
-                      }
-                  else:
-                      match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
-                      if match_data:
-                          info_locale['coordinate'] = {
-                              'latitudine': float(match_data.group(1)),
-                              'longitudine': float(match_data.group(2))
-                          }
+                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url_immagine)
                       
-                  # Stelle e totale recensioni
-                  try:
-                      rating_text = driver.find_element('css selector', 'div.F7nice').text
-                      rating_text = rating_text.replace('\xa0', ' ')
-                      if '(' in rating_text:
-                          parts = rating_text.split('(')
-                          info_locale['media_stelle'] = float(parts[0].strip().replace(',', '.'))
-                          reviews_raw = parts[1].split(')')[0]
-                          only_numbers = re.sub(r'[^\d]', '', reviews_raw)
-                          info_locale['totale_recensioni'] = int(only_numbers)
-                  except Exception: pass
-
-                  # Scroll per caricamento asincrono
-                  try:
-                      pannello = None
-                      for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
-                          try:
-                              el = driver.find_element('css selector', selector)
-                              if el.is_displayed():
-                                  pannello = el
-                                  break
-                          except Exception:
-                              pass
+                      def scarica_foto():
+                          resp = requests.get(url_ottimizzato, timeout=10)
+                          return resp.content if resp.status_code == 200 else None
+                          
+                      loop = asyncio.get_running_loop()
+                      img_bytes = await loop.run_in_executor(None, scarica_foto)
                       
-                      if pannello:
-                          print('-> Scorrimento progressivo della scheda per sbloccare l\'affluenza...', flush=True)
-                          for pos in [300, 600, 900]:
-                              driver.execute_script(f"arguments[0].scrollTo(0, {pos});", pannello)
-                              time.sleep(1.5)
-                  except Exception:
-                      pass
+                      if not img_bytes: return None
 
-                  # Grafici Affluenza
-                  try:
-                      barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'affollato') or contains(@aria-label, 'affluenza') or contains(@aria-label, 'busy') or contains(@aria-label, 'popular')]")
-                      for b in barre:
-                          lbl = b.get_attribute('aria-label')
-                          if lbl and lbl not in info_locale['popular_times_affluenza']:
-                              info_locale['popular_times_affluenza'].append(lbl)
-                  except Exception: pass
-
-                  # Caratteristiche ed etichette (Informazioni)
-                  try:
-                      url_scheda_corrente = driver.current_url
-                      info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
-                      info_btn.click()
-                      time.sleep(2)
-                      
-                      elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                      for s in elementi_servizi:
-                          if s.text and s.text not in info_locale['caratteristiche_servizi']:
-                              info_locale['caratteristiche_servizi'].append(s.text)
-                              
-                      driver.get(url_scheda_corrente)
-                      time.sleep(2)
-                  except Exception as e:
-                      print(f'-> Avviso: scheda informazioni non accessibile per {nome_trimmed}: {e}', flush=True)
-                  
-                  print(f'-> Dati anagrafici estratti per: {info_locale["nome"]}', flush=True)
-                  risultati.append(info_locale)
-                  
-                  # Registriamo l'URL con hl=en per lo scraper di recensioni
-                  businesses_list.append({
-                      'url': driver.current_url,
-                      'custom_params': {'company': nome_trimmed}
-                  })
-                  
-          finally:
-              driver.quit()
-
-          with open('dati_completi_mappe.json', 'w', encoding='utf-8') as f:
-              json.dump(risultati, f, indent=4, ensure_ascii=False)
-
-          config_data = {
-              'headless': False,                       
-              'sort_by': 'newest',                     
-              'scrape_mode': 'full',                   
-              'max_reviews': 50,                       
-              'proxy': 'socks5://127.0.0.1:40001',     
-              'db_path': ':memory:',                   
-              'download_images': False,                
-              'use_mongodb': False,                    
-              'backup_to_json': True,                  
-              'json_path': 'google_reviews.json',      
-              'log_level': 'WARNING',                  
-              'businesses': businesses_list
-          }
-
-          with open('config.yaml', 'w') as f:
-              yaml.dump(config_data, f)
-
-          print('\nFase 1 conclusa: generati dati_completi_mappe.json e config.yaml.', flush=True)
-          EOF
-
-      - name: Esecuzione Fase 1 (Risolutore ed Estrazione Dati Maps)
-        run: |
-          cd google-reviews-scraper-pro
-          python resolve_maps.py
-
-      - name: Esecuzione Fase 2 (Scraper Recensioni Ufficiale)
-        run: |
-          cd google-reviews-scraper-pro
-          python start.py
-
-      - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live (Fase 3)
-        shell: bash
-        run: |
-          cat << 'EOF' > google-reviews-scraper-pro/generate_guide.py
-          import os
-          import json
-          import re
-          import asyncio
-          import requests
-          from google import genai
-          from google.genai import types
-
-          api_key = os.environ.get("GEMINI_API_KEY")
-          if not api_key:
-              print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
-              exit(1)
-
-          client = genai.Client(api_key=api_key)
-
-          try:
-              with open("google_reviews.json", "r", encoding="utf-8") as f:
-                  reviews = json.load(f)
-          except Exception as e:
-              print(f"Impossibile leggere google_reviews.json: {e}")
-              exit(1)
-
-          # Raggruppiamo gli URL delle immagini per locale
-          immagini_per_locale = {}
-          for r in reviews:
-              company = r.get("company")
-              images = r.get("user_images", [])
-              if company and images:
-                  if company not in immagini_per_locale:
-                      immagini_per_locale[company] = []
-                  immagini_per_locale[company].extend(images)
-
-          config_live = {
-              "response_modalities": ["AUDIO"],
-              "output_audio_transcription": {}
-          }
-
-          # Concorrenza parallela totale a 200 connessioni simultanee
-          semaphore = asyncio.Semaphore(200)
-
-          # Sotto-funzione asincrona per l'analisi di una singola immagine
-          async def analizza_singola_immagine_concorrente(idx, url, prompt, totale, safe_name):
-              async with semaphore:
-                  try:
-                      url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url)
-                      response = requests.get(url_ottimizzato, timeout=10)
-                      if response.status_code != 200:
-                          print(f"   [Foto {idx+1}/{totale}] Errore download (Status: {response.status_code})", flush=True)
-                          return None
-                      img_bytes = response.content
-                  except Exception as e:
-                      print(f"   [Foto {idx+1}/{totale}] Errore download: {e}", flush=True)
-                      return None
-
-                  print(f"   [Foto {idx+1}/{totale}] Download completato. Avvio sessione Live...", flush=True)
-                  accumulated_text = ""
-                  try:
+                      accumulated_text = ""
                       async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
-                          await session.send_realtime_input(
-                              video=types.Blob(
-                                  data=img_bytes,
-                                  mime_type="image/jpeg"
-                              )
-                          )
+                          await session.send_realtime_input(video=types.Blob(data=img_bytes, mime_type="image/jpeg"))
                           await asyncio.sleep(0.5)
-                          await session.send_realtime_input(
-                              text=prompt
-                          )
+                          await session.send_realtime_input(text=prompt)
                           async for response in session.receive():
                               if response.server_content and response.server_content.output_transcription:
                                   if response.server_content.output_transcription.text:
                                       accumulated_text += response.server_content.output_transcription.text
                               if response.server_content and response.server_content.turn_complete:
                                   break
-                      print(f"   [Foto {idx+1}/{totale}] Analisi completata.", flush=True)
-                      return {
-                          "url_immagine": url,
-                          "descrizione_dettagliata": accumulated_text.strip()
-                      }
+                      
+                      return {"url": url_immagine, "descrizione": accumulated_text.strip()}
                   except Exception as e:
-                      print(f"   [Foto {idx+1}/{totale}] Errore chiamata Live API: {e}", flush=True)
                       return None
 
-          # Sotto-funzione asincrona per eseguire la sintesi di secondo stadio
-          async def analizza_sintesi_globale_live(dati_json_str, prompt_fase2, locale):
-              print(f"\n-> Connessione WebSocket avviata per la Sintesi Globale di {locale}...", flush=True)
-              accumulated_text = ""
-              combined_payload = f"DATI INPUT COMPLETI DA ANALIZZARE:\n{dati_json_str}\n\nISTRUZIONI DI ANALISI:\n{prompt_fase2}"
+          async def fase3_ai_analisi(luogo, worker_dir):
+              print(f"[Fase 3] Avvio Analisi AI Live per '{luogo}'...")
+              api_key = os.environ.get("GEMINI_API_KEY")
+              if not api_key:
+                  return {"errore": "Manca API KEY"}
+                  
+              client = genai.Client(api_key=api_key)
+              config_live = {"response_modalities": ["AUDIO"], "output_audio_transcription": {}}
+              
+              reviews_file = os.path.join(worker_dir, "google_reviews.json")
+              if not os.path.exists(reviews_file):
+                  return {"errore": "Nessun file recensioni trovato"}
+                  
+              with open(reviews_file, "r", encoding="utf-8") as f:
+                  reviews = json.load(f)
+                  
+              # Estraiamo TUTTE le immagini (come richiesto)
+              tutte_le_immagini = []
+              for r in reviews:
+                  tutte_le_immagini.extend(r.get("user_images", []))
+              
+              urls_unici = list(set(tutte_le_immagini))
+              if not urls_unici:
+                  return {"avviso": "Nessuna foto trovata in questo posto."}
+                  
+              print(f"   Trovate {len(urls_unici)} foto uniche per '{luogo}'. Inizio elaborazione massiva...")
+              
+              prompt_singolo = "Descrivi questa immagine in modo dettagliato e oggettivo. No commenti poetici."
+              
+              tasks = [analizza_immagine_gemini(client, config_live, url, prompt_singolo) for url in urls_unici]
+              risultati_raw = await asyncio.gather(*tasks)
+              risultati_validi = [r for r in risultati_raw if r is not None]
+              
+              print(f"   Elaborate {len(risultati_validi)}/{len(urls_unici)} foto per '{luogo}'. Avvio Sintesi...")
+              
+              if non risultati_validi:
+                  return {"avviso": "Errore nel download o analisi delle foto."}
+                  
+              # Sintesi Finale (Fase 2 della AI)
+              prompt_sintesi = "Sintetizza queste descrizioni oggettive in una ricostruzione d'insieme, sensoriale e spaziale. Restituisci SOLO un JSON con chiavi: tipologia_luogo, identita_visiva_e_vibe, analisi_materica_e_design."
+              dati_str = json.dumps(risultati_validi, ensure_ascii=False)
+              payload = f"DATI:\n{dati_str}\n\nISTRUZIONI:\n{prompt_sintesi}"
+              
+              sintesi = ""
               try:
                   async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
-                      await session.send_realtime_input(
-                          text=combined_payload
-                      )
+                      await session.send_realtime_input(text=payload)
                       async for response in session.receive():
                           if response.server_content and response.server_content.output_transcription:
                               if response.server_content.output_transcription.text:
-                                  accumulated_text += response.server_content.output_transcription.text
+                                  sintesi += response.server_content.output_transcription.text
                           if response.server_content and response.server_content.turn_complete:
                               break
-                  return accumulated_text.strip()
               except Exception as e:
-                  print(f"Errore WebSocket in Fase 2 per {locale}: {e}", flush=True)
-                  return None
+                  print(f"Errore sintesi {luogo}: {e}")
+              
+              # Pulizia eventuale markdown JSON
+              match = re.search(r'```json\s*(.*?)\s*```', sintesi, re.DOTALL)
+              if match: sintesi = match.group(1)
+              
+              try:
+                  sintesi_json = json.loads(sintesi)
+              except:
+                  sintesi_json = {"testo_raw": sintesi}
+                  
+              return {
+                  "sintesi_globale": sintesi_json,
+                  "dettaglio_foto": risultati_validi
+              }
+
+          async def worker(worker_id, proxy_port, coda_luoghi, dizionario_risultati):
+              proxy_url = f"socks5://127.0.0.1:{proxy_port}"
+              worker_dir = f"worker_{worker_id}_env"
+              
+              # Prepariamo la cartella isolata per questo runner copiandola dalla base
+              if os.path.exists(worker_dir): shutil.rmtree(worker_dir)
+              shutil.copytree("base-scraper", worker_dir)
+              
+              while not coda_luoghi.empty():
+                  luogo = await coda_luoghi.get()
+                  print(f"► [Worker {worker_id} | Proxy {proxy_port}] Prende in carico: '{luogo}'")
+                  
+                  # -- FASE 1 --
+                  url_mappa = await fase1_risolvi_mappa(luogo, proxy_url)
+                  if not url_mappa:
+                      print(f"✖ [Worker {worker_id}] Fallita ricerca per '{luogo}'. Salto.")
+                      coda_luoghi.task_done()
+                      continue
+                      
+                  # -- FASE 2 --
+                  print(f"[Fase 2] Scraping recensioni avviato per '{luogo}' in ambiente isolato...")
+                  config_data = {
+                      'headless': True, 'sort_by': 'newest', 'scrape_mode': 'full',
+                      'max_reviews': 100, # Aumenta a piacimento (es. 500) per avere più foto
+                      'proxy': proxy_url, 'db_path': f'db_{worker_id}.sqlite',
+                      'download_images': False, 'use_mongodb': False,
+                      'backup_to_json': True, 'json_path': 'google_reviews.json',
+                      'businesses': [{'url': url_mappa, 'custom_params': {'company': luogo}}]
+                  }
+                  
+                  config_path = os.path.join(worker_dir, "config.yaml")
+                  with open(config_path, 'w') as f: yaml.dump(config_data, f)
+                  
+                  # Esegue lo scraper ufficiale nel contesto del worker isolato
+                  process = await asyncio.create_subprocess_exec(
+                      "python", "start.py",
+                      cwd=worker_dir,
+                      stdout=asyncio.subprocess.PIPE,
+                      stderr=asyncio.subprocess.PIPE
+                  )
+                  await process.communicate()
+                  
+                  # -- FASE 3 --
+                  risultati_ai = await fase3_ai_analisi(luogo, worker_dir)
+                  
+                  dizionario_risultati[luogo] = risultati_ai
+                  print(f"✔ [Worker {worker_id}] CICLO COMPLETATO per '{luogo}'!\n")
+                  
+                  coda_luoghi.task_done()
 
           async def main():
-              guida_turistica_visiva = {}
+              print("=== AVVIO ORCHESTRATORE PARALLELO 3x2 ===")
+              coda = asyncio.Queue()
+              for l in LUOGHI_DA_ANALIZZARE:
+                  coda.put_nowait(l)
+                  
+              risultati_finali = {}
               
-              for locale, urls in immagini_per_locale.items():
-                  urls_unici = list(set(urls))
-                  # Limitiamo la coda di analisi a un massimo di 20 immagini reali per ciascun locale
-                  urls_campione = urls_unici[:20]
+              tasks = []
+              for cfg in WORKER_CONFIGS:
+                  task = asyncio.create_task(worker(cfg["id"], cfg["proxy_port"], coda, risultati_finali))
+                  tasks.append(task)
                   
-                  if not urls_campione:
-                      print(f"Nessuna immagine disponibile per {locale}. Salto la fase visiva.")
-                      continue
-                      
-                  print(f"\n[Fase 1] Avvio analisi granulare delle {len(urls_campione)} immagini per: {locale}...", flush=True)
-                  
-                  # PROMPT FATTUALE E NEUTRO PER SINGOLA FOTO
-                  prompt_singolo = "Descrivi questa immagine in modo dettagliato, oggettivo ed approfondito. Evita qualsiasi riflessione poetica o commento personale."
-                  
-                  # Creiamo i task concorrenti per questo locale
-                  tasks = []
-                  for idx, url in enumerate(urls_campione):
-                      tasks.append(analizza_singola_immagine_concorrente(idx, url, prompt_singolo, len(urls_campione), locale))
-                      
-                  # Avviamo l'esecuzione concorrente parallela istantanea
-                  risultati_raw = await asyncio.gather(*tasks)
-                  risultati_granulari = [r for r in risultati_raw if r is not None]
-                  print(f"-> Ricevute {len(risultati_granulari)} descrizioni su {len(urls_campione)}.", flush=True)
-
-                  if not risultati_granulari:
-                      print(f"Nessuna immagine analizzata con successo per {locale}. Salto la sintesi.")
-                      continue
-
-                  # -----------------------------------------------------------------
-                  # FASE 2: SINTESI SENSORIALE-SPAZIALE AGNOSTICA (2° STADIO)
-                  # -----------------------------------------------------------------
-                  dati_json_str = json.dumps(risultati_granulari, indent=2, ensure_ascii=False)
-                  
-                  # PROMPT UMANO, SENSORIALE, BASATO SULLA REGOLA "SHOW, DON'T TELL"
-                  prompt_fase2 = """
-                  Sei uno scrittore di viaggi senior ed etnografo sul campo, appassionato di estetica, design dei materiali e architettura del paesaggio.
-                  Ti viene fornito un elenco strutturato di descrizioni empiriche ed oggettive di diverse immagini relative a un singolo luogo geografico.
-                  
-                  Il tuo compito è sintetizzare queste informazioni in una ricostruzione d'insieme viva, sensoriale e spaziale del posto ("nugget" di ricerca).
-                  
-                  Vogliamo replicare l'intelligenza di un osservatore umano colto che, dopo aver visto queste foto, racconta com'è fatto il posto, catturandone l'essenza e la 'vibe' in modo integrato, senza cadere né nel freddo burocratese da inventario tecnico, né nello 'slop' poetico artificiale o pubblicitario (evita assolutamente parole banali come 'magico', 'mozzafiato', 'maestoso', 'immergiti', 'teatro di', 'protagonista').
-                  
-                  Usa la regola aurea del reportage: "MOSTRA, NON RACCONTARE" (Show, don't tell) attraverso i dettagli visivi concreti ed i materiali.
-                  - Non dire che l'atmosfera è 'rilassante' o 'pacifica'; descrivi piuttosto l'interazione fisica tra l'acqua calda fumante che evapora dalle vasche di legno scuro e l'aria fredda di una vallata grigia o le montagne scoscese sullo sfondo.
-                  - Non elencare le strutture in modo asettico; spiega come le cabine e i box doccia dal design nordico minimalista (rivestiti in piastrelle marroni/rosso mattone e rubinetteria nera) creino un senso di pulizia essenziale, quasi un lusso spartano isolato in mezzo alla brughiera ed ai cavalli selvaggi.
-                  
-                  Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
-                  {
-                      "tipologia_luogo": "Categoria generale del luogo identificata dall'analisi incrociata dei dati",
-                      "identita_visiva_e_vibe": "Una ricostruzione densa, evocativa e fluida di 2 paragrafi in italiano che descrive lo spazio, l'atmosfera, i contrasti cromatici e termici (il fumo dell'acqua, i cieli lividi o sereni, la lingua del ghiacciaio visibile). Scrivi con un tono narrativo ed elevato, ma rigorosamente agganciato ai fatti visivi reali.",
-                      "analisi_materica_e_design": "Un'analisi di come i materiali costruttivi (il legno scuro trattato di nero, le pietre piatte dei camminamenti, i muretti rosso mattone) e l'architettura minimalista si inseriscono e contrastano con il paesaggio naturale circostante.",
-                      "fatti_rilevanti_accertati": [
-                          "Elenco di fatti fisici, strutturali, geografici o operativi concreti emersi come certi e ripetuti nelle descrizioni"
-                      ],
-                      "discrepanze_o_incoerenze_rilevate": [
-                          "Eventuali elementi visivi contrastanti, dati contraddittori o descrizioni che appaino palesemente incoerenti con il resto del set di dati (se presenti, altrimenti lista vuota)"
-                      ],
-                      "testi_e_dati_ocr_aggregati": [
-                          "Trascrizione o sintesi strutturata dei testi, cartelli, listini, regole o orari emersi dalla lettura ottica delle immagini (se presenti, altrimenti lista vuota)"
-                      ]
-                  }
-                  
-                  Rispondi in lingua italiana. Mantieni la narrazione al tempo presente.
-                  """
-                  
-                  risultato_sintesi_raw = await analizza_sintesi_globale_live(dati_json_str, prompt_fase2, locale)
-                  
-                  sintesi_globale = {}
-                  if risultato_sintesi_raw:
-                      try:
-                          match = re.search(r'```json\s*(.*?)\s*```', risultato_sintesi_raw, re.DOTALL)
-                          json_str = match.group(1) if match else risultato_sintesi_raw
-                          sintesi_globale = json.loads(json_str)
-                          print(f"-> Fase 2 completata con successo per {locale}!", flush=True)
-                      except Exception as e:
-                          print(f"Errore nel parsing JSON della Fase 2 per {locale}: {e}", flush=True)
-                          sintesi_globale = {
-                              "tipologia_luogo": "N/D",
-                              "identita_visiva_e_vibe": risultato_sintesi_raw,
-                              "analisi_materica_e_design": "N/D",
-                              "fatti_rilevanti_accertati": [],
-                              "discrepanze_o_incoerenze_rilevate": [],
-                              "testi_e_dati_ocr_aggregati": []
-                          }
-
-                  # 3. Strutturiamo l'output finale integrato per questo locale
-                  guida_turistica_visiva[locale] = {
-                      "ricostruzione_globale_analitica": sintesi_globale,
-                      "analisi_granulare_immagini": risultati_granulari
-                  }
-
-              # Salvataggio complessivo su disco
-              output_path = "guida_viaggio_visiva.json"
-              with open(output_path, "w", encoding="utf-8") as f:
-                  json.dump(guida_turistica_visiva, f, indent=4, ensure_ascii=False)
-              print(f"\nAnalisi globale completata e salvata con successo in {output_path}.", flush=True)
+              await coda.join()
+              
+              # Salva il Master JSON finale
+              with open("GUIDA_VISIVA_GLOBALE.json", "w", encoding="utf-8") as f:
+                  json.dump(risultati_finali, f, indent=4, ensure_ascii=False)
+              print("=== ELABORAZIONE DI TUTTI I LUOGHI COMPLETATA ===")
 
           if __name__ == "__main__":
-              asyncio.run(main_pipeline())
+              asyncio.run(main())
           EOF
 
-      - name: Esecuzione Pipeline Concorrente Integrata (Fase 1 + Fase 2 + Fase 3)
+      - name: Esecuzione Pipeline Concorrente Orchestrata
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cd google-reviews-scraper-pro
-          python pipeline.py
+          python orchestrator.py
 
-      - name: Organizzazione File per l'Esportazione
-        run: |
-          cp google-reviews-scraper-pro/dati_completi_mappe.json ./dati_completi_mappe.json
-          cp google-reviews-scraper-pro/google_reviews.json ./google_reviews.json
-          if [ -f "google-reviews-scraper-pro/guida_viaggio_visiva.json" ]; then
-            cp google-reviews-scraper-pro/guida_viaggio_visiva.json ./guida_viaggio_visiva.json
-          fi
-
-      - name: Esporta Risultati (Tre JSON)
+      - name: Esporta Risultati AI Finale
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Mappe_Recensioni_e_GuidaAI
-          path: |
-            dati_completi_mappe.json
-            google_reviews.json
-            guida_viaggio_visiva.json
+          name: Guida_Turistica_Visiva_Finale
+          path: GUIDA_VISIVA_GLOBALE.json
