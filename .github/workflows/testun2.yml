@@ -14,12 +14,10 @@ jobs:
           python-version: '3.10'
 
       - name: Installazione Dipendenze Essenziali
-        # Installiamo solo le librerie necessarie all'interazione asincrona con l'API Live
         run: |
           pip install google-genai requests
 
       - name: Scrivi File Dati Recensioni (google_reviews.json)
-        # Creiamo il file JSON locale contenente le recensioni con foto estratte in precedenza
         shell: bash
         run: |
           cat << 'EOF' > google_reviews.json
@@ -68,7 +66,6 @@ jobs:
           EOF
 
       - name: Scrivi Script Generatore Guida AI con Gemini 3.1 Live
-        # Creiamo lo script Python asincrono ottimizzato per estrarre la trascrizione testuale
         shell: bash
         run: |
           cat << 'EOF' > generate_guide.py
@@ -123,10 +120,11 @@ jobs:
                   print(f"Nessuna immagine scaricata per {locale}.", flush=True)
                   return None
 
-              # Configuriamo response_modalities su AUDIO per abilitare il modello live
-              config = {
-                  "response_modalities": ["AUDIO"]
-              }
+              # Configuriamo response_modalities su AUDIO ed abilitiamo output_audio_transcription
+              config = types.LiveConnectConfig(
+                  response_modalities=[types.Modality.AUDIO],
+                  output_audio_transcription=types.AudioTranscriptionConfig()
+              )
 
               prompt = """
               Sei un sistema di intelligenza artificiale multimodale specializzato in geomarketing, viaggi ed estrazione dati visivi.
@@ -150,7 +148,6 @@ jobs:
               accumulated_text = ""
 
               try:
-                  # Connessione asincrona alla Live API
                   async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
                       # Inviamo i byte delle immagini come video input stream
                       for img in immagini_bytes:
@@ -167,12 +164,11 @@ jobs:
                           text=prompt
                       )
 
-                      # Catturiamo lo stream ed estraiamo la trascrizione dell'audio generato (output_transcription)
+                      # Catturiamo lo stream ed estraiamo il testo dell'output_transcription piatto
                       async for response in session.receive():
                           if response.server_content and response.server_content.output_transcription:
-                              for part in response.server_content.output_transcription.parts:
-                                  if part.text:
-                                      accumulated_text += part.text
+                              if response.server_content.output_transcription.text:
+                                  accumulated_text += response.server_content.output_transcription.text
                           
                           # Usciamo al completamento del turno
                           if response.server_content and response.server_content.turn_complete:
@@ -222,7 +218,6 @@ jobs:
 
       - name: Esecuzione Fase 3 (Generazione Guida Turistica con Gemini AI Live)
         env:
-          # Assicurati che GEMINI_API_KEY sia configurata nei tuoi GitHub Secrets
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python generate_guide.py
