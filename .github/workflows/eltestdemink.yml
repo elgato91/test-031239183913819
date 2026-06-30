@@ -44,7 +44,6 @@ jobs:
           import random
           import base64
           import threading
-          import subprocess
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
           from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -83,39 +82,22 @@ jobs:
                   return url
 
           def human_sleep(mean: float, std_dev: float):
-              sleep_time = max(0.2, random.gauss(mean, std_dev))
+              sleep_time = max(0.1, random.gauss(mean, std_dev))
               time.sleep(sleep_time)
 
           class ProxyPool:
               def __init__(self, ports):
                   self.ports = ports
-                  self.active_ports = set(ports)
+                  self.last_used = {port: 0 for port in ports}
                   self.lock = threading.Lock()
 
               def get_proxy(self):
                   with self.lock:
-                      if not self.active_ports:
-                          return None
-                      return random.choice(list(self.active_ports))
-
-              def mark_sick_and_heal(self, port):
-                  with self.lock:
-                      if port in self.active_ports:
-                          self.active_ports.remove(port)
-                          log(f"     [PROXY POOL] Porta {port} in quarantena. Riavvio container...")
-                          threading.Thread(target=self._heal_proxy_background, args=(port,), daemon=True).start()
-
-              def _heal_proxy_background(self, port):
-                  warp_id = port - 40000
-                  container = f"warproxy-{warp_id}"
-                  try:
-                      subprocess.run(["docker", "restart", container], capture_output=True, text=True, timeout=15)
-                      time.sleep(6)
-                      with self.lock:
-                          self.active_ports.add(port)
-                          log(f"     [PROXY POOL] Porta {port} reintegrata con successo.")
-                  except Exception:
-                      log(f"     [PROXY POOL] Impossibile riavviare {container}.")
+                      # Seleziona la porta utilizzata meno di recente (Round-Robin perfetto)
+                      sorted_ports = sorted(self.ports, key=lambda p: self.last_used[p])
+                      best_port = sorted_ports[0]
+                      self.last_used[best_port] = time.time()
+                      return best_port
 
           PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006])
           STARTPAGE_LOCK = threading.Lock()
@@ -225,7 +207,7 @@ jobs:
               soup = BeautifulSoup(html, "html.parser")
               for a in soup.find_all("a", href=True):
                   href = a["href"]
-                  if href.startswith("http") and not any(d in href for d in ["startpage.com", "ixquick.com"]):
+                  if href.startswith("http") and palm := not any(d in href for d in ["startpage.com", "ixquick.com"]):
                       links.append(href)
               return links
 
@@ -257,7 +239,7 @@ jobs:
                       sc_token = sc_match.group(1) if sc_match else ""
                   except Exception: return None
 
-                  time.sleep(random.uniform(0.5, 1.2))
+                  time.sleep(random.uniform(0.3, 0.8))
 
                   payload = {
                       "query": query, "sc": sc_token, "cat": "web", "t": "device",
@@ -274,7 +256,8 @@ jobs:
                       response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
                       if response_post.status_code != 200 or "captcha" in response_post.text.lower():
                           return None
-                      return extract_startpage(response_post.text)
+                      links = extract_startpage(response_post.text)
+                      return links if links else None
                   except Exception: return None
 
           def fetch_duckduckgo(session: requests.Session, query: str, browser: str) -> list[str] | None:
@@ -289,13 +272,13 @@ jobs:
                   try:
                       response = session.get(url, headers=headers, timeout=8.0)
                       if response.status_code == 202:
-                          wait = random.uniform(2.0, 4.0) * inner_attempt
-                          log(f"     [DDG] Status 202. Backoff {wait:.1f}s, retry...")
+                          wait = random.uniform(1.5, 3.0) * inner_attempt
                           time.sleep(wait)
                           continue
                       if response.status_code != 200 or "captcha" in response.text.lower():
                           return None
-                      return extract_duckduckgo(response.text)
+                      links = extract_duckduckgo(response.text)
+                      return links if links else None
                   except Exception: return None
               return None
 
@@ -304,8 +287,10 @@ jobs:
               url = f"https://www.google.com/search?q={quote(query)}&gbv=1"
               try:
                   response = session.get(url, headers=headers, timeout=8.0)
-                  if response.status_code != 200 or "captcha" in response.text.lower(): return None
-                  return extract_google(response.text)
+                  if response.status_code != 200 or "captcha" in response.text.lower() or "unusual traffic" in response.text.lower(): 
+                      return None
+                  links = extract_google(response.text)
+                  return links if links else None
               except Exception: return None
 
           def fetch_bing(session: requests.Session, query: str, browser: str) -> list[str] | None:
@@ -313,8 +298,10 @@ jobs:
               url = f"https://www.bing.com/search?q={quote(query)}"
               try:
                   response = session.get(url, headers=headers, timeout=8.0)
-                  if response.status_code != 200 or "captcha" in response.text.lower() or "cloudflare" in response.text.lower(): return None
-                  return extract_bing(response.text)
+                  if response.status_code != 200 or "captcha" in response.text.lower() or "cloudflare" in response.text.lower(): 
+                      return None
+                  links = extract_bing(response.text)
+                  return links if links else None
               except Exception: return None
 
           def fetch_yahoo(session: requests.Session, query: str, browser: str) -> list[str] | None:
@@ -323,15 +310,18 @@ jobs:
               try:
                   response = session.get(url, headers=headers, timeout=8.0)
                   if response.status_code != 200: return None
-                  return extract_yahoo(response.text)
+                  links = extract_yahoo(response.text)
+                  return links if links else None
               except Exception: return None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int) -> list[str]:
+              # Scagliona leggermente gli avvii dei thread per evitare collisioni immediate
+              time.sleep(random.uniform(0.1, 1.2))
               max_retries = 3
               for attempt in range(1, max_retries + 1):
                   port = PROXY_POOL.get_proxy()
                   if not port:
-                      time.sleep(2.0)
+                      time.sleep(1.0)
                       continue
 
                   browser = random.choice(["chrome", "edge"])
@@ -357,8 +347,8 @@ jobs:
                       log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
                       return cleaned_links
                   else:
-                      PROXY_POOL.mark_sick_and_heal(port)
-                      human_sleep(1.5, 0.4)
+                      # Cooldown breve locale senza distruggere e ricreare il container
+                      time.sleep(random.uniform(1.0, 2.5))
 
               log(f"[{task_index:03d}/{total_tasks}] [FALLITO] {engine.upper()} per: '{query}'")
               return []
@@ -392,7 +382,7 @@ jobs:
               # Cartella di output temporanea
               Path("results_temp").mkdir(exist_ok=True)
 
-              # Esecuzione in parallelo (6 thread per sfruttare al meglio i 6 proxy WARP contemporaneamente)
+              # 6 thread paralleli su 6 proxy WARP indipendenti
               with ThreadPoolExecutor(max_workers=6) as executor:
                   futures = {
                       executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
@@ -403,7 +393,6 @@ jobs:
                       q, eng, t_idx = futures[future]
                       try:
                           links = future.result()
-                          # Salvataggio progressivo immediato su disco (meccanismo anti-crash)
                           temp_file = Path("results_temp") / f"task_{t_idx:03d}.json"
                           with open(temp_file, "w", encoding="utf-8") as f:
                               json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
@@ -424,6 +413,7 @@ jobs:
           import json
           import glob
           import re
+          import os
           from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
           def clean_url(url: str) -> str:
@@ -454,13 +444,14 @@ jobs:
                   return url
 
           all_urls = []
-          # Legge qualsiasi JSON parziale scritto nella cartella temporanea
+          # Legge i file parziali salvati progressivamente su disco
           for filepath in glob.glob("results_temp/task_*.json"):
               try:
                   with open(filepath, "r", encoding="utf-8") as f:
                       data = json.load(f)
                       links = data.get("links", [])
-                      all_urls.extend(links)
+                      if isinstance(links, list):
+                          all_urls.extend(links)
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
@@ -477,7 +468,7 @@ jobs:
 
           deduped_urls.sort()
 
-          # Salva la lista pulita di URL unici estratti
+          # Salva la lista pulita finale (sarà creata anche se vuota, evitando errori nello step successivo)
           with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
               for url in deduped_urls:
                   f.write(url + "\n")
@@ -487,6 +478,7 @@ jobs:
           python m2_merge.py
 
       - name: Upload Artifact Macchina 2
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2
