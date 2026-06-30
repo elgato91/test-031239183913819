@@ -54,7 +54,7 @@ jobs:
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
 
-      - name: Creazione Libreria Gestione Coda Condivisa
+      - name: Creazione Libreria Gestione Coda Condivisa (Self-Healing)
         run: |
           cat << 'EOF' > shared_queue_lib.py
           import fcntl
@@ -90,7 +90,7 @@ jobs:
                               return json.load(f)
                           except json.JSONDecodeError:
                               pass
-                  return {"targets": [], "active": {}, "history": {}}
+                  return {"targets": [], "active": {}, "history": {}, "retries": {}}
 
               def _write_and_unlock(self, data):
                   with open(self.state_file, "w") as f:
@@ -104,6 +104,28 @@ jobs:
                   if node_str in data["active"]:
                       del data["active"][node_str]
                   self._write_and_unlock(data)
+
+              def requeue_failed_target(self, url, node_id, max_retries=2):
+                  data = self._lock_and_load()
+                  node_str = str(node_id)
+                  
+                  if node_str in data["active"]:
+                      del data["active"][node_str]
+                      
+                  retries = data.setdefault("retries", {})
+                  current_retries = retries.get(url, 0)
+                  
+                  if current_retries < max_retries:
+                      retries[url] = current_retries + 1
+                      data["targets"].append(url)
+                      requeued = True
+                      print(f"[REQUEUE] Target {url} reinserito in coda. Tentativo {retries[url]}/{max_retries}", flush=True)
+                  else:
+                      requeued = False
+                      print(f"[REQUEUE] Target {url} ha raggiunto il limite massimo di tentativi ({max_retries}).", flush=True)
+                      
+                  self._write_and_unlock(data)
+                  return requeued
 
               def get_next_target(self, node_id):
                   node_str = str(node_id)
@@ -125,11 +147,9 @@ jobs:
                           eligible_targets.append((idx, url, domain))
 
                   if not eligible_targets:
-                      # Domini occupati. Rilascia il lock immediatamente senza bloccare il thread.
                       self._write_and_unlock(data)
                       return "WAIT", None
 
-                  # Ordina per lo storico dei consumi per favorire la rotazione dei nodi
                   def get_history_score(item):
                       _, _, domain = item
                       return history.get(domain, {}).get(node_str, 0)
@@ -185,7 +205,8 @@ jobs:
           state = {
               "targets": TARGETS,
               "active": {},
-              "history": {}
+              "history": {},
+              "retries": {}
           }
           with open("/tmp/shared_queue.json", "w") as f:
               json.dump(state, f, indent=2)
@@ -197,7 +218,7 @@ jobs:
           EOF
           python -u m2_step1_setup.py
 
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
+      - name: Creazione Script Python - STEP 1 (curl-cffi con latenza ridotta)
         run: |
           cat << 'EOF' > m2_step1.py
           import time
@@ -267,7 +288,7 @@ jobs:
               if status == "DONE":
                   break
               if status == "WAIT":
-                  time.sleep(1.0)
+                  time.sleep(0.5)
                   continue
 
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
@@ -291,7 +312,8 @@ jobs:
               finally:
                   queue.release_active(node_id)
               
-              time.sleep(random.uniform(1.0, 2.0))
+              # Delay ottimizzato per velocizzare l'avanzamento dello Step 1
+              time.sleep(random.uniform(0.5, 1.2))
 
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
@@ -308,7 +330,7 @@ jobs:
           for i in {1..6}; do
             python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
             PIDS+=($!)
-            sleep 1.5
+            sleep 0.1
           done
 
           wait "${PIDS[@]}"
@@ -339,7 +361,8 @@ jobs:
           state = {
               "targets": unique_failed,
               "active": {},
-              "history": {}
+              "history": {},
+              "retries": {}
           }
           with open("/tmp/shared_queue.json", "w") as f:
               json.dump(state, f, indent=2)
@@ -348,7 +371,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
+      - name: Creazione Script Python - STEP 2 (Fallback CloakBrowser - Scheda Pulita)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -378,8 +401,6 @@ jobs:
           async def main():
               queue = SharedQueue()
               
-              # Preveniamo l'acquisizione del target durante la fase di startup del browser.
-              # Inizializziamo il browser ed eseguiamo prima il warmup.
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
@@ -403,20 +424,16 @@ jobs:
                       viewport={"width": 1920, "height": 1080},
                       args=base_args
                   )
-                  page = await context.new_page()
                   
-                  # WARMUP Integrato
+                  # Warmup eseguito su una pagina temporanea per configurare il profilo
+                  temp_page = await context.new_page()
                   try:
-                      await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
+                      await temp_page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
                       await asyncio.sleep(2)
                   except Exception as e:
                       print(f"[NODO {node_id}] Errore warmup Yelp (ignorato): {e}")
-                      
-                  try:
-                      await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
-                      await asyncio.sleep(2)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Errore warmup Reddit (ignorato): {e}")
+                  finally:
+                      await temp_page.close()
 
               except Exception as e:
                   print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
@@ -424,21 +441,23 @@ jobs:
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
 
-              # Ciclo di prelievo asincrono non bloccante
               while True:
                   status, url = queue.get_next_target(node_id)
                   if status == "DONE":
                       break
                   if status == "WAIT":
-                      # Utilizziamo l'attesa asincrona nativa per mantenere attivo l'event loop di Playwright
                       await asyncio.sleep(1.0)
                       continue
 
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
+                  
+                  # Creiamo una scheda pulita per ogni target per eliminare carryover states o cache corrotte
+                  page = await context.new_page()
+                  
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE
+                      # Ripristino esatto delle impostazioni native del codice originale
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -470,12 +489,14 @@ jobs:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
                       # --- SILENZIO RADIO ---
+                      # Ripristinati esattamente i 12000ms di timeout networkidle del codice originale
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
+                      # Ripristinati i 6 secondi di attesa del codice originale
                       await asyncio.sleep(6) 
                       
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
+                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware - ripristinate pause originali)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
@@ -498,15 +519,23 @@ jobs:
                       if len(text) > 150 and not is_blocked:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                          queue.release_active(node_id)
                       else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
+                          print(f"[NODO {node_id}] -> Bloccato o incompleto. Tento il reinserimento in coda...", flush=True)
+                          requeued = queue.requeue_failed_target(url, node_id, max_retries=2)
+                          if not requeued:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO DEFINITIVAMENTE (WAF/Captcha)\n"
+                              print(f"[NODO {node_id}] -> Fallito definitivamente.", flush=True)
 
                   except Exception as e:
-                      print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+                      print(f"[NODO {node_id}] -> Errore esecuzione: {e}. Tento il reinserimento...", flush=True)
+                      requeued = queue.requeue_failed_target(url, node_id, max_retries=2)
+                      if not requeued:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE DEFINITIVO: {e}\n"
                   finally:
-                      queue.release_active(node_id)
+                      # Chiusura esplicita della scheda per rilasciare memoria e ripulire lo stato di navigazione
+                      try: await page.close()
+                      except: pass
                   
                   await asyncio.sleep(random.uniform(4.0, 7.0))
 
@@ -531,7 +560,7 @@ jobs:
           for i in {1..6}; do
             python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
             PIDS+=($!)
-            sleep 1.5
+            sleep 0.8
           done
 
           wait "${PIDS[@]}"
