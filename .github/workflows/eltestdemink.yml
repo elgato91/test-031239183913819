@@ -132,9 +132,8 @@ jobs:
                       break
 
                   print(f"[NODO {node_id}] Analizzando: {url}", flush=True)
-                  success = False
                   
-                  # Retry Loop Anti-Drop per WARP (risolve gli errori di rete casuali)
+                  # Retry Loop per eliminare drop di connessione del tunnel WARP
                   for attempt in range(2):
                       try:
                           resp = session.get(url, timeout=12)
@@ -147,18 +146,16 @@ jobs:
                                   text = soup.get_text(separator=' ', strip=True)
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                               print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                              success = True
                               break
                           else:
                               print(f"[NODO {node_id}] -> Bloccato ({err_msg}). Passo allo Step 2.", flush=True)
                               failed.append(url)
-                              success = True # Il blocco è validato, non serve retry
                               break
                       except Exception as e:
                           if attempt == 0:
-                              time.sleep(1) # Micro-pausa prima del retry
+                              time.sleep(1)
                           else:
-                              print(f"[NODO {node_id}] -> Errore di rete confermato. Passo allo Step 2.", flush=True)
+                              print(f"[NODO {node_id}] -> Errore di rete. Passo allo Step 2.", flush=True)
                               failed.append(url)
                   
                   time.sleep(random.uniform(1.0, 2.0))
@@ -169,7 +166,7 @@ jobs:
                   json.dump(failed, f)
 
           if __name__ == '__main__':
-              # SHUFFLE CRUCIALE: Evita che i 6 worker attacchino Google/motori di ricerca allo stesso secondo
+              # Rimescolamento della coda prima dell'avvio per distribuire i carichi sui WAF
               random.seed()
               random.shuffle(TARGETS)
               
@@ -238,6 +235,7 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
+              # Rigenerazione del seed nel processo figlio per garantire fingerprint unici
               base_args = [
                   "--no-sandbox", "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
@@ -345,13 +343,18 @@ jobs:
               if context:
                   try: await context.close()
                   except: pass
-              
-              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                  f.write(results)
+
+          async def main_async(node_id, port, q):
+              await async_worker_step2(node_id, port, q)
 
           def run_worker_step2(node_id, port, q):
+              # Soluzione alla trappola del fork: Re-seed esplicito con entropia di sistema
+              # prima di inizializzare CloakBrowser
+              import random, os
+              random.seed(os.urandom(8))
+              
               time.sleep(1.5 * (node_id - 1))
-              asyncio.run(async_worker_step2(node_id, port, q))
+              asyncio.run(main_async(node_id, port, q))
 
           if __name__ == "__main__":
               if not os.path.exists("failed_targets.json"): sys.exit(0)
@@ -359,7 +362,7 @@ jobs:
                   targets = json.load(f)
               if not targets: sys.exit(0)
 
-              # SHUFFLE CRUCIALE: Evita colli di bottiglia sui firewall di Google/Cloudflare
+              # Rimescola i target nel master per mitigare blocchi IP contemporanei su singola destinazione
               random.seed()
               random.shuffle(targets)
 
