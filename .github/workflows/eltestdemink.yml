@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (70 Risultati + Session Flushing)
+      - name: Creazione Scraper Multithread Ultra-Stealth con IP-Regeneration
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -43,9 +43,10 @@ jobs:
           import time
           import random
           import threading
+          import subprocess
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
-          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+          from concurrent.futures import ThreadPoolExecutor, as_completed
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
@@ -68,7 +69,6 @@ jobs:
                   return url
 
           def human_sleep(mean: float, std_dev: float):
-              # Delay Gaussiano applicato in maniera rigorosa
               sleep_time = max(0.1, random.gauss(mean, std_dev))
               time.sleep(sleep_time)
 
@@ -77,6 +77,8 @@ jobs:
                   self.ports = ports
                   self.last_used = {port: 0 for port in ports}
                   self.lock = threading.Lock()
+                  # Aggiungiamo lock specifici per evitare che due thread riavviino lo stesso docker simultaneamente
+                  self.restart_locks = {port: threading.Lock() for port in ports}
 
               def get_proxy(self):
                   with self.lock:
@@ -84,6 +86,23 @@ jobs:
                       best_port = sorted_ports[0]
                       self.last_used[best_port] = time.time()
                       return best_port
+
+              def regenerate_ip(self, port: int):
+                  """Riavvia il container Docker per forzare Cloudflare ad assegnare un nuovo IP"""
+                  if self.restart_locks[port].acquire(blocking=False):
+                      try:
+                          container_index = port - 40000
+                          container_name = f"warproxy-{container_index}"
+                          log(f"🔄 [WARP RESET] Blocco rilevato. Rigenero IP per {container_name} (Porta {port})...")
+                          subprocess.run(["docker", "restart", container_name], capture_output=True, check=False)
+                          # Attesa fissa per permettere a WireGuard di stabilire il nuovo handshake
+                          time.sleep(6)
+                          log(f"✅ [WARP RESET] {container_name} tornato online con IP fresco.")
+                      finally:
+                          self.restart_locks[port].release()
+                  else:
+                      # Se un altro thread sta già riavviando questo specifico container, attendiamo semplicemente
+                      time.sleep(6)
 
           PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 40009, 40010])
           STARTPAGE_LOCK = threading.Lock()
@@ -226,7 +245,7 @@ jobs:
                   }
                   
                   page_success = False
-                  for attempt in range(3):
+                  for attempt in range(2):
                       headers_post = get_minimal_headers(browser)
                       headers_post.update({
                           "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
@@ -244,11 +263,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
-                      sc_token = get_sc_token(session)
-                      if not sc_token: break
-                      payload["sc"] = sc_token
                       human_sleep(0.5, 0.2)
 
                   if not page_success:
@@ -270,7 +284,7 @@ jobs:
                       url = f"https://html.duckduckgo.com/html/?q={quote(query)}&s={offset}&dc={offset+1}&v=l"
                   
                   page_success = False
-                  for attempt in range(3):
+                  for attempt in range(2):
                       headers = get_minimal_headers(browser)
                       headers.update({
                           "referer": "https://duckduckgo.com/", "origin": "https://duckduckgo.com",
@@ -291,8 +305,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
                   if not page_success:
@@ -311,7 +323,7 @@ jobs:
                   url = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b={offset}"
                   
                   page_success = False
-                  for attempt in range(3):
+                  for attempt in range(2):
                       headers = get_minimal_headers(browser)
                       try:
                           response = session.get(url, headers=headers, timeout=10.0)
@@ -324,8 +336,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
                   if not page_success:
@@ -334,19 +344,15 @@ jobs:
                   
               return links if links else None
 
-          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
-              # Delay gaussiano iniziale tra le task generali per sfasare l'attacco
-              human_sleep(0.8, 0.3)
+          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int) -> list[str]:
+              human_sleep(0.5, 1.0)
               
-              # 3 TENTATIVI LOCALI SILENZIOSI, COME NEL TUO CODICE ORIGINALE!
-              # Nascondiamo i fallimenti temporanei e cambiamo subito socket IPv6.
-              max_local_retries = 3
+              # Loop della vita: tenterà fino a 20 IP totalmente diversi prima di dichiarare sconfitta.
+              # In pratica non abbandonerà mai, perché i WARP si rigenerano all'infinito.
+              max_retries = 20
               
-              for local_attempt in range(1, max_local_retries + 1):
+              for attempt in range(1, max_retries + 1):
                   port = PROXY_POOL.get_proxy()
-                  if not port:
-                      human_sleep(1.0, 0.2)
-                      continue
                   
                   browser = random.choice(["chrome", "edge"])
                   links = None
@@ -357,19 +363,18 @@ jobs:
                   except Exception:
                       pass
 
-                  if links is not None:
+                  if links is not None and len(links) > 0:
                       cleaned_links = [clean_url(l) for l in links if l]
                       log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
                       return cleaned_links
                   else:
-                      # Se fallisce al tentativo 1 o 2, applichiamo delay gaussiano e riproviamo in silenzio
-                      if local_attempt < max_local_retries:
-                          human_sleep(1.5, 0.5)
+                      # IL MAGICO RESTART: Se la query ha fallito, ordina a Docker di killare e ricreare il tunnel
+                      if attempt < max_retries:
+                          PROXY_POOL.regenerate_ip(port)
 
-              # SE ARRIVA QUI, la query è davvero ostica e ha fallito tutti e 3 i cambi di proxy
-              # Logghiamo l'errore e ritorniamo None per metterla in fondo alla coda globale
-              log(f"[{task_index:03d}/{total_tasks}] [DELAYED] {engine.upper()} per '{query}' fallisce localmente. Spostata in fondo alla coda (Giro Globale {global_attempt}).")
-              return None
+              # Teoricamente irragiungibile a meno che la query non dia permanentemente zero risultati
+              log(f"[{task_index:03d}/{total_tasks}] [FATALE] {engine.upper()} fallita dopo {max_retries} cambi IP totali per '{query}'")
+              return []
 
           def main():
               queries = [
@@ -436,42 +441,30 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
               
-              MAX_GLOBAL_RETRIES = 2
-
+              # Siamo tornati all'implementazione pulita originaria con as_completed, 
+              # delegando il problema della robustezza interamente a process_single_task e Docker
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
-                      executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks, 1): (task[0], task[1], idx + 1, 1)
+                      executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
                       for idx, task in enumerate(tasks)
                   }
 
-                  while futures:
-                      done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
-                      
-                      for future in done:
-                          q, eng, t_idx, global_attempt = futures.pop(future)
-                          
-                          try:
-                              links = future.result()
-                              
-                              if links is not None:
-                                  temp_file = Path("results_temp") / f"task_{t_idx:03d}_{eng}.json"
-                                  with open(temp_file, "w", encoding="utf-8") as f:
-                                      json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
-                              else:
-                                  if global_attempt < MAX_GLOBAL_RETRIES:
-                                      # Viene rimessa in coda silenziosamente, come avevi chiesto.
-                                      new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
-                                      futures[new_future] = (q, eng, t_idx, global_attempt + 1)
-                                  else:
-                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'")
-                          except Exception as e:
-                              log(f"Errore grave nel thread task {t_idx:03d}: {e}")
+                  for future in as_completed(futures):
+                      q, eng, t_idx = futures[future]
+                      try:
+                          links = future.result()
+                          if links:
+                              temp_file = Path("results_temp") / f"task_{t_idx:03d}.json"
+                              with open(temp_file, "w", encoding="utf-8") as f:
+                                  json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
+                      except Exception as e:
+                          log(f"Errore grave nel thread task {t_idx}: {e}")
 
           if __name__ == "__main__":
               main()
           EOF
 
-      - name: Esecuzione Scraping Veloce
+      - name: Esecuzione Scraping Veloce e Ostinato
         run: python -u stealth_scraper.py
 
       - name: Combinazione e Deduplica Risultati Finali
