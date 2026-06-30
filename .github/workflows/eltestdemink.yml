@@ -8,9 +8,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Dipendenze Scraper Veloce
+      - name: Installazione Font di Sistema
         run: |
-          pip install beautifulsoup4 requests "requests[socks]" curl-cffi
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
+
+      - name: Installazione Dipendenze Scraper Completo
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
+          playwright install-deps chromium
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
 
       - name: Setup Container WARP (IPv6)
         run: |
@@ -34,7 +57,73 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth
+      - name: Raccolta Cookie di Sessione (Google e Bing) con CloakBrowser
+        run: |
+          cat << 'EOF' > harvest_cookies.py
+          import asyncio
+          import os
+          import json
+          import random
+          from cloakbrowser import launch_persistent_context_async
+
+          async def harvest_for_port(port):
+              home_dir = os.path.expanduser("~")
+              profile_dir = os.path.join(home_dir, f".cloak_profiles/harvest_{port}")
+              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+              
+              base_args = [
+                  "--no-sandbox",
+                  "--disable-dev-shm-usage",
+                  f"--fingerprint={random.randint(100000, 999999)}",
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
+              ]
+              
+              print(f"[HARVEST] Avvio CloakBrowser su porta {port} per raccogliere i cookie di sessione...", flush=True)
+              try:
+                  context = await launch_persistent_context_async(
+                      profile_dir,
+                      headless=False,
+                      proxy=f"socks5://127.0.0.1:{port}",
+                      args=base_args
+                  )
+                  page = await context.new_page()
+                  
+                  # Visita Google per stabilire la sessione ed ottenere i cookie fiduciari
+                  try:
+                      await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
+                      await asyncio.sleep(2)
+                  except Exception as e:
+                      print(f"[HARVEST] Errore di connessione a Google su porta {port}: {e}", flush=True)
+                      
+                  # Visita Bing per stabilire la sessione ed ottenere i cookie fiduciari
+                  try:
+                      await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=20000)
+                      await asyncio.sleep(2)
+                  except Exception as e:
+                      print(f"[HARVEST] Errore di connessione a Bing su porta {port}: {e}", flush=True)
+                      
+                  cookies = await context.cookies()
+                  cookie_file = f"results_temp/cookies_{port}.json"
+                  with open(cookie_file, "w") as f:
+                      json.dump(cookies, f)
+                  print(f"[HARVEST] Sessione stabilita e salvata per porta {port} ({len(cookies)} cookie).", flush=True)
+                  
+                  await context.close()
+              except Exception as e:
+                  print(f"[HARVEST] Errore critico di raccolta su porta {port}: {e}", flush=True)
+
+          async def main():
+              os.makedirs("results_temp", exist_ok=True)
+              # Eseguiamo in sequenza per non sovraccaricare la CPU
+              for port in [40001, 40002, 40003, 40004, 40005, 40006]:
+                  await harvest_for_port(port)
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+          python harvest_cookies.py
+
+      - name: Creazione Scraper Multithread Ultra-Stealth con Session Hijacking
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -44,6 +133,7 @@ jobs:
           import random
           import base64
           import threading
+          import os
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
           from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -80,7 +170,6 @@ jobs:
 
               def get_proxy(self):
                   with self.lock:
-                      # Seleziona la porta utilizzata meno di recente (Round-Robin perfetto)
                       sorted_ports = sorted(self.ports, key=lambda p: self.last_used[p])
                       best_port = sorted_ports[0]
                       self.last_used[best_port] = time.time()
@@ -117,6 +206,23 @@ jobs:
                   "accept-encoding": "gzip, deflate, br",
               }
 
+          def load_cookies_for_port(session, port):
+              cookie_file = f"results_temp/cookies_{port}.json"
+              if os.path.exists(cookie_file):
+                  try:
+                      with open(cookie_file, "r") as f:
+                          cookies = json.load(f)
+                      for c in cookies:
+                          domain = c.get("domain", "")
+                          session.cookies.set(
+                              c["name"], 
+                              c["value"], 
+                              domain=domain, 
+                              path=c.get("path", "/")
+                          )
+                  except Exception as e:
+                      log(f"     [COOKIE JAR] Errore caricamento cookie per porta {port}: {e}")
+
           def extract_react_json(html_content: str) -> dict | None:
               start_str = '{"render":'
               idx = html_content.find(start_str)
@@ -132,10 +238,48 @@ jobs:
               try: return json.loads(html_content[idx : json_end + 1])
               except Exception: return None
 
+          def extract_google(html):
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              # Google non-JS: estrae dai contenitori dei risultati organici per eliminare la spazzatura
+              for div in soup.find_all("div", class_=["kCrYT", "egMi0"]):
+                  for a in div.find_all("a", href=True):
+                      href = a["href"]
+                      if href.startswith("/url?q="):
+                          match = re.search(r"/url\?q=([^&]+)", href)
+                          if match:
+                              url = unquote(match.group(1))
+                              if url.startswith("http") and "google." not in url:
+                                  links.append(url)
+              return links
+
+          def extract_bing(html):
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              # Bing: estrae solo dai blocchi classe b_algo (risultati reali, decodificando i redirect Base64)
+              for li in soup.find_all("li", class_="b_algo"):
+                  for a in li.find_all("a", href=True):
+                      href = a["href"]
+                      if "bing.com/ck/a" in href:
+                          try:
+                              parsed = urlparse(href)
+                              qs = parse_qs(parsed.query)
+                              if "u" in qs:
+                                  u_val = qs["u"][0]
+                                  if u_val.startswith("a1"):
+                                      u_val = u_val[2:]
+                                  u_val += "=" * ((4 - len(u_val) % 4) % 4)
+                                  decoded = base64.b64decode(u_val).decode("utf-8", errors="ignore")
+                                  if decoded.startswith("http") and "bing.com" not in decoded:
+                                      links.append(decoded)
+                          except: pass
+                      elif href.startswith("http") and not any(d in href for d in ["bing.com", "microsoft.com", "bingviz"]):
+                          links.append(href)
+              return links
+
           def extract_duckduckgo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
-              # DuckDuckGo non-JS: i link reali sono identificati dalla classe 'result__url'
               for a in soup.find_all("a", class_="result__url", href=True):
                   href = a["href"]
                   match = re.search(r"uddg=([^&]+)", href)
@@ -161,7 +305,6 @@ jobs:
               if links:
                   return links
 
-              # Fallback basato su tag HTML reali di Startpage (evita i link social del footer/captcha)
               soup = BeautifulSoup(html, "html.parser")
               for a in soup.find_all("a", class_=["w-gl__result-title", "w-gl__result-link"], href=True):
                   href = a["href"]
@@ -172,7 +315,6 @@ jobs:
           def extract_yahoo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
-              # Yahoo: estrae solo dai contenitori reali dei risultati per ignorare menù e tracciamenti
               for div in soup.find_all("div", class_=["compTitle", "algo", "y-algo"]):
                   for a in div.find_all("a", href=True):
                       href = a["href"]
@@ -185,18 +327,6 @@ jobs:
                       elif href.startswith("http") and not any(d in href for d in ["yahoo.com", "yimg.com", "yahoo.co.jp"]):
                           links.append(href)
               return links
-
-          def extract_links(html, url):
-              links = []
-              if "duckduckgo.com" in url: links = extract_duckduckgo(html)
-              elif "startpage.com" in url: links = extract_startpage(html)
-              elif "yahoo.com" in url: links = extract_yahoo(html)
-              
-              cleaned_links = []
-              for l in links:
-                  cleaned = clean_url(l)
-                  if cleaned: cleaned_links.append(cleaned)
-              return cleaned_links
 
           def fetch_startpage(session: requests.Session, query: str, browser: str) -> list[str] | None:
               headers = get_minimal_headers(browser)
@@ -254,11 +384,38 @@ jobs:
                   except Exception: return None
               return None
 
+          def fetch_google(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
+              load_cookies_for_port(session, port)
+              headers = get_minimal_headers(browser)
+              # Richiediamo fino a 50 risultati organici reali
+              url = f"https://www.google.com/search?q={quote(query)}&gbv=1&num=50"
+              try:
+                  response = session.get(url, headers=headers, timeout=10.0)
+                  if response.status_code != 200 or "captcha" in response.text.lower() or "unusual traffic" in response.text.lower(): 
+                      return None
+                  links = extract_google(response.text)
+                  return links if links else None
+              except Exception: return None
+
+          def fetch_bing(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
+              load_cookies_for_port(session, port)
+              headers = get_minimal_headers(browser)
+              # Richiediamo fino a 50 risultati organici reali
+              url = f"https://www.bing.com/search?q={quote(query)}&count=50"
+              try:
+                  response = session.get(url, headers=headers, timeout=10.0)
+                  if response.status_code != 200 or "captcha" in response.text.lower() or "cloudflare" in response.text.lower(): 
+                      return None
+                  links = extract_bing(response.text)
+                  return links if links else None
+              except Exception: return None
+
           def fetch_yahoo(session: requests.Session, query: str, browser: str) -> list[str] | None:
               headers = get_minimal_headers(browser)
-              url = f"https://search.yahoo.com/search?p={quote(query)}"
+              # Richiediamo fino a 50 risultati organici reali
+              url = f"https://search.yahoo.com/search?p={quote(query)}&n=50"
               try:
-                  response = session.get(url, headers=headers, timeout=8.0)
+                  response = session.get(url, headers=headers, timeout=10.0)
                   if response.status_code != 200: return None
                   links = extract_yahoo(response.text)
                   return links if links else None
@@ -283,7 +440,9 @@ jobs:
 
                   links = None
                   try:
-                      if engine == "duckduckgo": links = fetch_duckduckgo(session, query, browser)
+                      if engine == "google": links = fetch_google(session, query, browser)
+                      elif engine == "bing": links = fetch_bing(session, query, browser, port)
+                      elif engine == "duckduckgo": links = fetch_duckduckgo(session, query, browser)
                       elif engine == "startpage": links = fetch_startpage(session, query, browser)
                       elif engine == "yahoo": links = fetch_yahoo(session, query, browser)
                   except Exception:
@@ -300,7 +459,6 @@ jobs:
               return []
 
           def main():
-              # 50 Query su Orvieto calibrate per l'articolo (25 in Italiano e 25 in Inglese)
               queries = [
                   "cosa vedere a Orvieto in un giorno",
                   "Orvieto sotterranea biglietti e orari",
@@ -354,14 +512,14 @@ jobs:
                   "places to visit near Orvieto Umbria"
               ]
 
-              engines = ["duckduckgo", "startpage", "yahoo"]
+              engines = ["google", "bing", "duckduckgo", "startpage", "yahoo"]
               tasks = []
               for q_idx, q in enumerate(queries):
                   for eng in engines:
                       tasks.append((q, eng))
 
               total_tasks = len(tasks)
-              log(f"Inizio scraping di {total_tasks} combinazioni (50 query x 3 motori di ricerca)")
+              log(f"Inizio scraping di {total_tasks} combinazioni (50 query x 5 motori di ricerca)")
 
               Path("results_temp").mkdir(exist_ok=True)
 
@@ -385,7 +543,7 @@ jobs:
               main()
           EOF
 
-      - name: Esecuzione Scraping Veloce
+      - name: Esecuzione Scraping Veloce con Cookie Hijacking
         run: python -u stealth_scraper.py
 
       - name: Combinazione e Deduplica Risultati Finali
@@ -397,7 +555,7 @@ jobs:
           import re
           import os
 
-          engines = ["duckduckgo", "startpage", "yahoo"]
+          engines = ["google", "bing", "duckduckgo", "startpage", "yahoo"]
           links_by_engine = {eng: [] for eng in engines}
 
           # Legge i file parziali salvati progressivamente su disco
@@ -409,7 +567,6 @@ jobs:
                       links = data.get("links", [])
                       if eng in links_by_engine and isinstance(links, list):
                           for l in links:
-                              # Pulizia di base degli spazi ma NESSUNA deduplicazione
                               cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", l).strip()
                               if cleaned.startswith("http") and len(cleaned) >= 12:
                                   links_by_engine[eng].append(cleaned)
