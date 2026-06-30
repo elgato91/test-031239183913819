@@ -29,12 +29,12 @@ jobs:
           done
           
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          sleep 12
 
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (Chromium 149 + 20 Nodi)
+      - name: Creazione Scraper Multithread Ultra-Stealth (Chrome 120 + 20 Nodi)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -91,6 +91,7 @@ jobs:
 
               def get_proxy(self):
                   with self.lock:
+                      # Peschiamo solo dai proxy che NON sono in fase di riavvio background
                       available = [p for p in self.ports if p not in self.restarting]
                       if not available:
                           return None
@@ -101,14 +102,15 @@ jobs:
                       if port in self.restarting:
                           return
                       self.usage_count[port] += 1
-                      if self.usage_count[port] >= 5:
+                      # Alzato a 35 per evitare lo spam di riavvii e massimizzare le performance
+                      if self.usage_count[port] >= 35:
                           self.usage_count[port] = 0
                           self.restarting.add(port)
                           threading.Thread(target=self._restart_proxy, args=(port,)).start()
 
               def _restart_proxy(self, port):
                   container_index = port - 40000
-                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 5 richieste. Cambio IP IPv6 in background...")
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 35 richieste. Cambio IP IPv6 in background...")
                   subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
                   time.sleep(6) # Attesa stabilizzazione tunnel WARP
                   with self.lock:
@@ -124,16 +126,16 @@ jobs:
               "en-US,en;q=0.9,it;q=0.8"
           ]
 
-          # Profili aggiornati all'attuale versione Chrome 149 con alias "chrome" dinamico di curl-cffi
+          # Ripristinato il profilo d'oro Chrome 120 (estremamente stealth e compatibile)
           BROWSER_PROFILES = {
               "chrome": {
-                  "impersonate": "chrome",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+                  "impersonate": "chrome120",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               },
               "edge": {
-                  "impersonate": "chrome",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0",
+                  "impersonate": "chrome120",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
                   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               }
           }
