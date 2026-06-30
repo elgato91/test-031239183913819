@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (70 Risultati + Session Flushing)
+      - name: Creazione Scraper Multithread Ultra-Stealth (70 Risultati + Session Flushing Corretto)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -42,6 +42,7 @@ jobs:
           import sys
           import time
           import random
+          import base64
           import threading
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
@@ -144,7 +145,8 @@ jobs:
           def extract_duckduckgo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
-              for a in soup.find_all("a", class_="result__url", href=True):
+              # DuckDuckGo non-JS: i link reali sono identificati con classe 'result__a'
+              for a in soup.find_all("a", class_="result__a", href=True):
                   href = a["href"]
                   match = re.search(r"uddg=([^&]+)", href)
                   if match:
@@ -179,6 +181,7 @@ jobs:
           def extract_yahoo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
+              # Yahoo: estrae solo dai contenitori reali dei risultati per ignorare menù e tracciamenti
               for div in soup.find_all("div", class_=["compTitle", "algo", "y-algo"]):
                   for a in div.find_all("a", href=True):
                       href = a["href"]
@@ -204,76 +207,74 @@ jobs:
                   if cleaned: cleaned_links.append(cleaned)
               return cleaned_links
 
-          def fetch_startpage(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
-              port = initial_port
-              session = create_session(port, browser)
+          def fetch_startpage(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
+              headers = get_minimal_headers(browser)
+              with STARTPAGE_LOCK:
+                  try:
+                      response_get = session.get("https://www.startpage.com/", headers=headers, timeout=8.0)
+                      if response_get.status_code != 200: return None
+                      sc_match = (
+                          re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
+                          or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
+                      )
+                      sc_token = sc_match.group(1) if sc_match else ""
+                  except Exception: return None
 
-              def get_sc_token(sess):
-                  with STARTPAGE_LOCK:
-                      try:
-                          response_get = sess.get("https://www.startpage.com/", timeout=8.0)
-                          if response_get.status_code == 200:
-                              sc_match = (
-                                  re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
-                                  or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
-                              )
-                              return sc_match.group(1) if sc_match else ""
-                      except Exception: pass
-                  return ""
+                  time.sleep(random.uniform(0.3, 0.8))
 
-              sc_token = get_sc_token(session)
-              if not sc_token:
-                  port = PROXY_POOL.get_proxy()
-                  session = create_session(port, browser)
-                  sc_token = get_sc_token(session)
-                  if not sc_token: return None
+                  links = []
+                  headers_post = headers.copy()
+                  headers_post.update({
+                      "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
+                      "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
+                      "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
+                  })
 
-              links = []
-              # Esegue esattamente 7 pagine sequenziali per estrarre 70 risultati organici reali
-              for page in range(7):
-                  offset = page * 10
-                  payload = {
-                      "query": query, "sc": sc_token, "cat": "web", "t": "device",
-                      "language": "italiano", "lui": "english", "qadf": "moderate",
-                      "startat": str(offset)
-                  }
-                  
-                  page_success = False
-                  # Retry con Session Flushing inline a livello di pagina
-                  for attempt in range(3):
-                      headers_post = get_minimal_headers(browser)
-                      headers_post.update({
-                          "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
-                          "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
-                          "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
-                      })
-                      try:
-                          response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
-                          if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
-                              page_links = extract_startpage(response_post.text)
-                              if page_links:
-                                  links.extend(page_links)
-                              page_success = True
-                              break
-                      except Exception:
-                          pass
+                  # Ciclo di paginazione sequenziale veloce per estrarre 7 pagine (10 risultati x 7 = 70 link totali)
+                  for page in range(7):
+                      offset = page * 10
+                      payload = {
+                          "query": query, "sc": sc_token, "cat": "web", "t": "device",
+                          "language": "italiano", "lui": "english", "qadf": "moderate",
+                          "startat": str(offset)
+                      }
                       
-                      # Rotazione proxy profonda: ricrea la sessione da zero flussando il connection pool
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
-                      sc_token = get_sc_token(session)
-                      if not sc_token: break
-                      payload["sc"] = sc_token
-                      time.sleep(random.uniform(0.3, 0.8))
+                      page_success = False
+                      # Session Flushing a livello di pagina per superare i blocchi in tempo reale
+                      for attempt in range(3):
+                          headers_post_page = get_minimal_headers(browser)
+                          headers_post_page.update({
+                              "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
+                              "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
+                              "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
+                          })
+                          try:
+                              response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post_page, data=payload, timeout=8.0)
+                              if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
+                                  page_links = extract_startpage(response_post.text)
+                                  if page_links:
+                                      links.extend(page_links)
+                                  page_success = True
+                                  break
+                          except Exception:
+                              pass
+                          
+                          # Rotazione e Flushing sessione istantanea
+                          port = PROXY_POOL.get_proxy()
+                          session = create_session(port, browser)
+                          sc_token = get_sc_token(session)
+                          if not sc_token: break
+                          payload["sc"] = sc_token
+                          time.sleep(random.uniform(0.3, 0.8))
 
-                  if not page_success:
-                      break
-                  
-                  time.sleep(random.uniform(0.1, 0.3))
+                      if not page_success:
+                          break
+                      
+                      time.sleep(random.uniform(0.1, 0.3))
 
-              return links if links else None
+                  return links if links else None
 
-          def fetch_duckduckgo(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
+          def fetch_duckduckgo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
               links = []
@@ -320,7 +321,7 @@ jobs:
 
               return links if links else None
 
-          def fetch_yahoo(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
+          def fetch_yahoo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
               links = []
@@ -367,6 +368,7 @@ jobs:
                   browser = random.choice(["chrome", "edge"])
                   links = None
                   try:
+                      # Passiamo la porta iniziale al modulo; i moduli gestiranno la rotazione interna in autonomia
                       if engine == "duckduckgo": links = fetch_duckduckgo(None, query, browser, port)
                       elif engine == "startpage": links = fetch_startpage(None, query, browser, port)
                       elif engine == "yahoo": links = fetch_yahoo(None, query, browser, port)
@@ -448,7 +450,7 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
 
-              # 10 thread paralleli su 10 proxy fissi (1 thread per porta fissa)
+              # Concorrenza tarata a 10 thread su 10 proxy (1 thread per proxy fisso)
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
                       executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
@@ -480,39 +482,67 @@ jobs:
           import glob
           import re
           import os
+          from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-          engines = ["duckduckgo", "startpage", "yahoo"]
-          links_by_engine = {eng: [] for eng in engines}
+          def clean_url(url: str) -> str:
+              try:
+                  parsed = urlparse(url)
+                  query_params = parse_qsl(parsed.query)
+                  filtered_params = [
+                      (k, v) for k, v in query_params
+                      if k.lower() not in ["srsltid", "gclid", "fbclid"]
+                      and not k.lower().startswith("utm_")
+                  ]
+                  new_query = urlencode(filtered_params)
+                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+              except Exception:
+                  return url
 
-          # Legge i file parziali salvati progressivamente su disco
+          def normalize_url(url: str) -> str:
+              try:
+                  url_lower = url.lower().rstrip("/")
+                  parsed = urlparse(url_lower)
+                  netloc = parsed.netloc
+                  if netloc.startswith("www."):
+                      netloc = netloc[4:]
+                  scheme = "https"
+                  params = sorted(parse_qsl(parsed.query))
+                  return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
+              except Exception:
+                  return url
+
+          all_raw_links = []
           for filepath in glob.glob("results_temp/task_*.json"):
               try:
                   with open(filepath, "r", encoding="utf-8") as f:
                       data = json.load(f)
-                      eng = data.get("engine")
                       links = data.get("links", [])
-                      if eng in links_by_engine and isinstance(links, list):
-                          for l in links:
-                              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", l).strip()
-                              if cleaned.startswith("http") and len(cleaned) >= 12:
-                                  links_by_engine[eng].append(cleaned)
+                      if isinstance(links, list):
+                          all_raw_links.extend(links)
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
-          # Salva la lista finale suddivisa per motore
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              for eng in engines:
-                  group_links = links_by_engine[eng]
-                  # Ordina solo per rendere l'output leggibile, ma preserva i duplicati
-                  group_links.sort()
-                  f.write("=========================================\n")
-                  f.write(f"{eng.upper()} ({len(group_links)} link estratti)\n")
-                  f.write("=========================================\n")
-                  for url in group_links:
-                      f.write(url + "\n")
-                  f.write("\n")
+          # Deduplicazione Globale su base Normalizzata
+          seen_normalized = set()
+          deduped_urls = []
+          for u in all_raw_links:
+              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", u).strip()
+              if not cleaned.startswith("http") or len(cleaned) < 12:
+                  continue
+              norm = normalize_url(cleaned)
+              if norm not in seen_normalized:
+                  seen_normalized.add(norm)
+                  deduped_urls.append(clean_url(cleaned))
 
-          print("File finale raggruppato generato con successo.")
+          deduped_urls.sort()
+
+          # Salva la lista lineare pulita pronta per la fase di deep research
+          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+              for url in deduped_urls:
+                  f.write(url + "\n")
+
+          print(f"Sintesi completata: {len(all_raw_links)} link estratti complessivamente.")
+          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali scritti in output_macchina2_cdp.txt.")
 
       - name: Upload Artifact Macchina 2
         if: always()
