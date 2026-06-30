@@ -68,6 +68,7 @@ jobs:
                   return url
 
           def human_sleep(mean: float, std_dev: float):
+              # Delay Gaussiano applicato in maniera rigorosa
               sleep_time = max(0.1, random.gauss(mean, std_dev))
               time.sleep(sleep_time)
 
@@ -248,11 +249,11 @@ jobs:
                       sc_token = get_sc_token(session)
                       if not sc_token: break
                       payload["sc"] = sc_token
-                      time.sleep(random.uniform(0.3, 0.8))
+                      human_sleep(0.5, 0.2)
 
                   if not page_success:
                       break 
-                  time.sleep(random.uniform(0.1, 0.3))
+                  human_sleep(0.2, 0.1)
 
               return links if links else None
 
@@ -279,7 +280,7 @@ jobs:
                       try:
                           response = session.get(url, headers=headers, timeout=8.0)
                           if response.status_code == 202:
-                              time.sleep(1.5)
+                              human_sleep(1.5, 0.3)
                               response = session.get(url, headers=headers, timeout=8.0)
                           if response.status_code == 200 and "captcha" not in response.text.lower():
                               page_links = extract_duckduckgo(response.text)
@@ -292,11 +293,11 @@ jobs:
                       
                       port = PROXY_POOL.get_proxy()
                       session = create_session(port, browser)
-                      time.sleep(random.uniform(0.3, 0.8))
+                      human_sleep(0.5, 0.2)
                   
                   if not page_success:
                       break
-                  time.sleep(random.uniform(0.1, 0.4))
+                  human_sleep(0.3, 0.1)
 
               return links if links else None
 
@@ -325,45 +326,50 @@ jobs:
                       
                       port = PROXY_POOL.get_proxy()
                       session = create_session(port, browser)
-                      time.sleep(random.uniform(0.3, 0.8))
+                      human_sleep(0.5, 0.2)
                   
                   if not page_success:
                       break
-                  time.sleep(random.uniform(0.2, 0.5))
+                  human_sleep(0.3, 0.1)
                   
               return links if links else None
 
-          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, attempt: int) -> list[str] | None:
-              # Sleep iniziale per evitare allineamenti perfetti delle richieste
-              time.sleep(random.uniform(0.5, 1.5))
+          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
+              # Delay gaussiano iniziale tra le task generali per sfasare l'attacco
+              human_sleep(0.8, 0.3)
               
-              port = PROXY_POOL.get_proxy()
-              if not port:
-                  time.sleep(1.0)
-                  return None
-
-              browser = random.choice(["chrome", "edge"])
-              links = None
-              try:
-                  if engine == "duckduckgo": links = fetch_duckduckgo(None, query, browser, port)
-                  elif engine == "startpage": links = fetch_startpage(None, query, browser, port)
-                  elif engine == "yahoo": links = fetch_yahoo(None, query, browser, port)
-              except Exception:
-                  pass
-
-              if links is not None:
-                  cleaned_links = [clean_url(l) for l in links if l]
-                  log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} (Tentativo {attempt}) -> {len(cleaned_links)} risultati per: '{query}'")
-                  return cleaned_links
-              else:
-                  log(f"[{task_index:03d}/{total_tasks}] [FALLITO] {engine.upper()} (Tentativo {attempt}) per: '{query}' su container {port}")
+              # 3 TENTATIVI LOCALI SILENZIOSI, COME NEL TUO CODICE ORIGINALE!
+              # Nascondiamo i fallimenti temporanei e cambiamo subito socket IPv6.
+              max_local_retries = 3
+              
+              for local_attempt in range(1, max_local_retries + 1):
+                  port = PROXY_POOL.get_proxy()
+                  if not port:
+                      human_sleep(1.0, 0.2)
+                      continue
                   
-                  # -------------------------------------------------------------
-                  # BACKOFF PUNITIVO: rallenta il thread per ingannare il rate limit
-                  # -------------------------------------------------------------
-                  time.sleep(random.uniform(3.0, 6.0))
-                  
-                  return None
+                  browser = random.choice(["chrome", "edge"])
+                  links = None
+                  try:
+                      if engine == "duckduckgo": links = fetch_duckduckgo(None, query, browser, port)
+                      elif engine == "startpage": links = fetch_startpage(None, query, browser, port)
+                      elif engine == "yahoo": links = fetch_yahoo(None, query, browser, port)
+                  except Exception:
+                      pass
+
+                  if links is not None:
+                      cleaned_links = [clean_url(l) for l in links if l]
+                      log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
+                      return cleaned_links
+                  else:
+                      # Se fallisce al tentativo 1 o 2, applichiamo delay gaussiano e riproviamo in silenzio
+                      if local_attempt < max_local_retries:
+                          human_sleep(1.5, 0.5)
+
+              # SE ARRIVA QUI, la query è davvero ostica e ha fallito tutti e 3 i cambi di proxy
+              # Logghiamo l'errore e ritorniamo None per metterla in fondo alla coda globale
+              log(f"[{task_index:03d}/{total_tasks}] [DELAYED] {engine.upper()} per '{query}' fallisce localmente. Spostata in fondo alla coda (Giro Globale {global_attempt}).")
+              return None
 
           def main():
               queries = [
@@ -430,8 +436,7 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
               
-              # Aumentato a 4 per tollerare meglio gli sbattimenti nella coda dinamica
-              MAX_RETRIES = 4
+              MAX_GLOBAL_RETRIES = 2
 
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
@@ -443,7 +448,7 @@ jobs:
                       done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
                       
                       for future in done:
-                          q, eng, t_idx, attempt = futures.pop(future)
+                          q, eng, t_idx, global_attempt = futures.pop(future)
                           
                           try:
                               links = future.result()
@@ -453,12 +458,12 @@ jobs:
                                   with open(temp_file, "w", encoding="utf-8") as f:
                                       json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
                               else:
-                                  if attempt < MAX_RETRIES:
-                                      log(f"🔄 Rimetto in coda task {t_idx:03d} ({eng.upper()}) - Prossimo tentativo: {attempt + 1}")
-                                      new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, attempt + 1)
-                                      futures[new_future] = (q, eng, t_idx, attempt + 1)
+                                  if global_attempt < MAX_GLOBAL_RETRIES:
+                                      # Viene rimessa in coda silenziosamente, come avevi chiesto.
+                                      new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
+                                      futures[new_future] = (q, eng, t_idx, global_attempt + 1)
                                   else:
-                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}' dopo {MAX_RETRIES} tentativi.")
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'")
                           except Exception as e:
                               log(f"Errore grave nel thread task {t_idx:03d}: {e}")
 
