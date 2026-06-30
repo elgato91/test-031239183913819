@@ -50,7 +50,167 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Scrittura Orchestratore Parallelo Isolato
+      - name: Scrittura Modulo Risolutore Maps Isolato (Fase 1)
+        shell: bash
+        run: |
+          cat << 'EOF' > base-scraper/resolve_one.py
+          import sys
+          import json
+          import urllib.parse
+          import time
+          import re
+          import os
+          import argparse
+          from seleniumbase import Driver
+
+          def pulisci_testo(testo):
+              if not testo: return 'N/D'
+              return re.sub(r'^[\s\W_]+', '', testo).strip()
+
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument('--luogo', required=True)
+              parser.add_argument('--proxy', required=True)
+              parser.add_argument('--worker_id', required=True)
+              args = parser.parse_args()
+
+              luogo = args.luogo
+              proxy = args.proxy
+              worker_id = args.worker_id
+
+              user_dir = os.path.abspath(f"./chrome_profile_w{worker_id}")
+              os.makedirs(user_dir, exist_ok=True)
+
+              driver = Driver(
+                  uc=True, 
+                  headless=True, 
+                  proxy=proxy, 
+                  user_data_dir=user_dir,
+                  chromium_arg="--disable-session-crashed-bubble,--disable-infobars"
+              )
+
+              info_locale = {
+                  'ricerca_originale': luogo, 'url_mappa': 'N/D', 'nome': 'N/D',
+                  'categoria': 'N/D', 'indirizzo': 'N/D', 'telefono': 'N/D',
+                  'sito_web': 'N/D', 'media_stelle': 'N/D', 'totale_recensioni': 'N/D',
+                  'coordinate': {}, 'popular_times_affluenza': [], 'caratteristiche_servizi': []
+              }
+
+              try:
+                  search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(luogo)}?hl=en'
+                  driver.get(search_url)
+                  time.sleep(5)
+
+                  try:
+                      consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
+                      consent_btn.click()
+                      time.sleep(2)
+                  except: pass
+
+                  current_url = driver.current_url
+                  if '/maps/place/' not in current_url:
+                      try:
+                          results = driver.find_elements('css selector', 'a[href*="/maps/place/"]')
+                          target_url = None
+                          
+                          # SCANSIONE INTELLIGENTE RISULTATI PER DISAMBIGUAZIONE (es. evita di confondere terme con attrazioni generiche)
+                          for res in results:
+                              label = (res.get_attribute('aria-label') or "").lower()
+                              text = (res.text or "").lower()
+                              combined = label + " " + text
+                              if "bath" in combined or "sulfur" in combined or "sulphur" in combined or "hot" in combined:
+                                  target_url = res.get_attribute('href')
+                                  break
+                          
+                          if not target_url and results:
+                              target_url = results[0].get_attribute('href')
+                          
+                          if target_url:
+                              if 'hl=' not in target_url:
+                                  target_url += '&hl=en'
+                              else:
+                                  target_url = re.sub(r'hl=[a-z]{2}', 'hl=en', target_url)
+                              driver.get(target_url)
+                              time.sleep(5)
+                      except Exception:
+                          pass
+
+                  info_locale['url_mappa'] = driver.current_url
+
+                  try: info_locale['nome'] = driver.find_element('css selector', 'h1').text
+                  except: pass
+                  try: info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
+                  except: pass
+                  try: info_locale['indirizzo'] = pulisci_testo(driver.find_element('css selector', '[data-item-id="address"]').text)
+                  except: pass
+                  try: info_locale['telefono'] = pulisci_testo(driver.find_element('css selector', '[data-item-id^="phone:tel"]').text)
+                  except: pass
+                  try: info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
+                  except: pass
+
+                  match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
+                  if match_at:
+                      info_locale['coordinate'] = {'latitudine': float(match_at.group(1)), 'longitudine': float(match_at.group(2))}
+                  else:
+                      match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
+                      if match_data:
+                          info_locale['coordinate'] = {'latitudine': float(match_data.group(1)), 'longitudine': float(match_data.group(2))}
+
+                  try:
+                      rating_text = driver.find_element('css selector', 'div.F7nice').text.replace('\xa0', ' ')
+                      if '(' in rating_text:
+                          parts = rating_text.split('(')
+                          info_locale['media_stelle'] = float(parts[0].strip())
+                          info_locale['totale_recensioni'] = int(re.sub(r'[^\d]', '', parts[1].split(')')[0]))
+                  except: pass
+
+                  try:
+                      pannello = None
+                      for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
+                          try:
+                              el = driver.find_element('css selector', selector)
+                              if el.is_displayed():
+                                  pannello = el
+                                  break
+                          except: pass
+                      if pannello:
+                          for pos in [300, 600, 900]:
+                              driver.execute_script(f"arguments[0].scrollTo(0, {pos});", pannello)
+                              time.sleep(1.5)
+                  except: pass
+
+                  try:
+                      barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
+                      for b in barre:
+                          lbl = b.get_attribute('aria-label')
+                          if lbl and lbl not in info_locale['popular_times_affluenza']:
+                              info_locale['popular_times_affluenza'].append(lbl)
+                  except: pass
+
+                  try:
+                      url_scheda_corrente = driver.current_url
+                      info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
+                      info_btn.click()
+                      time.sleep(2)
+                      
+                      elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
+                      for s in elementi_servizi:
+                          if s.text and s.text not in info_locale['caratteristiche_servizi']:
+                              info_locale['caratteristiche_servizi'].append(s.text)
+                  except: pass
+
+              finally:
+                  driver.quit()
+
+              out_file = f"resolved_w{worker_id}.json"
+              with open(out_file, 'w', encoding='utf-8') as f:
+                  json.dump(info_locale, f, indent=4, ensure_ascii=False)
+
+          if __name__ == '__main__':
+              main()
+          EOF
+
+      - name: Scrittura Orchestratore Parallelo (Fase 1, 2, 3)
         shell: bash
         run: |
           cat << 'EOF' > orchestrator.py
@@ -63,12 +223,10 @@ jobs:
           import urllib.parse
           import glob
           import time
-          from seleniumbase import Driver
           from google import genai
           from google.genai import types
           import requests
 
-          # --- CONFIGURAZIONE LUOGHI ---
           LUOGHI_DA_ANALIZZARE = [
               'Colosseo, Roma',
               'Da Enzo al 29, Roma',
@@ -77,7 +235,6 @@ jobs:
               'Pantheon, Roma'
           ]
 
-          # --- SETUP DEI 6 RUNNER E DEI PROXY ---
           WORKER_CONFIGS = [
               {"id": 1, "proxy_port": 40001}, {"id": 2, "proxy_port": 40001},
               {"id": 3, "proxy_port": 40002}, {"id": 4, "proxy_port": 40002},
@@ -85,10 +242,6 @@ jobs:
           ]
 
           api_semaphore = asyncio.Semaphore(15)
-
-          def pulisci_testo(testo):
-              if not testo: return 'N/D'
-              return re.sub(r'^[\s\W_]+', '', testo).strip()
 
           def genera_nome_file(luogo):
               return re.sub(r'[^a-zA-Z0-9]', '_', luogo.lower())
@@ -101,148 +254,30 @@ jobs:
                       err_str = str(e).lower()
                       if "quota" in err_str or "429" in err_str or "1011" in err_str:
                           wait_time = (2 ** attempt) * 15
-                          print(f"   [Gemini] Limite quota. Attesa {wait_time}s...", flush=True)
+                          print(f"   [Gemini API] Quota limite raggiunta. Attesa {wait_time}s...", flush=True)
                           await asyncio.sleep(wait_time)
                       else:
                           raise e
               return None
 
-          # FASE 1: COMPLETAMENTE PARALLELA E ISOLATA
-          async def fase1_risolvi_mappa_worker(luogo, proxy_url, worker_id):
-              def run_selenium():
-                  # Isolamento totale dei profili Chrome per prevenire la sovrapposizione delle sessioni
-                  user_dir = os.path.abspath(f"./chrome_profile_w{worker_id}")
-                  if os.path.exists(user_dir):
-                      shutil.rmtree(user_dir, ignore_errors=True)
-                  os.makedirs(user_dir, exist_ok=True)
-                  
-                  driver = Driver(
-                      uc=True, 
-                      headless=True, 
-                      proxy=proxy_url, 
-                      user_data_dir=user_dir,
-                      chromium_arg="--disable-session-crashed-bubble,--disable-infobars"
-                  )
-                  
-                  info_locale = {
-                      'ricerca_originale': luogo, 'url_mappa': 'N/D', 'nome': 'N/D',
-                      'categoria': 'N/D', 'indirizzo': 'N/D', 'telefono': 'N/D',
-                      'sito_web': 'N/D', 'media_stelle': 'N/D', 'totale_recensioni': 'N/D',
-                      'coordinate': {}, 'popular_times_affluenza': [], 'caratteristiche_servizi': []
-                  }
-                  
-                  try:
-                      search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(luogo)}?hl=en'
-                      driver.get(search_url)
-                      driver.sleep(5)
-                      
-                      try:
-                          consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
-                          consent_btn.click()
-                          driver.sleep(2)
-                      except: pass
-                      
-                      current_url = driver.current_url
-                      if '/maps/place/' not in current_url:
-                          try:
-                              first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
-                              resolved_url = first_result_el.get_attribute('href')
-                              
-                              if 'hl=' not in resolved_url:
-                                  resolved_url += '&hl=en'
-                              else:
-                                  resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=en', resolved_url)
-                                  
-                              driver.get(resolved_url)
-                              driver.sleep(5)
-                          except Exception:
-                              pass
-                              
-                      info_locale['url_mappa'] = driver.current_url
-                      
-                      try: info_locale['nome'] = driver.find_element('css selector', 'h1').text
-                      except: pass
-                      try: info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
-                      except: pass
-                      try: info_locale['indirizzo'] = pulisci_testo(driver.find_element('css selector', '[data-item-id="address"]').text)
-                      except: pass
-                      try: info_locale['telefono'] = pulisci_testo(driver.find_element('css selector', '[data-item-id^="phone:tel"]').text)
-                      except: pass
-                      try: info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
-                      except: pass
-
-                      match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
-                      if match_at:
-                          info_locale['coordinate'] = {'latitudine': float(match_at.group(1)), 'longitudine': float(match_at.group(2))}
-                      else:
-                          match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
-                          if match_data:
-                              info_locale['coordinate'] = {'latitudine': float(match_data.group(1)), 'longitudine': float(match_data.group(2))}
-                          
-                      try:
-                          rating_text = driver.find_element('css selector', 'div.F7nice').text.replace('\xa0', ' ')
-                          if '(' in rating_text:
-                              parts = rating_text.split('(')
-                              info_locale['media_stelle'] = float(parts[0].strip())
-                              info_locale['totale_recensioni'] = int(re.sub(r'[^\d]', '', parts[1].split(')')[0]))
-                      except: pass
-
-                      try:
-                          pannello = None
-                          for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
-                              try:
-                                  el = driver.find_element('css selector', selector)
-                                  if el.is_displayed():
-                                      pannello = el
-                                      break
-                              except: pass
-                          if pannello:
-                              for pos in [300, 600, 900]:
-                                  driver.execute_script(f"arguments[0].scrollTo(0, {pos});", pannello)
-                                  driver.sleep(1.5)
-                      except: pass
-
-                      try:
-                          barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
-                          for b in barre:
-                              lbl = b.get_attribute('aria-label')
-                              if lbl and lbl not in info_locale['popular_times_affluenza']:
-                                  info_locale['popular_times_affluenza'].append(lbl)
-                      except: pass
-
-                      try:
-                          url_scheda_corrente = driver.current_url
-                          info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
-                          info_btn.click()
-                          driver.sleep(2)
-                          
-                          elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                          for s in elementi_servizi:
-                              if s.text and s.text not in info_locale['caratteristiche_servizi']:
-                                  info_locale['caratteristiche_servizi'].append(s.text)
-                      except: pass
-
-                  finally:
-                      driver.quit()
-                  return info_locale
-
-              loop = asyncio.get_running_loop()
-              return await loop.run_in_executor(None, run_selenium)
-
-          async def analizza_immagine_gemini(client, config_live, url_immagine):
+          async def analizza_immagine_gemini(client, config_live, url_immagine, worker_id, index, total):
               async with api_semaphore:
                   try:
                       url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url_immagine)
+                      print(f"   [W-{worker_id}] Invio foto {index}/{total} per analisi: {url_ottimizzato}", flush=True)
+                      
                       loop = asyncio.get_running_loop()
                       img_bytes = await loop.run_in_executor(None, lambda: requests.get(url_ottimizzato, timeout=10).content if requests.get(url_ottimizzato).status_code == 200 else None)
-                      if not img_bytes: return None
+                      if not img_bytes: 
+                          print(f"   [W-{worker_id}] ✖ Errore download immagine: {url_immagine}", flush=True)
+                          return None
 
                       prompt = """Role: Professional Travel Data Extractor.
                       Task: Analyze the provided Google Maps photograph to extract objective facts.
                       Constraint: Exclude any description of transient elements such as tourists, clothing, pedestrians, or animals, unless they serve to quantify extreme crowd density. Focus solely on permanent structural and functional data.
                       
                       Extraction Instructions:
-                      1. Textual Information: Transcribe any legible printed or written text (e.g., operating hours, prices, menus, warning signs, historical plaques).
+                      1. Textual Information: Transcribe any legible printed or written text (e.g., operating hours, prices, menus, phone numbers, warning signs, historical plaques).
                       2. Architectural & Physical Features: Describe permanent physical characteristics of the space (e.g., stone masonry, unpaved gravel trail, wooden tables, concrete pool, fresco state of preservation).
                       3. Services & Commodities: Describe the presentation of food (e.g., serving dishes, portion sizes) or room amenities (e.g., furniture type, layout) if visible.
                       
@@ -259,11 +294,13 @@ jobs:
                                       accumulated_text += response.server_content.output_transcription.text
                               if response.server_content and response.server_content.turn_complete: break
                       
+                      print(f"   [W-{worker_id}] ✔ Foto {index}/{total} completata.", flush=True)
                       return {"url": url_immagine, "appunti_grezzi": accumulated_text.strip()}
-                  except: return None
+                  except Exception as e:
+                      print(f"   [W-{worker_id}] ✖ Errore analisi foto {index}/{total}: {str(e)}", flush=True)
+                      return None
 
-          async def fase3_ai_analisi(luogo, reviews_file):
-              api_key = os.environ.get("GEMINI_API_KEY")
+          async def fase3_ai_analisi(luogo, reviews_file, api_key, worker_id):
               if not api_key: return {"errore": "Manca API KEY"}
               client = genai.Client(api_key=api_key)
               config_live = {"response_modalities": ["AUDIO"], "output_audio_transcription": {}}
@@ -273,16 +310,23 @@ jobs:
                   reviews = json.load(f)
                   
               urls_unici = list(set([img for r in reviews for img in r.get("user_images", [])]))
-              if not urls_unici: return {"avviso": "Nessuna foto trovata in questa location."}
+              total_photos = len(urls_unici)
+              if not urls_unici: 
+                  print(f"   [W-{worker_id}] Nessuna foto trovata da analizzare per '{luogo}'", flush=True)
+                  return {"avviso": "Nessuna foto trovata in questa location."}
               
               urls_campione = urls_unici[:35]
-              tasks = [call_with_retry(analizza_immagine_gemini, client, config_live, url) for url in urls_campione]
+              sample_size = len(urls_campione)
+              
+              print(f"   [W-{worker_id}] [AI-Live] Avvio analisi per '{luogo}'. {total_photos} foto totali, campione selezionato: {sample_size}", flush=True)
+              
+              tasks = [call_with_retry(analizza_immagine_gemini, client, config_live, url, worker_id, idx+1, sample_size) for idx, url in enumerate(urls_campione)]
               risultati_raw = await asyncio.gather(*tasks)
               risultati_validi = [r for r in risultati_raw if r is not None]
               
+              print(f"   [W-{worker_id}] [AI-Live] Completate {len(risultati_validi)}/{sample_size} immagini.", flush=True)
               if not risultati_validi: return {"avviso": "Nessuna immagine analizzata."}
               
-              # PROMPT SINTESI REDAZIONALE DESK RESEARCH (LIVE API)
               prompt_fase2 = """
               Role: Lead Editor and Travel Document Compiler.
               Task: Synthesize the provided raw visual extraction notes from multiple photographs into a structured travel report. Filter out any transient, non-permanent, or subjective details.
@@ -300,7 +344,8 @@ jobs:
               payload = json.dumps(risultati_validi, ensure_ascii=False)
               combined = f"RAW VISUAL EXTRACTS:\n{payload}\n\nINSTRUCTIONS:\n{prompt_fase2}"
               
-              # UTILIZZO ESCLUSIVO DELLA API LIVE PER LA SINTESI FINALE
+              print(f"   [W-{worker_id}] [AI-Live] Generazione report di sintesi finale per '{luogo}'...", flush=True)
+              
               async def esegui_sintesi():
                   sintesi = ""
                   async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
@@ -319,7 +364,8 @@ jobs:
                   sintesi_json = json.loads(match.group(1)) if match else json.loads(sintesi_globale)
               except Exception: 
                   sintesi_json = {"appunti_grezzi": sintesi_globale}
-                  
+              
+              print(f"   [W-{worker_id}] [AI-Live] Report di sintesi per '{luogo}' completato con successo.", flush=True)
               return {
                   "report_desk_research": sintesi_json,
                   "analisi_singole_foto": risultati_validi
@@ -335,20 +381,35 @@ jobs:
               
               while not coda_luoghi.empty():
                   luogo = await coda_luoghi.get()
-                  print(f"► [Worker {worker_id}] Ricerca e scraping parallelo per: '{luogo}'", flush=True)
+                  print(f"► [Worker {worker_id} | Proxy {proxy_port}] Prende in carico: '{luogo}'", flush=True)
                   safe_luogo = genera_nome_file(luogo)
                   
-                  # FASE 1: Risoluzione Maps (parallela, isolata tramite worker_id)
-                  info_locale = await fase1_risolvi_mappa_worker(luogo, proxy_url, worker_id)
+                  # FASE 1 PARALLELA ED ERMETICAMENTE ISOLATA VIA SUBPROCESS
+                  print(f"   [Worker {worker_id}] Avvio processo isolato resolve_one.py per '{luogo}'...", flush=True)
+                  process = await asyncio.create_subprocess_exec(
+                      "python", "resolve_one.py",
+                      "--luogo", luogo,
+                      "--proxy", proxy_url,
+                      "--worker_id", str(worker_id),
+                      cwd=worker_dir,
+                      stdout=asyncio.subprocess.PIPE,
+                      stderr=asyncio.subprocess.PIPE
+                  )
+                  stdout, stderr = await process.communicate()
                   
-                  if not info_locale or info_locale.get('url_mappa') == 'N/D':
-                      print(f"✖ [Worker {worker_id}] Fallita ricerca per '{luogo}'. Salto.", flush=True)
+                  resolved_file = os.path.join(worker_dir, f"resolved_w{worker_id}.json")
+                  if os.path.exists(resolved_file):
+                      with open(resolved_file, "r", encoding="utf-8") as rf:
+                          info_locale = json.load(rf)
+                  else:
+                      print(f"✖ [Worker {worker_id}] Errore critico nel processo resolve_one.py per '{luogo}': {stderr.decode()}", flush=True)
                       coda_luoghi.task_done()
                       continue
                       
                   diz_mappe[luogo] = info_locale
+                  print(f"   [Worker {worker_id}] URL Mappa risolto correttamente: {info_locale['url_mappa']}", flush=True)
                   
-                  # FASE 2: Scraping Isolato
+                  # FASE 2: SCRAPING ISOLATO
                   reviews_filename = f"reviews_{safe_luogo}.json"
                   db_filename = f"db_{safe_luogo}.sqlite"
                   
@@ -362,22 +423,37 @@ jobs:
                   
                   with open(os.path.join(worker_dir, "config.yaml"), 'w') as f: yaml.dump(config_data, f)
                   
-                  process = await asyncio.create_subprocess_exec(
+                  print(f"   [Worker {worker_id}] Avvio scraping recensioni start.py...", flush=True)
+                  process_scrape = await asyncio.create_subprocess_exec(
                       "python", "start.py", cwd=worker_dir,
                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                   )
-                  await process.communicate()
+                  await process_scrape.communicate()
+                  print(f"   [Worker {worker_id}] Scraping recensioni completato.", flush=True)
                   
-                  # FASE 3: AI
+                  # FASE 3: AI DISTRIBUITA SULLE 3 API KEY
+                  # Associa la chiave API in base al proxy/container per distribuire i limiti di quota
+                  api_key = None
+                  if proxy_port == 40001:
+                      api_key = os.environ.get("GEMINI_API_KEY_1")
+                  elif proxy_port == 40002:
+                      api_key = os.environ.get("GEMINI_API_KEY_2")
+                  elif proxy_port == 40003:
+                      api_key = os.environ.get("GEMINI_API_KEY_3")
+                      
+                  # Fallback sulla chiave generica se la chiave del container non è configurata
+                  if not api_key:
+                      api_key = os.environ.get("GEMINI_API_KEY")
+                  
                   file_recensioni_path = os.path.join(worker_dir, reviews_filename)
-                  risultati_ai = await fase3_ai_analisi(luogo, file_recensioni_path)
+                  risultati_ai = await fase3_ai_analisi(luogo, file_recensioni_path, api_key, worker_id)
                   diz_ai[luogo] = risultati_ai
                   
-                  print(f"✔ [Worker {worker_id}] Completato: '{luogo}'", flush=True)
+                  print(f"✔ [Worker {worker_id}] CICLO COMPLETO COMPLETATO PER: '{luogo}'\n", flush=True)
                   coda_luoghi.task_done()
 
           async def main():
-              print("=== AVVIO ORCHESTRATORE PARALLELO ===", flush=True)
+              print("=== AVVIO ORCHESTRATORE PARALLELO MASSIVO ===", flush=True)
               coda = asyncio.Queue()
               for l in LUOGHI_DA_ANALIZZARE: coda.put_nowait(l)
                   
@@ -407,7 +483,7 @@ jobs:
               with open("google_reviews.json", "w", encoding="utf-8") as f:
                   json.dump(all_reviews, f, indent=4, ensure_ascii=False)
                   
-              print("\n=== PIPELINE COMPLETATA ===", flush=True)
+              print("\n=== PIPELINE COMPLETATA CON SUCCESSO ===", flush=True)
 
           if __name__ == "__main__":
               asyncio.run(main())
@@ -416,6 +492,9 @@ jobs:
       - name: Esecuzione Pipeline Concorrente Orchestrata
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
         run: |
           python orchestrator.py
 
