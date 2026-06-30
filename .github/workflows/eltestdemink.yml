@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (20 Nodi + Deep Clean)
+      - name: Creazione Scraper Multithread Ultra-Stealth (Chromium 149 + 20 Nodi)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -56,7 +56,7 @@ jobs:
 
           def clean_url(url: str) -> str:
               try:
-                  # Miglioramento 3: Rimuove le ancore (#fragment) che creano duplicati inutili
+                  # Rimuove le ancore (#fragment) prima di tutto per evitare duplicati
                   url_no_anchor = url.split('#')[0]
                   parsed = urlparse(url_no_anchor)
                   query_params = parse_qsl(parsed.query)
@@ -114,7 +114,7 @@ jobs:
                   with self.lock:
                       self.restarting.remove(port)
 
-          # Miglioramento 4: Esteso il pool a 20 porte mappate sui 20 container
+          # Pool esteso a 20 porte mappate sui 20 container Docker
           PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
           STARTPAGE_LOCK = threading.Lock()
 
@@ -124,17 +124,17 @@ jobs:
               "en-US,en;q=0.9,it;q=0.8"
           ]
 
-          # Appunto D risolto: Profili browser aggiornati con le firme rolling stabili di curl-cffi e UA del 2026/2025
+          # Profili aggiornati all'attuale versione Chrome 149 con alias "chrome" dinamico di curl-cffi
           BROWSER_PROFILES = {
               "chrome": {
                   "impersonate": "chrome",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
                   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               },
-              "safari": {
-                  "impersonate": "safari",
-                  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/apple-webkitvng,image/webp,*/*;q=0.8",
+              "edge": {
+                  "impersonate": "chrome",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               }
           }
 
@@ -223,7 +223,6 @@ jobs:
                           links.append(href)
               return links
 
-          # Appunto B risolto: Rimosso parametro inutilizzato "session" da tutte le firme di fetch
           def fetch_startpage(query: str, browser: str, initial_port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
@@ -368,7 +367,7 @@ jobs:
               return links if links else None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
-              # Sfasamento iniziale (Delay randomico prima delle task per evitare picchi di concorrenza)
+              # Staggered Start (ritardo randomico iniziale per sfasare l'avvio delle task)
               if global_attempt == 1:
                   time.sleep(random.uniform(0.1, 7.0))
               
@@ -380,11 +379,9 @@ jobs:
                       time.sleep(1.0)
                       continue
                       
-                  # Appunto D risolto: seleziona tra profili aggiornati chrome e safari
-                  browser = random.choice(["chrome", "safari"])
+                  browser = random.choice(["chrome", "edge"])
                   links = None
                   try:
-                      # Appunto B risolto: Chiamata pulita senza passare None
                       if engine == "duckduckgo": links = fetch_duckduckgo(query, browser, port)
                       elif engine == "startpage": links = fetch_startpage(query, browser, port)
                       elif engine == "yahoo": links = fetch_yahoo(query, browser, port)
@@ -496,7 +493,7 @@ jobs:
                                       new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
                                       futures[new_future] = (q, eng, t_idx, global_attempt + 1)
                                   else:
-                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'. Limite estremo raggiunto.")
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'.")
                           except Exception as e:
                               log(f"Errore grave nel thread task {t_idx:03d}: {e}")
 
@@ -517,7 +514,7 @@ jobs:
           import os
           from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-          # Appunto Bug Case-Sensitivity risolto: Normalizzazione precisa (Preserva il case di path e query)
+          # Normalizzazione precisa (Preserva intatto il case-sensitive di path e query-string)
           def normalize_url(url: str) -> str:
               try:
                   parsed = urlparse(url)
@@ -526,7 +523,7 @@ jobs:
                   if netloc.startswith("www."):
                       netloc = netloc[4:]
                   
-                  # Preserva intatti path (con rimozione trailing slash) e query originale ordinata
+                  # Rimuove l'eventuale trailing slash dal path e ordina i parametri di query
                   path = parsed.path.rstrip("/")
                   params = sorted(parse_qsl(parsed.query))
                   query = urlencode(params)
@@ -545,7 +542,7 @@ jobs:
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
-          # Deduplicazione Globale su base Normalizzata (Appunto C risolto: Non serve ri-eseguire clean_url!)
+          # Deduplicazione Globale su base Normalizzata (clean_url non serve ri-eseguirla!)
           seen_normalized = set()
           deduped_urls = []
           for u in all_raw_links:
@@ -555,7 +552,7 @@ jobs:
               norm = normalize_url(cleaned)
               if norm not in seen_normalized:
                   seen_normalized.add(norm)
-                  deduped_urls.append(cleaned) # Il link salvato è già pulito aggressivamente dallo script python
+                  deduped_urls.append(cleaned) # Il link nel JSON è già pulito aggressivamente
 
           deduped_urls.sort()
 
