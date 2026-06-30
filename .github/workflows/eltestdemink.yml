@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth
+      - name: Creazione Scraper Multithread Ultra-Stealth (50 Risultati)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -133,6 +133,7 @@ jobs:
           def extract_duckduckgo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
+              # DuckDuckGo non-JS: i link reali sono identificati dalla classe 'result__url'
               for a in soup.find_all("a", class_="result__url", href=True):
                   href = a["href"]
                   match = re.search(r"uddg=([^&]+)", href)
@@ -168,6 +169,7 @@ jobs:
           def extract_yahoo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
+              # Yahoo: estrae dai contenitori reali dei risultati per ignorare menù e tracciamenti
               for div in soup.find_all("div", class_=["compTitle", "algo", "y-algo"]):
                   for a in div.find_all("a", href=True):
                       href = a["href"]
@@ -196,10 +198,7 @@ jobs:
 
                   time.sleep(random.uniform(0.3, 0.8))
 
-                  payload = {
-                      "query": query, "sc": sc_token, "cat": "web", "t": "device",
-                      "language": "italiano", "lui": "english", "qadf": "moderate"
-                  }
+                  links = []
                   headers_post = headers.copy()
                   headers_post.update({
                       "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
@@ -207,13 +206,29 @@ jobs:
                       "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
                   })
 
-                  try:
-                      response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
-                      if response_post.status_code != 200 or "captcha" in response_post.text.lower():
-                          return None
-                      links = extract_startpage(response_post.text)
-                      return links if links else None
-                  except Exception: return None
+                  # Ciclo di paginazione sequenziale veloce per estrarre 5 pagine (10 risultati x 5 = 50 link totali)
+                  for page in range(5):
+                      offset = page * 10
+                      payload = {
+                          "query": query, "sc": sc_token, "cat": "web", "t": "device",
+                          "language": "italiano", "lui": "english", "qadf": "moderate",
+                          "startat": str(offset)
+                      }
+                      try:
+                          response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
+                          if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
+                              page_links = extract_startpage(response_post.text)
+                              if page_links:
+                                  links.extend(page_links)
+                              else:
+                                  break  # Ferma se non ci sono più pagine di risultati
+                          else:
+                              break
+                      except Exception:
+                          break
+                      time.sleep(random.uniform(0.3, 0.6))
+
+                  return links if links else None
 
           def fetch_duckduckgo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
@@ -222,30 +237,58 @@ jobs:
                   "sec-fetch-dest": "document", "sec-fetch-mode": "navigate",
                   "sec-fetch-site": "same-origin", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1"
               })
-              url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-              for inner_attempt in range(1, 3):
+              
+              links = []
+              # Pagina 1 (contiene i primi 30 risultati)
+              url1 = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+              try:
+                  response = session.get(url1, headers=headers, timeout=8.0)
+                  if response.status_code == 202:
+                      time.sleep(2.0)
+                      response = session.get(url1, headers=headers, timeout=8.0)
+                  if response.status_code == 200 and "captcha" not in response.text.lower():
+                      links.extend(extract_duckduckgo(response.text))
+              except Exception:
+                  return None
+
+              # Pagina 2 (offset s=30 per raccogliere altri 30 link e superare i 50 risultati minimi)
+              if len(links) > 0:
+                  time.sleep(random.uniform(0.5, 1.2))
+                  url2 = f"https://html.duckduckgo.com/html/?q={quote(query)}&s=30&dc=31&v=l"
                   try:
-                      response = session.get(url, headers=headers, timeout=8.0)
-                      if response.status_code == 202:
-                          wait = random.uniform(1.5, 3.0) * inner_attempt
-                          time.sleep(wait)
-                          continue
-                      if response.status_code != 200 or "captcha" in response.text.lower():
-                          return None
-                      links = extract_duckduckgo(response.text)
-                      return links if links else None
-                  except Exception: return None
-              return None
+                      response2 = session.get(url2, headers=headers, timeout=8.0)
+                      if response2.status_code == 200 and "captcha" not in response2.text.lower():
+                          links.extend(extract_duckduckgo(response2.text))
+                  except Exception:
+                      pass
+
+              return links if links else None
 
           def fetch_yahoo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
-              url = f"https://search.yahoo.com/search?p={quote(query)}&n=50"
+              links = []
+              
+              # Pagina 1 (richiede fino a 50 risultati)
+              url1 = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b=1"
               try:
-                  response = session.get(url, headers=headers, timeout=10.0)
-                  if response.status_code != 200: return None
-                  links = extract_yahoo(response.text)
-                  return links if links else None
-              except Exception: return None
+                  response = session.get(url1, headers=headers, timeout=10.0)
+                  if response.status_code == 200:
+                      links.extend(extract_yahoo(response.text))
+              except Exception:
+                  return None
+
+              # Pagina 2 di backup (offset b=31) per assicurarci di superare stabilmente quota 50 risultati reali
+              if len(links) > 0 and len(links) < 40:
+                  time.sleep(random.uniform(0.5, 1.2))
+                  url2 = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b=31"
+                  try:
+                      response2 = session.get(url2, headers=headers, timeout=10.0)
+                      if response2.status_code == 200:
+                          links.extend(extract_yahoo(response2.text))
+                  except Exception:
+                      pass
+
+              return links if links else None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int) -> list[str]:
               time.sleep(random.uniform(0.1, 1.2))
