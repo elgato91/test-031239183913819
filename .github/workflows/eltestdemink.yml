@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (Veloce e Invincibile)
+      - name: Creazione Scraper Multithread Ultra-Stealth
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -43,6 +43,7 @@ jobs:
           import time
           import random
           import threading
+          import subprocess
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
           from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -74,15 +75,36 @@ jobs:
           class ProxyPool:
               def __init__(self, ports):
                   self.ports = ports
-                  self.last_used = {port: 0 for port in ports}
+                  self.usage_count = {port: 0 for port in ports}
                   self.lock = threading.Lock()
+                  self.restarting = set()
 
               def get_proxy(self):
                   with self.lock:
-                      sorted_ports = sorted(self.ports, key=lambda p: self.last_used[p])
-                      best_port = sorted_ports[0]
-                      self.last_used[best_port] = time.time()
-                      return best_port
+                      # Peschiamo solo dai proxy che NON sono in fase di riavvio background
+                      available = [p for p in self.ports if p not in self.restarting]
+                      if not available:
+                          return None
+                      return random.choice(available)
+
+              def report_usage(self, port):
+                  with self.lock:
+                      if port in self.restarting:
+                          return
+                      self.usage_count[port] += 1
+                      # RIGENERAZIONE IP OGNI 5 QUERY (in Background asincrono)
+                      if self.usage_count[port] >= 5:
+                          self.usage_count[port] = 0
+                          self.restarting.add(port)
+                          threading.Thread(target=self._restart_proxy, args=(port,)).start()
+
+              def _restart_proxy(self, port):
+                  container_index = port - 40000
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 5 richieste. Cambio IP IPv6 in background...")
+                  subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
+                  time.sleep(6) # Attesa che il tunnel Cloudflare WARP si ri-allinei
+                  with self.lock:
+                      self.restarting.remove(port)
 
           PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 40009, 40010])
           STARTPAGE_LOCK = threading.Lock()
@@ -211,6 +233,7 @@ jobs:
               sc_token = get_sc_token(session)
               if not sc_token:
                   port = PROXY_POOL.get_proxy()
+                  if not port: return None
                   session = create_session(port, browser)
                   sc_token = get_sc_token(session)
                   if not sc_token: return None
@@ -243,11 +266,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
-                      sc_token = get_sc_token(session)
-                      if not sc_token: break
-                      payload["sc"] = sc_token
                       human_sleep(0.5, 0.2)
 
                   if not page_success:
@@ -290,8 +308,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
                   if not page_success:
@@ -323,8 +339,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
                   if not page_success:
@@ -334,15 +348,18 @@ jobs:
               return links if links else None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
-              # Sfasamento iniziale per non allineare le partenze
-              human_sleep(0.5, 0.2)
+              # STAGGERED START (Ritardo randomico per le prime query, disperde l'impatto ai motori)
+              if global_attempt == 1:
+                  time.sleep(random.uniform(0.1, 7.0))
               
-              # 3 tentativi "locali e veloci" sfruttando la rotazione pura del ProxyPool
               max_local_retries = 3
               
               for local_attempt in range(1, max_local_retries + 1):
                   port = PROXY_POOL.get_proxy()
-                  
+                  if not port:
+                      time.sleep(1.0)
+                      continue
+                      
                   browser = random.choice(["chrome", "edge"])
                   links = None
                   try:
@@ -352,23 +369,20 @@ jobs:
                   except Exception:
                       pass
 
+                  # L'IP ha lavorato: Contabilizziamo nel ProxyPool per far scattare il riavvio background ogni 5 query
+                  PROXY_POOL.report_usage(port)
+
                   if links is not None and len(links) > 0:
                       cleaned_links = [clean_url(l) for l in links if l]
                       log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
                       return cleaned_links
                   else:
-                      # Se fallisce, fa una micro-pausa e riprova sù un altro IP
                       human_sleep(1.0, 0.3)
 
-              # SE ARRIVA QUI: ha fallito 3 volte di fila. 
-              # LA MAGIA ANTI-BAN STA QUI SOTTO: 
-              # Invece di passarla subito alla coda (che la rilancerebbe all'istante), addormentiamo 
-              # questo thread per 4-6 secondi. Questo dà il tempo agli IP WARP di uscire dalle blacklist 
-              # temporanee senza interrompere gli altri thread sani.
+              # PAUSA RAFFREDDAMENTO (Addormenta QUESTO thread per 4 sec, non lo script intero, prima del rinvio in coda)
               log(f"[{task_index:03d}/{total_tasks}] [RITARDO] {engine.upper()} per '{query}'. Pausa raffreddamento... (Giro {global_attempt})")
               time.sleep(random.uniform(4.0, 6.0))
               
-              # Ritornando None forziamo il main a rimetterla in coda per un giro successivo
               return None
 
           def main():
@@ -436,9 +450,8 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
               
-              # PRATICAMENTE INFINITO: Garantisce zero abbandoni. 
-              # Prima di abbandonare proverà 50 * 3 = 150 volte cambiando IP in continuazione.
-              MAX_GLOBAL_RETRIES = 50 
+              # Margine Estremo per garantirti Zero Abbandoni.
+              MAX_GLOBAL_RETRIES = 50
 
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
@@ -461,11 +474,10 @@ jobs:
                                       json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
                               else:
                                   if global_attempt < MAX_GLOBAL_RETRIES:
-                                      # Se la query ha fallito, la rimettiamo silenziosamente in fondo alla coda!
                                       new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
                                       futures[new_future] = (q, eng, t_idx, global_attempt + 1)
                                   else:
-                                      log(f"❌ [FATALE] ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'. Limite estremo raggiunto.")
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'. (Mai raggiunto nella pratica)")
                           except Exception as e:
                               log(f"Errore grave nel thread task {t_idx:03d}: {e}")
 
@@ -473,7 +485,7 @@ jobs:
               main()
           EOF
 
-      - name: Esecuzione Scraping Veloce
+      - name: Esecuzione Scraping Veloce e Automatico
         run: python -u stealth_scraper.py
 
       - name: Combinazione e Deduplica Risultati Finali
