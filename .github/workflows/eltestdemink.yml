@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (70 Risultati + Session Flushing)
+      - name: Creazione Scraper Multithread Ultra-Stealth (Coda di Micro-Task Granulari)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -45,7 +45,7 @@ jobs:
           import threading
           import queue
           from pathlib import Path
-          from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
+          from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, quote
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
@@ -77,16 +77,15 @@ jobs:
                   if exclude_ports is None:
                       exclude_ports = set()
                   with self.lock:
+                      # Esclude i proxy falliti in precedenza per questo specifico task
                       available_ports = [p for p in self.ports if p not in exclude_ports]
                       if not available_ports:
-                          # Se tutte le porte sono temporaneamente in blackout per questo task, resettiamo il filtro
                           available_ports = self.ports
                       sorted_ports = sorted(available_ports, key=lambda p: self.last_used[p])
                       best_port = sorted_ports[0]
                       self.last_used[best_port] = time.time()
                       return best_port
 
-          # Pool esteso a 10 proxy WARP
           PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 40009, 40010])
           STARTPAGE_LOCK = threading.Lock()
 
@@ -119,7 +118,6 @@ jobs:
               }
 
           def create_session(port, browser):
-              """Inizializza una sessione fresca eliminando la cache delle vecchie connessioni."""
               impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
               proxies = {
                   "http": f"socks5h://127.0.0.1:{port}",
@@ -195,7 +193,7 @@ jobs:
                           links.append(href)
               return links
 
-          # --- Fetchers granularizzati per singola pagina ---
+          # --- Fetcher per singola pagina ---
 
           def fetch_single_startpage(query: str, offset: int, browser: str, port: int) -> list[str] | None:
               session = create_session(port, browser)
@@ -279,7 +277,7 @@ jobs:
                   pass
               return None
 
-          # --- Struttura di Task Granulare ---
+          # --- Task Granulare per singola pagina/offset ---
 
           class ScrapeTask:
               def __init__(self, query: str, engine: str, offset: int, page_idx: int, task_index: int):
@@ -287,12 +285,12 @@ jobs:
                   self.engine = engine
                   self.offset = offset
                   self.page_idx = page_idx
-                  self.task_index = task_index  # Identificativo numerico globale della query-motore
-                  self.failed_ports = set()     # Registra le porte proxy fallite per questo micro-task
+                  self.task_index = task_index
+                  self.failed_ports = set()  # IP/Porte falliti per questo specifico micro-task
                   self.retries = 0
 
           def execute_single_task(task: ScrapeTask, total_combos: int) -> bool:
-              # Ottiene una porta proxy escludendo quelle già fallite per questo specifico task
+              # Seleziona una porta proxy escludendo quelle già marcate come fallite per questo micro-task
               port = PROXY_POOL.get_proxy(exclude_ports=task.failed_ports)
               browser = random.choice(["chrome", "edge"])
               links = None
@@ -309,12 +307,11 @@ jobs:
 
               if links is not None:
                   cleaned_links = [clean_url(l) for l in links if l]
-                  # Scrittura del file temporaneo granulare
                   temp_file = Path("results_temp") / f"task_{task.task_index:03d}_p{task.page_idx}.json"
                   with open(temp_file, "w", encoding="utf-8") as f:
                       json.dump({"query": task.query, "engine": task.engine, "links": cleaned_links}, f, ensure_ascii=False, indent=2)
                   
-                  log(f"[{task.task_index:03d}/{total_combos}] [OK] {task.engine.upper()} (p.{task.page_idx}) -> {len(cleaned_links)} link estratti usando proxy:{port}")
+                  log(f"[{task.task_index:03d}/{total_combos}] [OK] {task.engine.upper()} (p.{task.page_idx}) -> {len(cleaned_links)} link con proxy {port}")
                   return True
               else:
                   task.failed_ports.add(port)
@@ -331,9 +328,9 @@ jobs:
                   if not success:
                       if task.retries < 3:
                           task.retries += 1
-                          # Reinserimento in coda per esecuzione asincrona con cambio IP assicurato
+                          # Reinserimento del task singolo in coda per farlo processare da un altro proxy
                           task_queue.put(task)
-                          log(f"[{task.task_index:03d}] [Riprova] {task.engine.upper()} (p.{task.page_idx}) fallito. Rimesso in coda. Tentativo #{task.retries}")
+                          log(f"[{task.task_index:03d}] [RIPROVA] {task.engine.upper()} (p.{task.page_idx}) fallito. Rimesso in coda. Tentativo #{task.retries}")
                       else:
                           log(f"[{task.task_index:03d}] [FALLITO DEFINITIVO] {task.engine.upper()} (p.{task.page_idx}) dopo 3 tentativi")
                   
@@ -348,4 +345,163 @@ jobs:
                   "Pozzo di San Patrizio storia e segreti",
                   "itinerario Orvieto a piedi centro storico",
                   "migliori ristoranti cucina tipica Orvieto",
-                  "cosa fare a
+                  "cosa fare a Orvieto nel weekend",
+                  "Pozzo della Cava Orvieto recensioni",
+                  "Orvieto attrazioni principali da non perdere",
+                  "dove mangiare la gallina ubriaca a Orvieto",
+                  "Orvieto nascosta e luoghi insoliti",
+                  "storia del Pozzo di San Patrizio Orvieto",
+                  "MUSEO Claudio Faina Orvieto cosa vedere",
+                  "Orvieto con bambini cosa fare",
+                  "guida turistica Orvieto consigli utili",
+                  "Orvieto sotterranea visita guidata opinioni",
+                  "dove parcheggiare gratis a Orvieto centro",
+                  "Tempio del Belvedere Orvieto rovina etrusca",
+                  "Orvieto cantine storiche e degustazione vini",
+                  "Cappella di San Brizio Luca Signorelli Duomo",
+                  "Orvieto punti panoramici migliori",
+                  "cosa vedere vicino a Orvieto nei dintorni",
+                  "Orvieto artigianato locale ceramiche",
+                  "Torre del Moro Orvieto salita e panorama",
+                  "Orvieto d'inverno cosa vedere e fare",
+                  "best things to do in Orvieto Umbria",
+                  "Orvieto 1 day itinerary walk",
+                  "St Patrick's Well Orvieto tickets and history",
+                  "Orvieto Underground tour review",
+                  "Duomo di Orvieto masterpieces to see",
+                  "best local restaurants in Orvieto center",
+                  "where to eat in Orvieto authentic food",
+                  "traditional trattorias in Orvieto",
+                  "cheap eats and street food in Orvieto",
+                  "hidden gem restaurants in Orvieto",
+                  "best historic restaurants in Orvieto",
+                  "best pasta and pizza in Orvieto favorites",
+                  "authentic local restaurants Orvieto",
+                  "where do locals eat in Orvieto",
+                  "what to see in Orvieto",
+                  "best viewpoints in Orvieto",
+                  "where to park in Orvieto",
+                  "best things to do in Orvieto",
+                  "Orvieto travel guide",
+                  "local food specialties Orvieto",
+                  "best coffee and pastry in Orvieto",
+                  "Orvieto Cathedral Signorelli chapel history",
+                  "Etruscan museum Orvieto Claudio Faina",
+                  "Orvieto underground caves historical guide",
+                  "places to visit near Orvieto Umbria"
+              ]
+
+              engines = ["duckduckgo", "startpage", "yahoo"]
+              task_queue = queue.Queue()
+              
+              task_idx = 1
+              for q in queries:
+                  for eng in engines:
+                      if eng == "startpage":
+                          for p_idx in range(7):
+                              task_queue.put(ScrapeTask(q, eng, p_idx * 10, p_idx, task_idx))
+                      elif eng == "duckduckgo":
+                          offsets = [0, 30, 60]
+                          for p_idx, off in enumerate(offsets):
+                              task_queue.put(ScrapeTask(q, eng, off, p_idx, task_idx))
+                      elif eng == "yahoo":
+                          offsets = [1, 41]
+                          for p_idx, off in enumerate(offsets):
+                              task_queue.put(ScrapeTask(q, eng, off, p_idx, task_idx))
+                      task_idx += 1
+
+              total_combos = task_idx - 1
+              log(f"Inizio scraping di {total_combos} combinazioni tramite coda concorrente.")
+
+              Path("results_temp").mkdir(exist_ok=True)
+
+              threads = []
+              for _ in range(10):
+                  t = threading.Thread(target=worker_loop, args=(task_queue, total_combos))
+                  t.daemon = True
+                  t.start()
+                  threads.append(t)
+
+              task_queue.join()
+              log("Scraping completato o tentativi esauriti.")
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+      - name: Esecuzione Scraping Veloce
+        run: python -u stealth_scraper.py
+
+      - name: Combinazione e Deduplica Risultati Finali
+        if: always()
+        shell: python
+        run: |
+          import json
+          import glob
+          import re
+          from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+
+          def clean_url(url: str) -> str:
+              try:
+                  parsed = urlparse(url)
+                  query_params = parse_qsl(parsed.query)
+                  filtered_params = [
+                      (k, v) for k, v in query_params
+                      if k.lower() not in ["srsltid", "gclid", "fbclid"]
+                      and not k.lower().startswith("utm_")
+                  ]
+                  new_query = urlencode(filtered_params)
+                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+              except Exception:
+                  return url
+
+          def normalize_url(url: str) -> str:
+              try:
+                  url_lower = url.lower().rstrip("/")
+                  parsed = urlparse(url_lower)
+                  netloc = parsed.netloc
+                  if netloc.startswith("www."):
+                      netloc = netloc[4:]
+                  scheme = "https"
+                  params = sorted(parse_qsl(parsed.query))
+                  return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
+              except Exception:
+                  return url
+
+          all_raw_links = []
+          for filepath in glob.glob("results_temp/task_*.json"):
+              try:
+                  with open(filepath, "r", encoding="utf-8") as f:
+                      data = json.load(f)
+                      links = data.get("links", [])
+                      if isinstance(links, list):
+                          all_raw_links.extend(links)
+              except Exception as e:
+                  print(f"Errore lettura {filepath}: {e}")
+
+          seen_normalized = set()
+          deduped_urls = []
+          for u in all_raw_links:
+              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", u).strip()
+              if not cleaned.startswith("http") or len(cleaned) < 12:
+                  continue
+              norm = normalize_url(cleaned)
+              if norm not in seen_normalized:
+                  seen_normalized.add(norm)
+                  deduped_urls.append(clean_url(cleaned))
+
+          deduped_urls.sort()
+
+          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+              for url in deduped_urls:
+                  f.write(url + "\n")
+
+          print(f"Sintesi completata: {len(all_raw_links)} link estratti complessivamente.")
+          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali in output_macchina2_cdp.txt.")
+
+      - name: Upload Artifact Macchina 2
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
