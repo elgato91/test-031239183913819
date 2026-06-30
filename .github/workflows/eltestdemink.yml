@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (Ottimizzato 12 Thread)
+      - name: Creazione Scraper Multithread Ultra-Stealth
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -273,7 +273,6 @@ jobs:
 
           def fetch_yahoo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
-              # Richiediamo direttamente 50 risultati organici reali in una singola richiesta veloce
               url = f"https://search.yahoo.com/search?p={quote(query)}&n=50"
               try:
                   response = session.get(url, headers=headers, timeout=10.0)
@@ -383,7 +382,6 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
 
-              # Portato a 12 worker contemporanei su 6 proxy per raddoppiare la velocità d'esecuzione
               with ThreadPoolExecutor(max_workers=12) as executor:
                   futures = {
                       executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
@@ -415,39 +413,67 @@ jobs:
           import glob
           import re
           import os
+          from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-          engines = ["duckduckgo", "startpage", "yahoo"]
-          links_by_engine = {eng: [] for eng in engines}
+          def clean_url(url: str) -> str:
+              try:
+                  parsed = urlparse(url)
+                  query_params = parse_qsl(parsed.query)
+                  filtered_params = [
+                      (k, v) for k, v in query_params
+                      if k.lower() not in ["srsltid", "gclid", "fbclid"]
+                      and not k.lower().startswith("utm_")
+                  ]
+                  new_query = urlencode(filtered_params)
+                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+              except Exception:
+                  return url
 
-          # Legge i file parziali salvati progressivamente su disco
+          def normalize_url(url: str) -> str:
+              try:
+                  url_lower = url.lower().rstrip("/")
+                  parsed = urlparse(url_lower)
+                  netloc = parsed.netloc
+                  if netloc.startswith("www."):
+                      netloc = netloc[4:]
+                  scheme = "https"
+                  params = sorted(parse_qsl(parsed.query))
+                  return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
+              except Exception:
+                  return url
+
+          all_raw_links = []
           for filepath in glob.glob("results_temp/task_*.json"):
               try:
                   with open(filepath, "r", encoding="utf-8") as f:
                       data = json.load(f)
-                      eng = data.get("engine")
                       links = data.get("links", [])
-                      if eng in links_by_engine and isinstance(links, list):
-                          for l in links:
-                              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", l).strip()
-                              if cleaned.startswith("http") and len(cleaned) >= 12:
-                                  links_by_engine[eng].append(cleaned)
+                      if isinstance(links, list):
+                          all_raw_links.extend(links)
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
-          # Salva la lista finale suddivisa per motore
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              for eng in engines:
-                  group_links = links_by_engine[eng]
-                  # Ordina solo per rendere l'output leggibile, ma preserva i duplicati
-                  group_links.sort()
-                  f.write("=========================================\n")
-                  f.write(f"{eng.upper()} ({len(group_links)} link estratti)\n")
-                  f.write("=========================================\n")
-                  for url in group_links:
-                      f.write(url + "\n")
-                  f.write("\n")
+          # Deduplicazione Globale su base Normalizzata
+          seen_normalized = set()
+          deduped_urls = []
+          for u in all_raw_links:
+              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", u).strip()
+              if not cleaned.startswith("http") or len(cleaned) < 12:
+                  continue
+              norm = normalize_url(cleaned)
+              if norm not in seen_normalized:
+                  seen_normalized.add(norm)
+                  deduped_urls.append(clean_url(cleaned))
 
-          print("File finale raggruppato generato con successo.")
+          deduped_urls.sort()
+
+          # Salva la lista lineare pulita pronta per la fase di deep research
+          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+              for url in deduped_urls:
+                  f.write(url + "\n")
+
+          print(f"Sintesi completata: {len(all_raw_links)} link elaborati totali.")
+          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali scritti in output_macchina2_cdp.txt.")
 
       - name: Upload Artifact Macchina 2
         if: always()
