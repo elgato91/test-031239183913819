@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (50 Risultati)
+      - name: Creazione Scraper Multithread Ultra-Stealth (Ottimizzato 12 Thread)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -133,7 +133,6 @@ jobs:
           def extract_duckduckgo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
-              # DuckDuckGo non-JS: i link reali sono identificati dalla classe 'result__url'
               for a in soup.find_all("a", class_="result__url", href=True):
                   href = a["href"]
                   match = re.search(r"uddg=([^&]+)", href)
@@ -169,7 +168,6 @@ jobs:
           def extract_yahoo(html):
               soup = BeautifulSoup(html, "html.parser")
               links = []
-              # Yahoo: estrae dai contenitori reali dei risultati per ignorare menù e tracciamenti
               for div in soup.find_all("div", class_=["compTitle", "algo", "y-algo"]):
                   for a in div.find_all("a", href=True):
                       href = a["href"]
@@ -182,6 +180,18 @@ jobs:
                       elif href.startswith("http") and not any(d in href for d in ["yahoo.com", "yimg.com", "yahoo.co.jp"]):
                           links.append(href)
               return links
+
+          def extract_links(html, url):
+              links = []
+              if "duckduckgo.com" in url: links = extract_duckduckgo(html)
+              elif "startpage.com" in url: links = extract_startpage(html)
+              elif "yahoo.com" in url: links = extract_yahoo(html)
+              
+              cleaned_links = []
+              for l in links:
+                  cleaned = clean_url(l)
+                  if cleaned: cleaned_links.append(cleaned)
+              return cleaned_links
 
           def fetch_startpage(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
@@ -196,7 +206,7 @@ jobs:
                       sc_token = sc_match.group(1) if sc_match else ""
                   except Exception: return None
 
-                  time.sleep(random.uniform(0.3, 0.8))
+                  time.sleep(random.uniform(0.2, 0.5))
 
                   links = []
                   headers_post = headers.copy()
@@ -206,7 +216,6 @@ jobs:
                       "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
                   })
 
-                  # Ciclo di paginazione sequenziale veloce per estrarre 5 pagine (10 risultati x 5 = 50 link totali)
                   for page in range(5):
                       offset = page * 10
                       payload = {
@@ -221,12 +230,12 @@ jobs:
                               if page_links:
                                   links.extend(page_links)
                               else:
-                                  break  # Ferma se non ci sono più pagine di risultati
+                                  break
                           else:
                               break
                       except Exception:
                           break
-                      time.sleep(random.uniform(0.3, 0.6))
+                      time.sleep(random.uniform(0.1, 0.3))
 
                   return links if links else None
 
@@ -239,21 +248,19 @@ jobs:
               })
               
               links = []
-              # Pagina 1 (contiene i primi 30 risultati)
               url1 = f"https://html.duckduckgo.com/html/?q={quote(query)}"
               try:
                   response = session.get(url1, headers=headers, timeout=8.0)
                   if response.status_code == 202:
-                      time.sleep(2.0)
+                      time.sleep(1.5)
                       response = session.get(url1, headers=headers, timeout=8.0)
                   if response.status_code == 200 and "captcha" not in response.text.lower():
                       links.extend(extract_duckduckgo(response.text))
               except Exception:
                   return None
 
-              # Pagina 2 (offset s=30 per raccogliere altri 30 link e superare i 50 risultati minimi)
               if len(links) > 0:
-                  time.sleep(random.uniform(0.5, 1.2))
+                  time.sleep(random.uniform(0.1, 0.4))
                   url2 = f"https://html.duckduckgo.com/html/?q={quote(query)}&s=30&dc=31&v=l"
                   try:
                       response2 = session.get(url2, headers=headers, timeout=8.0)
@@ -266,32 +273,18 @@ jobs:
 
           def fetch_yahoo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
-              links = []
-              
-              # Pagina 1 (richiede fino a 50 risultati)
-              url1 = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b=1"
+              # Richiediamo direttamente 50 risultati organici reali in una singola richiesta veloce
+              url = f"https://search.yahoo.com/search?p={quote(query)}&n=50"
               try:
-                  response = session.get(url1, headers=headers, timeout=10.0)
+                  response = session.get(url, headers=headers, timeout=10.0)
                   if response.status_code == 200:
-                      links.extend(extract_yahoo(response.text))
-              except Exception:
-                  return None
-
-              # Pagina 2 di backup (offset b=31) per assicurarci di superare stabilmente quota 50 risultati reali
-              if len(links) > 0 and len(links) < 40:
-                  time.sleep(random.uniform(0.5, 1.2))
-                  url2 = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b=31"
-                  try:
-                      response2 = session.get(url2, headers=headers, timeout=10.0)
-                      if response2.status_code == 200:
-                          links.extend(extract_yahoo(response2.text))
-                  except Exception:
-                      pass
-
-              return links if links else None
+                      links = extract_yahoo(response.text)
+                      return links if links else None
+              except Exception: pass
+              return None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int) -> list[str]:
-              time.sleep(random.uniform(0.1, 1.2))
+              time.sleep(random.uniform(0.1, 0.8))
               max_retries = 3
               for attempt in range(1, max_retries + 1):
                   port = PROXY_POOL.get_proxy()
@@ -320,7 +313,7 @@ jobs:
                       log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
                       return cleaned_links
                   else:
-                      time.sleep(random.uniform(1.0, 2.5))
+                      time.sleep(random.uniform(1.0, 2.0))
 
               log(f"[{task_index:03d}/{total_tasks}] [FALLITO] {engine.upper()} per: '{query}'")
               return []
@@ -390,7 +383,8 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
 
-              with ThreadPoolExecutor(max_workers=6) as executor:
+              # Portato a 12 worker contemporanei su 6 proxy per raddoppiare la velocità d'esecuzione
+              with ThreadPoolExecutor(max_workers=12) as executor:
                   futures = {
                       executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
                       for idx, task in enumerate(tasks)
