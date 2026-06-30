@@ -60,7 +60,6 @@ jobs:
           import os
           import shutil
           import re
-          import urllib.parse
           from google import genai
           from google.genai import types
           import requests
@@ -75,30 +74,237 @@ jobs:
           ]
 
           # --- SETUP DEI 6 RUNNER E DEI PROXY ---
-          # 3 Porte proxy. 2 Runner per porta = 6 Runner totali.
           WORKER_CONFIGS = [
               {"id": 1, "proxy_port": 40001}, {"id": 2, "proxy_port": 40001},
               {"id": 3, "proxy_port": 40002}, {"id": 4, "proxy_port": 40002},
               {"id": 5, "proxy_port": 40003}, {"id": 6, "proxy_port": 40003}
           ]
 
-          # Gestione dei limiti di rate limit API
           api_semaphore = asyncio.Semaphore(15)
 
-          async def call_with_retry(func, *args, max_retries=5):
-              """Esegue una funzione asincrona con backoff esponenziale in caso di errore di quota (429/1011)"""
-              for attempt in range(max_retries):
+          # Script di risoluzione statico che verrà scritto dentro la cartella di ogni Worker
+          # Utilizza headless=False (tramite Xvfb) per garantire stabilità contro i blocchi di undetected-chromedriver
+          resolve_script_template = """
+          import json
+          import urllib.parse
+          import time
+          import re
+          import sys
+          import argparse
+          from seleniumbase import Driver
+
+          def pulisci_testo(testo):
+              if not testo:
+                  return 'N/D'
+              testo_pulito = re.sub(r'^[\\s\\W_]+', '', testo)
+              return testo_pulito.strip()
+
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument('--place', type=str, required=True)
+              parser.add_argument('--port', type=int, required=True)
+              args = parser.parse_args()
+
+              nome = args.place
+              initial_port = args.port
+              
+              proxy_ports = [40001, 40002, 40003]
+              try:
+                  start_idx = proxy_ports.index(initial_port)
+              except ValueError:
+                  start_idx = 0
+                  
+              ordered_ports = proxy_ports[start_idx:] + proxy_ports[:start_idx]
+              
+              resolved_successfully = False
+              info_locale = {}
+
+              for port in ordered_ports:
+                  proxy_url = f"socks5://127.0.0.1:{port}"
+                  print(f"-> Tentativo di risoluzione per '{nome}' con proxy su porta {port}...")
+                  
+                  # headless=False + Xvfb previene i blocchi di undetected-chromedriver su Linux
+                  # user_data_dir isola totalmente il profilo del browser impedendo crossover di sessioni
+                  driver = Driver(uc=True, headless=False, proxy=proxy_url, user_data_dir="./chrome_profile")
+                  
                   try:
-                      return await func(*args)
-                  except Exception as e:
-                      err_str = str(e).lower()
-                      if "quota" in err_str or "429" in err_str or "1011" in err_str or "limit" in err_str:
-                          wait_time = (2 ** attempt) * 15
-                          print(f"   [Gemini Quota] Limite raggiunto. Attesa di {wait_time} secondi prima di riprovare...", flush=True)
-                          await asyncio.sleep(wait_time)
+                      search_url = f'https://www.google.com/maps/search/{urllib.parse.quote(nome)}?hl=en'
+                      driver.get(search_url)
+                      driver.sleep(5)
+                      
+                      if "sorry/index" in driver.current_url or "google.com/sorry" in driver.current_url:
+                          print(f"-> [WARNING] Rilevato CAPTCHA su porta {port}. Cambio proxy...")
+                          driver.quit()
+                          time.sleep(3)
+                          continue
+                          
+                      try:
+                          consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
+                          consent_btn.click()
+                          driver.sleep(2)
+                      except:
+                          pass
+                          
+                      current_url = driver.current_url
+                      if '/maps/place/' not in current_url:
+                          try:
+                              first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
+                              resolved_url = first_result_el.get_attribute('href')
+                              if 'hl=' not in resolved_url:
+                                  resolved_url += '&hl=en'
+                              else:
+                                  resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=en', resolved_url)
+                              driver.get(resolved_url)
+                              driver.sleep(5)
+                          except:
+                              pass
+                      
+                      # Polling resiliente (fino a 15 secondi) per attendere il caricamento della mappa
+                      # Questo risolve la mancata individuazione di luoghi molto specifici
+                      for _ in range(15):
+                          if '/maps/place/' in driver.current_url:
+                              break
+                          driver.sleep(1)
+                              
+                      if "sorry/index" in driver.current_url or "google.com/sorry" in driver.current_url:
+                          print(f"-> [WARNING] Rilevato CAPTCHA post-ricerca su porta {port}. Cambio proxy...")
+                          driver.quit()
+                          time.sleep(3)
+                          continue
+                          
+                      info_locale = {
+                          'ricerca_originale': nome,
+                          'url_mappa': driver.current_url,
+                          'nome': 'N/D',
+                          'categoria': 'N/D',
+                          'indirizzo': 'N/D',
+                          'telefono': 'N/D',
+                          'sito_web': 'N/D',
+                          'media_stelle': 'N/D',
+                          'totale_recensioni': 'N/D',
+                          'coordinate': {},
+                          'popular_times_affluenza': [],
+                          'caratteristiche_servizi': []
+                      }
+                      
+                      try:
+                          info_locale['nome'] = driver.find_element('css selector', 'h1').text
+                      except: pass
+                      
+                      try:
+                          info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
+                      except: pass
+
+                      try:
+                          raw_address = driver.find_element('css selector', '[data-item-id="address"]').text
+                          info_locale['indirizzo'] = pulisci_testo(raw_address)
+                      except: pass
+                      
+                      try:
+                          raw_phone = driver.find_element('css selector', '[data-item-id^="phone:tel"]').text
+                          info_locale['telefono'] = pulisci_testo(raw_phone)
+                      except: pass
+                      
+                      try:
+                          info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
+                      except: pass
+                      
+                      match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
+                      if match_at:
+                          info_locale['coordinate'] = {
+                              'latitudine': float(match_at.group(1)),
+                              'longitudine': float(match_at.group(2))
+                          }
                       else:
-                          raise e
-              return None
+                          match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
+                          if match_data:
+                              info_locale['coordinate'] = {
+                                  'latitudine': float(match_data.group(1)),
+                                  'longitudine': float(match_data.group(2))
+                              }
+                              
+                      try:
+                          rating_text = driver.find_element('css selector', 'div.F7nice').text
+                          rating_text = rating_text.replace('\\xa0', ' ')
+                          if '(' in rating_text:
+                              parts = rating_text.split('(')
+                              info_locale['media_stelle'] = float(parts[0].strip())
+                              reviews_raw = parts[1].split(')')[0]
+                              only_numbers = re.sub(r'[^\\d]', '', reviews_raw)
+                              info_locale['totale_recensioni'] = int(only_numbers)
+                      except: pass
+
+                      # Fallback rating se div.F7nice è assente
+                      if info_locale['media_stelle'] == 'N/D':
+                          try:
+                              rating_el = driver.find_element('xpath', "//*[contains(@aria-label, 'stars')]")
+                              aria_lbl = rating_el.get_attribute('aria-label')
+                              match_stars = re.search(r'([0-9.]+)\\s*stars', aria_lbl)
+                              if match_stars:
+                                  info_locale['media_stelle'] = float(match_stars.group(1))
+                          except: pass
+
+                      # Scorrimento
+                      try:
+                          pannello = None
+                          for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
+                              try:
+                                  el = driver.find_element('css selector', selector)
+                                  if el.is_displayed():
+                                      pannello = el
+                                      break
+                              except: pass
+                          if pannello:
+                              for pos in [300, 600, 900]:
+                                  driver.execute_script(f"arguments[0].scrollTo(0, {{pos}});", pannello)
+                                  driver.sleep(1.5)
+                      except: pass
+
+                      # Estrazione Grafici con Esclusione rigorosa dei chip recensioni
+                      try:
+                          barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
+                          for b in barre:
+                              lbl = b.get_attribute('aria-label')
+                              if lbl and lbl not in info_locale['popular_times_affluenza']:
+                                  if "mentioned" not in lbl.lower() and "reviews" not in lbl.lower() and "recensioni" not in lbl.lower():
+                                      info_locale['popular_times_affluenza'].append(lbl)
+                      except: pass
+
+                      # Estrazione Caratteristiche ed etichette (Informazioni in Inglese)
+                      try:
+                          url_scheda_corrente = driver.current_url
+                          info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
+                          driver.execute_script("arguments[0].scrollIntoView(true);", info_btn)
+                          driver.sleep(1)
+                          info_btn.click()
+                          driver.sleep(2)
+                          
+                          elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
+                          for s in elementi_servizi:
+                              if s.text and s.text not in info_locale['caratteristiche_servizi']:
+                                  info_locale['caratteristiche_servizi'].append(s.text)
+                      except: pass
+                      
+                      resolved_successfully = True
+                      driver.quit()
+                      break
+                      
+                  except Exception as e:
+                      print(f"-> Errore imprevisto sul proxy {{port}}: {{str(e)}}")
+                      driver.quit()
+                      time.sleep(3)
+
+              if resolved_successfully:
+                  with open("maps_data.json", "w", encoding="utf-8") as f:
+                      json.dump(info_locale, f, indent=4, ensure_ascii=False)
+                  print("SUCCESS")
+              else:
+                  print("FAILURE")
+                  exit(1)
+
+          if __name__ == "__main__":
+              main()
+          """
 
           async def analizza_immagine_gemini(client, config_live, url_immagine, prompt):
               async with api_semaphore:
@@ -153,16 +359,20 @@ jobs:
               if not urls_unici:
                   return {"avviso": "Nessuna foto trovata in questo posto."}
               
-              # Capping di sicurezza per rientrare nella quota TPM
+              # Capping di sicurezza per rientrare nella quota TPM (65K) di Gemini
               urls_campione = urls_unici[:40]
               
               print(f"   Trovate {len(urls_unici)} foto per '{luogo}' (Analisi di {len(urls_campione)} campioni per limiti di quota)...", flush=True)
               
-              # Prompt singolo ottimizzato in chiave editoriale (evita descrizioni sterili)
+              # Prompt singolo mirato all'estrazione di dettagli visivi concreti ed elementi distintivi
               prompt_singolo = (
-                  "Identify the prominent visual elements in this image (e.g., specific food dishes, architectural details, "
-                  "materials, landscape features, signs, or crowd levels). Describe them objectively, concisely, "
-                  "and with an editorial focus on what stands out to a traveler."
+                  "Identify the prominent visual elements in this travel/establishment image. "
+                  "Provide a concise, bulleted list of actual features shown, such as: "
+                  "- Key architectural structures or materials (e.g., stone blocks, wood decking, brick arches). "
+                  "- Specific food dishes (e.g., cacio e pepe pasta, tiramisu cup, zucchini flowers). "
+                  "- Notable amenities or landscape features (e.g., steaming hot tubs, mountains, crowded piazza). "
+                  "- Written signs, labels, or rules. "
+                  "Be objective, brief, and highly focused on editorial details that define the place's identity. Do not write generic or wordy descriptions."
               )
               
               tasks = []
@@ -178,27 +388,27 @@ jobs:
               if not risultati_validi:
                   return {"avviso": "Nessuna immagine analizzata con successo."}
                   
-              # Sintesi Globale focalizzata su elementi di rilievo e design materico
+              # Sintesi Globale "Show, don't tell" per la redazione editoriale
               prompt_fase2 = """
-              Sei uno scrittore di viaggi senior ed etnografo sul campo, appassionato di estetica, design dei materiali e architettura del paesaggio.
-              Ti viene fornito un elenco strutturato di descrizioni empiriche ed oggettive di diverse immagini relative a un singolo luogo geografico.
-              
-              Il tuo compito è sintetizzare queste informazioni in una ricostruzione d'insieme viva, sensoriale e spaziale del posto.
-              
-              Vogliamo replicare l'intelligenza di un osservatore umano colto che racconta com'è fatto il posto, catturandone l'essenza e la 'vibe' in modo integrato, senza cadere nello 'slop' poetico artificiale o pubblicitario (evita assolutamente parole banali come 'magico', 'mozzafiato', 'maestoso', 'immergiti', 'teatro di', 'protagonista').
-              
-              Usa la regola aurea del reportage: "MOSTRA, NON RACCONTARE" (Show, don't tell) attraverso i dettagli visivi concreti ed i materiali.
-              - Non dire che l'atmosfera è 'rilassante' o 'pacifica'; descrivi piuttosto l'interazione fisica tra l'acqua calda fumante che evapora dalle vasche di legno scuro e l'aria fredda di una vallata grigia o le montagne scoscese sullo sfondo.
-              
-              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con la seguente struttura:
+              Sei il Direttore Editoriale di una prestigiosa rivista di viaggi ed etnografo sul campo.
+              Ti viene fornito un elenco strutturato di elementi visivi estratti dall'analisi di diverse immagini relative a un singolo luogo.
+
+              Il tuo compito è sintetizzare questi dati in un report editoriale nitido, elegante e ad alto impatto visivo ("curated visual guide"), evitando sbrodoloni inutili o descrizioni generiche ("slop" pubblicitario). 
+              Evita assolutamente parole vuote o cliché come 'magico', 'mozzafiato', 'maestoso', 'immergiti', 'teatro di', 'protagonista'. 
+
+              Usa la regola d'oro del grande giornalismo: "MOSTRA, NON RACCONTARE" (Show, don't tell) attraverso i materiali concreti, i dettagli visivi e i contrasti reali di luce, vapore, pietra o cibo.
+
+              Restituisci l'output ESCLUSIVAMENTE in formato JSON all'interno di un blocco di codice markdown contrassegnato con ```json ... ```, con questa esatta struttura:
               {
-                  "tipologia_luogo": "Categoria generale del luogo identificata dall'analisi dei dati",
-                  "identita_visiva_e_vibe": "Una ricostruzione densa, evocativa e fluida di 2 paragrafi in italiano che descrive lo spazio, l'atmosfera, i contrasti cromatici e termici. Scrivi con un tono narrativo ed elevato, ma rigorosamente agganciato ai fatti visivi reali.",
+                  "tipologia_luogo": "Categoria concisa del luogo (es. 'Trattoria romana di quartiere', 'Terme geotermiche di design nordico')",
+                  "curatore_editoriale_vibe": "Una ricostruzione densa e fluida di 2 paragrafi in italiano che descrive l'anima visiva, l'atmosfera e i contrasti di luce/materiali del posto. Scrivi con un tono narrativo, colto ed elevato, rigorosamente ancorato ai dettagli reali emersi.",
                   "elementi_visivi_di_rilievo": [
-                      "Elenco dettagliato e ragionato di elementi fisici, piatti tipici, dettagli architettonici, cartelli o caratteristiche d'interesse visivo emerse dalle foto"
+                      "Lista curata dei 5 elementi visivi più importanti e caratterizzanti identificati nelle immagini (es: 'Vasche idromassaggio ovali incassate in legno scuro', 'Spaghetti cacio e pepe con abbondante pepe nero macinato', 'Facciata barocca in travertino con imponenti colonne corinzie')"
                   ],
-                  "analisi_materica_e_design": "Un'analisi di come i materiali costruttivi (pietra, legno, metallo, ecc) si inseriscono e contrastano con il contesto naturale o urbano."
+                  "analisi_materica_e_design": "Un paragrafo conciso di analisi di come i materiali (pietra, legno bagnato, marmo, mattoni a vista) e il design definiscono lo spazio."
               }
+
+              Rispondi in lingua italiana. Mantieni la narrazione al tempo presente.
               """
               
               dati_json_str = json.dumps(risultati_validi, indent=2, ensure_ascii=False)
@@ -229,7 +439,7 @@ jobs:
               except Exception:
                   sintesi_json = {
                       "tipologia_luogo": "N/D",
-                      "identita_visiva_e_vibe": sintesi_globale_raw,
+                      "curatore_editoriale_vibe": sintesi_globale_raw,
                       "elementi_visivi_di_rilievo": [],
                       "analisi_materica_e_design": "N/D"
                   }
@@ -240,12 +450,12 @@ jobs:
               }
 
           async def worker(worker_id, proxy_port, coda_luoghi, dizionario_risultati_mappe, dizionario_risultati_ai):
-              # Scaglionamento iniziale per isolare totalmente la creazione del profilo Chrome di ogni worker
+              # Scaglionamento iniziale per isolare completamente l'avvio delle istanze di Chrome
               await asyncio.sleep(worker_id * 5)
               proxy_url = f"socks5://127.0.0.1:{proxy_port}"
               worker_dir = f"worker_{worker_id}_env"
               
-              # Copiamo il base-scraper nell'ambiente isolato del worker
+              # Creazione dell'ambiente isolato del worker copiandolo dal base-scraper
               if os.path.exists(worker_dir): shutil.rmtree(worker_dir)
               shutil.copytree("base-scraper", worker_dir)
               
@@ -253,223 +463,26 @@ jobs:
                   luogo = await coda_luoghi.get()
                   print(f"► [Worker {worker_id} | Proxy {proxy_port}] Prende in carico: '{luogo}'", flush=True)
                   
-                  # -- FASE 1: RISOLUZIONE MAPS (Eseguito come script indipendente nella directory del worker) --
-                  # Questo garantisce isolamento totale dei processi Chrome, dei cookies e della cache.
-                  
-                  resolve_script_content = f"""
-          import json
-          import urllib.parse
-          import time
-          import re
-          from seleniumbase import Driver
-
-          nome = {repr(luogo)}
-          proxy_ports = [40001, 40002, 40003]
-          current_proxy_idx = {proxy_ports.index(proxy_port)}
-
-          def pulisci_testo(testo):
-              if not testo:
-                  return 'N/D'
-              testo_pulito = re.sub(r'^[\s\W_]+', '', testo)
-              return testo_pulito.strip()
-
-          resolved_successfully = False
-          info_locale = {{}}
-
-          for attempt in range(len(proxy_ports)):
-              port = proxy_ports[(current_proxy_idx + attempt) % len(proxy_ports)]
-              proxy_url = f"socks5://127.0.0.1:{{port}}"
-              print(f"-> Tentativo di risoluzione con proxy su porta {{port}}...")
-              
-              # Profilo Chrome locale isolato per questo specifico worker
-              driver = Driver(uc=True, headless=True, proxy=proxy_url, user_data_dir="./chrome_profile")
-              
-              try:
-                  search_url = f'https://www.google.com/maps/search/{{urllib.parse.quote(nome)}}?hl=en'
-                  driver.get(search_url)
-                  driver.sleep(5)
-                  
-                  # Rilevamento e bypass del blocco CAPTCHA/Sorry
-                  if "sorry/index" in driver.current_url or "google.com/sorry" in driver.current_url:
-                      print(f"-> [WARNING] Rilevato CAPTCHA su porta {{port}}. Rotazione proxy...")
-                      driver.quit()
-                      time.sleep(3)
-                      continue
-                      
-                  try:
-                      consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
-                      consent_btn.click()
-                      driver.sleep(2)
-                  except:
-                      pass
-                      
-                  current_url = driver.current_url
-                  if '/maps/place/' not in current_url:
-                      try:
-                          first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
-                          resolved_url = first_result_el.get_attribute('href')
-                          if 'hl=' not in resolved_url:
-                              resolved_url += '&hl=en'
-                          else:
-                              resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=en', resolved_url)
-                          driver.get(resolved_url)
-                          driver.sleep(5)
-                      except:
-                          pass
-                          
-                  if "sorry/index" in driver.current_url or "google.com/sorry" in driver.current_url:
-                      print(f"-> [WARNING] Rilevato CAPTCHA post-ricerca su porta {{port}}. Rotazione proxy...")
-                      driver.quit()
-                      time.sleep(3)
-                      continue
-                      
-                  info_locale = {{
-                      'ricerca_originale': nome,
-                      'url_mappa': driver.current_url,
-                      'nome': 'N/D',
-                      'categoria': 'N/D',
-                      'indirizzo': 'N/D',
-                      'telefono': 'N/D',
-                      'sito_web': 'N/D',
-                      'media_stelle': 'N/D',
-                      'totale_recensioni': 'N/D',
-                      'coordinate': {{}},
-                      'popular_times_affluenza': [],
-                      'caratteristiche_servizi': []
-                  }}
-                  
-                  try:
-                      info_locale['nome'] = driver.find_element('css selector', 'h1').text
-                  except: pass
-                  
-                  try:
-                      info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
-                  except: pass
-
-                  try:
-                      raw_address = driver.find_element('css selector', '[data-item-id="address"]').text
-                      info_locale['indirizzo'] = pulisci_testo(raw_address)
-                  except: pass
-                  
-                  try:
-                      raw_phone = driver.find_element('css selector', '[data-item-id^="phone:tel"]').text
-                      info_locale['telefono'] = pulisci_testo(raw_phone)
-                  except: pass
-                  
-                  try:
-                      info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
-                  except: pass
-                  
-                  match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
-                  if match_at:
-                      info_locale['coordinate'] = {{
-                          'latitudine': float(match_at.group(1)),
-                          'longitudine': float(match_at.group(2))
-                      }}
-                  else:
-                      match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
-                      if match_data:
-                          info_locale['coordinate'] = {{
-                              'latitudine': float(match_data.group(1)),
-                              'longitudine': float(match_data.group(2))
-                          }}
-                          
-                  # Stelle e recensioni (hl=en)
-                  try:
-                      rating_text = driver.find_element('css selector', 'div.F7nice').text
-                      rating_text = rating_text.replace('\\xa0', ' ')
-                      if '(' in rating_text:
-                          parts = rating_text.split('(')
-                          info_locale['media_stelle'] = float(parts[0].strip())
-                          reviews_raw = parts[1].split(')')[0]
-                          only_numbers = re.sub(r'[^\\d]', '', reviews_raw)
-                          info_locale['totale_recensioni'] = int(only_numbers)
-                  except: pass
-
-                  # Fallback stella per hl=en se div.F7nice non risponde
-                  if info_locale['media_stelle'] == 'N/D':
-                      try:
-                          rating_el = driver.find_element('xpath', "//*[contains(@aria-label, 'stars')]")
-                          aria_lbl = rating_el.get_attribute('aria-label')
-                          match_stars = re.search(r'([0-9.]+)\\s*stars', aria_lbl)
-                          if match_stars:
-                              info_locale['media_stelle'] = float(match_stars.group(1))
-                      except: pass
-
-                  # Scorrimento progressivo della scheda
-                  try:
-                      pannello = None
-                      for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
-                          try:
-                              el = driver.find_element('css selector', selector)
-                              if el.is_displayed():
-                                  pannello = el
-                                  break
-                          except: pass
-                      if pannello:
-                          for pos in [300, 600, 900]:
-                              driver.execute_script(f"arguments[0].scrollTo(0, {{pos}});", pannello)
-                              driver.sleep(1.5)
-                  except: pass
-
-                  # Estrazione Grafici con Esclusione Menzioni Recensioni
-                  try:
-                      barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
-                      for b in barre:
-                          lbl = b.get_attribute('aria-label')
-                          if lbl and lbl not in info_locale['popular_times_affluenza']:
-                              if "mentioned" not in lbl.lower() and "reviews" not in lbl.lower() and "recensioni" not in lbl.lower():
-                                  info_locale['popular_times_affluenza'].append(lbl)
-                  except: pass
-
-                  # Estrazione Caratteristiche ed etichette (Pulsante About)
-                  try:
-                      info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
-                      driver.execute_script("arguments[0].scrollIntoView(true);", info_btn)
-                      driver.sleep(1)
-                      info_btn.click()
-                      driver.sleep(2)
-                      
-                      elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                      for s in elementi_servizi:
-                          if s.text and s.text not in info_locale['caratteristiche_servizi']:
-                              info_locale['caratteristiche_servizi'].append(s.text)
-                  except: pass
-                  
-                  resolved_successfully = True
-                  driver.quit()
-                  break
-                  
-              except Exception as e:
-                  print(f"-> Errore imprevisto sul proxy {{port}}: {{str(e)}}")
-                  driver.quit()
-                  time.sleep(3)
-
-          if resolved_successfully:
-              with open("maps_data.json", "w", encoding="utf-8") as f:
-                  json.dump(info_locale, f, indent=4, ensure_ascii=False)
-              print("-> Risoluzione completata.")
-          else:
-              print("-> Errore: Impossibile risolvere con i proxy disponibili.")
-              exit(1)
-          """
-                  
+                  # Scrittura fisica del file resolve_worker.py dentro l'ambiente isolato
+                  # Questo previene qualsiasi crossover di sessioni o file temporanei bloccati di Chrome
                   resolve_path = os.path.join(worker_dir, "resolve_worker.py")
                   with open(resolve_path, "w", encoding="utf-8") as f:
-                      f.write(resolve_script_content)
+                      f.write(resolve_script_template)
                       
-                  # Eseguiamo la risoluzione come processo OS isolato
+                  # Eseguiamo la risoluzione come processo OS separato
                   process_res = await asyncio.create_subprocess_exec(
                       "python", "resolve_worker.py",
+                      "--place", luogo,
+                      "--port", str(proxy_port),
                       cwd=worker_dir,
                       stdout=asyncio.subprocess.PIPE,
                       stderr=asyncio.subprocess.PIPE
                   )
-                  await process_res.communicate()
+                  stdout, stderr = await process_res.communicate()
                   
                   maps_data_file = os.path.join(worker_dir, "maps_data.json")
                   if not os.path.exists(maps_data_file):
-                      print(f"✖ [Worker {worker_id}] Risoluzione fallita totalmente per '{luogo}'. Salto.", flush=True)
+                      print(f"✖ [Worker {worker_id}] Risoluzione fallita per '{luogo}'. Errore: {stderr.decode().strip()}", flush=True)
                       coda_luoghi.task_done()
                       continue
                       
@@ -518,6 +531,7 @@ jobs:
               risultati_mappe = {}
               risultati_ai = {}
               
+              # Avviamo i 6 worker paralleli (tutti lavorano sin dalla Fase 1 in parallelo)
               tasks = []
               for cfg in WORKER_CONFIGS:
                   task = asyncio.create_task(
