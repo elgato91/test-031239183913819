@@ -50,26 +50,19 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
           done
           
-          echo "Attesa stabilizzazione tunnel WARP (Polling intelligente)..."
+          echo "Attesa stabilizzazione tunnel WARP..."
           for i in {1..6}; do
             PORT=$((40000 + i))
             for attempt in {1..15}; do
-              if curl -s -m 5 -x socks5h://127.0.0.1:$PORT https://api6.ipify.org > /dev/null; then
-                echo "WARP proxy $PORT stabile e pronto."
-                break
-              fi
+              if curl -s -m 5 -x socks5h://127.0.0.1:$PORT https://api6.ipify.org > /dev/null; then break; fi
               sleep 1
             done
           done
 
-      - name: Esecuzione STEP 1 (Multithreading Dinamico curl-cffi)
+      - name: Esecuzione STEP 1 (Multiprocessing Dinamico curl-cffi)
         run: |
           cat << 'EOF' > m2_step1_master.py
-          import time
-          import random
-          import json
-          import queue
-          import threading
+          import time, random, json, os, queue, multiprocessing
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
@@ -100,14 +93,6 @@ jobs:
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          # Coda centralizzata: i nodi pescano dinamicamente
-          q = queue.Queue()
-          for t in TARGETS: q.put(t)
-
-          results_list = []
-          failed_targets = []
-          lock = threading.Lock()
-
           def validate_html(html, url, status_code):
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
@@ -129,13 +114,31 @@ jobs:
                   if ind in low_html: return False, f"WAF/Captcha: {ind}"
               return True, ""
 
-          def worker_step1(node_id, port):
+          def verify_proxy(port):
+              session = requests.Session(impersonate="chrome120")
+              session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              for _ in range(4):
+                  try:
+                      r = session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if r.status_code == 200: return True
+                  except: pass
+                  time.sleep(2)
+              return False
+
+          def worker_step1(node_id, port, q):
+              if not verify_proxy(port):
+                  print(f"[NODO {node_id}] Proxy instabile. Salto il nodo.", flush=True)
+                  return
+
               session = requests.Session(impersonate="chrome120")
               session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               session.headers.update({
                   "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
               })
+
+              results = ""
+              failed = []
 
               while True:
                   try:
@@ -153,37 +156,52 @@ jobs:
                           text = soup.get_text(separator=' ', strip=True)[:5000]
                           if any(site in url for site in DIAGNOSTIC_SITES):
                               text = soup.get_text(separator=' ', strip=True)
-                          with lock:
-                              results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n")
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                       else:
                           print(f"[NODO {node_id}] -> Bloccato ({err_msg}). Passo allo Step 2.", flush=True)
-                          with lock: failed_targets.append(url)
+                          failed.append(url)
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore di rete. Passo allo Step 2.", flush=True)
-                      with lock: failed_targets.append(url)
+                      failed.append(url)
                   
                   time.sleep(random.uniform(1.0, 2.0))
-                  q.task_done()
 
-          # Avvio dei 6 Worker concorrenti
-          threads = []
-          for i in range(1, 7):
-              t = threading.Thread(target=worker_step1, args=(i, 40000 + i))
-              t.start()
-              threads.append(t)
+              with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
+                  f.write(results)
+              with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
+                  json.dump(failed, f)
 
-          for t in threads: t.join()
+          if __name__ == '__main__':
+              q = multiprocessing.Queue()
+              for t in TARGETS: q.put(t)
 
-          with open("output_step1.txt", "w", encoding="utf-8") as f:
-              f.write(f"\n{'#'*60}\nREPORT STEP 1 (Veloce curl-cffi)\n{'#'*60}\n")
-              f.write("".join(results_list))
+              # Usa processi isolati a livello OS per bypassare il GIL e massimizzare la CPU
+              processes = []
+              for i in range(1, 7):
+                  p = multiprocessing.Process(target=worker_step1, args=(i, 40000 + i, q))
+                  p.start()
+                  processes.append(p)
 
-          # Esportazione target falliti per lo Step 2
-          with open("failed_targets.json", "w", encoding="utf-8") as f:
-              json.dump(list(set(failed_targets)), f)
+              for p in processes: p.join()
 
-          print("Step 1 Completato in modo dinamico e sincronizzato.")
+              # Assembla i file dei target falliti (se ci sono)
+              all_failed = []
+              for i in range(1, 7):
+                  if os.path.exists(f"failed_node_{i}.json"):
+                      with open(f"failed_node_{i}.json", "r") as f:
+                          all_failed.extend(json.load(f))
+              
+              with open("failed_targets.json", "w", encoding="utf-8") as f:
+                  json.dump(list(set(all_failed)), f)
+
+              # Assembla i testi
+              with open("output_step1.txt", "w", encoding="utf-8") as outfile:
+                  outfile.write(f"\n{'#'*60}\nREPORT STEP 1 (Veloce curl-cffi)\n{'#'*60}\n")
+                  for i in range(1, 7):
+                      if os.path.exists(f"output_node_{i}_step1.txt"):
+                          with open(f"output_node_{i}_step1.txt", "r") as f:
+                              outfile.write(f.read())
           EOF
           python -u m2_step1_master.py
 
@@ -195,20 +213,16 @@ jobs:
           echo "Attesa nuova stabilizzazione WARP..."
           for i in {1..6}; do
             PORT=$((40000 + i))
-            for attempt in {1..10}; do
+            for attempt in {1..15}; do
               if curl -s -m 5 -x socks5h://127.0.0.1:$PORT https://api6.ipify.org > /dev/null; then break; fi
               sleep 1
             done
           done
 
-      - name: Esecuzione STEP 2 (Asyncio Dinamico CloakBrowser su Target Falliti)
+      - name: Esecuzione STEP 2 (Multiprocessing Isolato CloakBrowser)
         run: |
           cat << 'EOF' > m2_step2_master.py
-          import asyncio
-          import time
-          import random
-          import os
-          import json
+          import asyncio, time, random, os, json, queue, sys, multiprocessing
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
@@ -222,9 +236,7 @@ jobs:
               except: pass
               return default
 
-          async def worker_step2(node_id, port, q, results_list):
-              if q.empty(): return  # Non istanziare alcun browser se la coda è già vuota!
-
+          async def async_worker_step2(node_id, port, q):
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
@@ -237,14 +249,15 @@ jobs:
 
               context = None
               page = None
+              results = ""
 
               while True:
                   try:
                       url = q.get_nowait()
-                  except asyncio.QueueEmpty:
+                  except queue.Empty:
                       break
 
-                  # Warmup Lazily Evaluated: Il browser parte solo se c'è almeno 1 URL
+                  # Warmup Lazily Evaluated
                   if context is None:
                       print(f"[NODO {node_id}] Avvio Browser Cloak (Warmup)...", flush=True)
                       try:
@@ -261,14 +274,12 @@ jobs:
                           await asyncio.sleep(2)
                       except Exception as e:
                           print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
-                          q.task_done()
                           break
 
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -323,50 +334,56 @@ jobs:
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
                       if len(text) > 150 and not is_blocked:
-                          results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n")
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                       else:
-                          results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n")
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                      results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n")
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
                   
                   await asyncio.sleep(random.uniform(4.0, 7.0))
-                  q.task_done()
 
               if context:
                   try: await context.close()
                   except: pass
-
-          async def main():
-              if not os.path.exists("failed_targets.json"): return
-              with open("failed_targets.json", "r") as f:
-                  targets = json.load(f)
               
-              if not targets: return
+              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                  f.write(results)
 
-              q = asyncio.Queue()
-              for t in targets: q.put_nowait(t)
-
-              results_list = []
-              
-              # Lancia tutti e 6 i worker (Massima Potenza!)
-              # I worker "estrarranno" il lavoro dalla coda asincrona man mano che si liberano.
-              tasks = []
-              for i in range(1, 7):
-                  port = 40000 + i
-                  tasks.append(worker_step2(i, port, q, results_list))
-
-              await asyncio.gather(*tasks)
-
-              with open("output_step2.txt", "w", encoding="utf-8") as f:
-                  f.write(f"\n{'#'*60}\nREPORT STEP 2 (Fallback CloakBrowser)\n{'#'*60}\n")
-                  f.write("".join(results_list))
+          def run_worker_step2(node_id, port, q):
+              # CRUCIALE: Start Scaglionato (Ripristinato)
+              # Evita spike di CPU simultanei che causavano il fallimento di Playwright/Cloudflare
+              time.sleep(1.5 * (node_id - 1))
+              # Ogni processo ha il suo Event Loop isolato
+              asyncio.run(async_worker_step2(node_id, port, q))
 
           if __name__ == "__main__":
-              asyncio.run(main())
+              if not os.path.exists("failed_targets.json"): sys.exit(0)
+              with open("failed_targets.json", "r") as f:
+                  targets = json.load(f)
+              if not targets: sys.exit(0)
+
+              q = multiprocessing.Queue()
+              for t in targets: q.put(t)
+
+              # Crea 6 processi OS indipendenti, restituendo la perfezione del codice originale
+              processes = []
+              for i in range(1, 7):
+                  p = multiprocessing.Process(target=run_worker_step2, args=(i, 40000 + i, q))
+                  p.start()
+                  processes.append(p)
+
+              for p in processes: p.join()
+
+              with open("output_step2.txt", "w", encoding="utf-8") as outfile:
+                  outfile.write(f"\n{'#'*60}\nREPORT STEP 2 (Fallback CloakBrowser)\n{'#'*60}\n")
+                  for i in range(1, 7):
+                      if os.path.exists(f"output_node_{i}_step2.txt"):
+                          with open(f"output_node_{i}_step2.txt", "r") as f:
+                              outfile.write(f.read())
           EOF
           python -u m2_step2_master.py
 
