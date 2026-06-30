@@ -1,4 +1,59 @@
-import asyncio
+name: Pipeline Parallela - Scraping & AI Desk Research
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  run_full_pipeline:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Setup 3 WARProxy Docker Container (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+          
+          # Avvia 3 proxy su 3 porte diverse
+          for PORT in 40001 40002 40003; do
+            docker run --name warproxy-$PORT --network host \
+              -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -d ghcr.io/kingcc/warproxy:latest
+          done
+          echo "Attesa inizializzazione proxy..."
+          sleep 10
+
+      - name: Verifica IP dei 3 Proxy
+        run: |
+          for PORT in 40001 40002 40003; do
+            echo "Verifica proxy su porta $PORT..."
+            IP=""
+            for i in {1..5}; do
+              IP=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org) && break || sleep 3
+            done
+            if [ -z "$IP" ]; then
+              echo "Errore: Proxy su porta $PORT non risponde."
+              exit 1
+            fi
+            echo "Proxy $PORT pronto. IP: $IP"
+          done
+
+      - name: Setup Ambiente e Dipendenze
+        run: |
+          git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git base-scraper
+          cd base-scraper
+          pip install -r requirements.txt
+          pip install pyyaml seleniumbase google-genai requests aiohttp
+          seleniumbase install chromedriver
+
+      - name: Avvio Xvfb (Display virtuale per Selenium)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Scrittura Orchestratore Parallelo
+        shell: bash
+        run: |
+          cat << 'EOF' > orchestrator.py
+          import asyncio
           import json
           import yaml
           import os
@@ -6,6 +61,7 @@ import asyncio
           import re
           import urllib.parse
           import glob
+          import time
           from seleniumbase import Driver
           from google import genai
           from google.genai import types
@@ -34,6 +90,7 @@ import asyncio
               return re.sub(r'^[\s\W_]+', '', testo).strip()
 
           def genera_nome_file(luogo):
+              """Genera un nome sicuro per isolare i file delle recensioni ed evitare che si mescolino"""
               return re.sub(r'[^a-zA-Z0-9]', '_', luogo.lower())
 
           async def call_with_retry(func, *args, max_retries=5):
@@ -44,7 +101,7 @@ import asyncio
                       err_str = str(e).lower()
                       if "quota" in err_str or "429" in err_str or "1011" in err_str:
                           wait_time = (2 ** attempt) * 15
-                          print(f"   [Gemini] Quota limite. Attesa {wait_time}s...", flush=True)
+                          print(f"   [Gemini] Quota API raggiunta. Attesa {wait_time}s...", flush=True)
                           await asyncio.sleep(wait_time)
                       else:
                           raise e
@@ -65,55 +122,93 @@ import asyncio
                       driver.get(search_url)
                       driver.sleep(5)
                       
-                      # Bypass Cookie
                       try:
                           consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
                           consent_btn.click()
                           driver.sleep(2)
                       except: pass
                       
-                      # GESTIONE ROBUSTA RISULTATI SBAGLIATI / LISTE
-                      # Se non siamo in una scheda specifica o nei directions, cerca la prima card laterale
+                      # --- LOGICA ORIGINALE FORNITA DALL'UTENTE ---
                       current_url = driver.current_url
-                      if '/maps/place/' not in current_url and '/maps/dir/' not in current_url:
+                      if '/maps/place/' not in current_url:
                           try:
-                              # a.hfpxzc è la classe standard delle card dei risultati nella barra laterale di Maps
-                              first_result = driver.find_element('css selector', 'a.hfpxzc')
-                              resolved_url = first_result.get_attribute('href')
-                              resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=en', resolved_url) if 'hl=' in resolved_url else resolved_url + '&hl=en'
-                              driver.get(resolved_url)
-                              driver.sleep(4)
-                          except Exception as e:
-                              print(f"Nessuna card risultato trovata per {luogo}.")
+                              first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
+                              resolved_url = first_result_el.get_attribute('href')
                               
+                              if 'hl=' not in resolved_url:
+                                  resolved_url += '&hl=en'
+                              else:
+                                  resolved_url = re.sub(r'hl=[a-z]{2}', 'hl=en', resolved_url)
+                                  
+                              driver.get(resolved_url)
+                              driver.sleep(5)
+                          except Exception:
+                              pass
+                      # ---------------------------------------------
+                      
                       info_locale['url_mappa'] = driver.current_url
                       
-                      # Estrazioni
-                      try: 
-                          # Forza l'attesa del caricamento del titolo della scheda (h1.DUwDvf)
-                          titolo_el = driver.find_element('css selector', 'h1.DUwDvf, h1')
-                          info_locale['nome'] = titolo_el.text
+                      try: info_locale['nome'] = driver.find_element('css selector', 'h1').text
                       except: pass
-                      
                       try: info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
                       except: pass
                       try: info_locale['indirizzo'] = pulisci_testo(driver.find_element('css selector', '[data-item-id="address"]').text)
                       except: pass
+                      try: info_locale['telefono'] = pulisci_testo(driver.find_element('css selector', '[data-item-id^="phone:tel"]').text)
+                      except: pass
                       try: info_locale['sito_web'] = driver.find_element('css selector', '[data-item-id="authority"]').get_attribute('href')
                       except: pass
 
-                      # Coordinate
                       match_at = re.search(r'@([-0-9.]+),([-0-9.]+)', driver.current_url)
                       if match_at:
                           info_locale['coordinate'] = {'latitudine': float(match_at.group(1)), 'longitudine': float(match_at.group(2))}
+                      else:
+                          match_data = re.search(r'!3d([-0-9.]+)!4d([-0-9.]+)', driver.current_url)
+                          if match_data:
+                              info_locale['coordinate'] = {'latitudine': float(match_data.group(1)), 'longitudine': float(match_data.group(2))}
                           
-                      # Stelle e Recensioni
                       try:
-                          rating_text = driver.find_element('css selector', 'div.F7nice, span[aria-label*="stars"]').text.replace('\xa0', ' ')
+                          rating_text = driver.find_element('css selector', 'div.F7nice').text.replace('\xa0', ' ')
                           if '(' in rating_text:
                               parts = rating_text.split('(')
                               info_locale['media_stelle'] = float(parts[0].strip())
-                              info_locale['totale_recensioni'] = int(re.sub(r'[^\d]', '', parts[1]))
+                              info_locale['totale_recensioni'] = int(re.sub(r'[^\d]', '', parts[1].split(')')[0]))
+                      except: pass
+
+                      try:
+                          pannello = None
+                          for selector in ['div[role="main"]', 'div.m67q6b', 'div.bJWbme', 'div.ecsc6b']:
+                              try:
+                                  el = driver.find_element('css selector', selector)
+                                  if el.is_displayed():
+                                      pannello = el
+                                      break
+                              except: pass
+                          if pannello:
+                              for pos in [300, 600, 900]:
+                                  driver.execute_script(f"arguments[0].scrollTo(0, {pos});", pannello)
+                                  driver.sleep(1.5)
+                      except: pass
+
+                      try:
+                          barre = driver.find_elements('xpath', "//*[contains(@aria-label, 'busy') or contains(@aria-label, 'popular') or contains(@aria-label, 'historically')]")
+                          for b in barre:
+                              lbl = b.get_attribute('aria-label')
+                              if lbl and lbl not in info_locale['popular_times_affluenza']:
+                                  info_locale['popular_times_affluenza'].append(lbl)
+                      except: pass
+
+                      try:
+                          url_scheda_corrente = driver.current_url
+                          info_btn = driver.find_element('css selector', 'button[data-tooltip="About"], button[aria-label*="About"]')
+                          info_btn.click()
+                          driver.sleep(2)
+                          
+                          elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
+                          for s in elementi_servizi:
+                              if s.text and s.text not in info_locale['caratteristiche_servizi']:
+                                  info_locale['caratteristiche_servizi'].append(s.text)
+                          
                       except: pass
 
                   finally:
@@ -124,7 +219,6 @@ import asyncio
               return await loop.run_in_executor(None, run_selenium)
 
           async def analizza_immagine_gemini(client, config_live, url_immagine):
-              """Estrae FATTI, TESTI dai cartelli, e CONDIZIONI REALI dalle foto."""
               async with api_semaphore:
                   try:
                       url_ottimizzato = re.sub(r'=w\d+-h\d+', '=w600-h600', url_immagine)
@@ -132,13 +226,11 @@ import asyncio
                       img_bytes = await loop.run_in_executor(None, lambda: requests.get(url_ottimizzato, timeout=10).content if requests.get(url_ottimizzato).status_code == 200 else None)
                       if not img_bytes: return None
 
-                      # PROMPT INVESTIGATIVO / DESK RESEARCH
-                      prompt = """
-                      Sei un assistente ricercatore per una guida di viaggi. Guarda questa foto scattata da un utente su Google Maps ed estrai FATTI CONCRETI in modo telegrafico.
-                      1. TESTI LEGGIbili: Trascrivi eventuali orari, prezzi, menù, numeri di telefono o info storiche scritte su cartelli, porte o scontrini visibili nella foto.
-                      2. CONCRETO: Descrivi come è fatto realmente il posto. Com'è il sentiero (sterrato, ripido)? Com'è il cibo (in che piatto è servito, quanto è abbondante)? Com'è la stanza (letti, bagni)?
-                      Non usare MAI aggettivi emozionali. Sii un reporter freddo e oggettivo.
-                      """
+                      # PROMPT REPORTING FATTUALE (Niente fronzoli editoriali)
+                      prompt = """Sei un data-entry e ricercatore giornalistico. Guarda questa foto scattata da un avventore su Google Maps e riporta SOLO fatti crudi e concreti.
+                      1. TRASCRIVI TESTI: Se vedi menù, scontrini, cartelli con orari, prezzi, avvisi o info storiche, TRASCRIVI parola per parola i dati leggibili.
+                      2. CONDIZIONI REALI: Descrivi materialmente il posto. È sterrato o asfaltato? Il cibo è in piatti di plastica o ceramica? I bagni sono vecchi o moderni? Le porzioni sono grandi? Quanta gente c'è?
+                      Sii analitico e telegrafico, come se stessi prendendo appunti pratici per una guida turistica sul campo."""
                       
                       accumulated_text = ""
                       async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
@@ -151,7 +243,7 @@ import asyncio
                                       accumulated_text += response.server_content.output_transcription.text
                               if response.server_content and response.server_content.turn_complete: break
                       
-                      return {"url": url_immagine, "appunti_di_ricerca": accumulated_text.strip()}
+                      return {"url": url_immagine, "appunti_grezzi": accumulated_text.strip()}
                   except: return None
 
           async def fase3_ai_analisi(luogo, reviews_file):
@@ -160,7 +252,7 @@ import asyncio
               client = genai.Client(api_key=api_key)
               config_live = {"response_modalities": ["AUDIO"], "output_audio_transcription": {}}
               
-              if not os.path.exists(reviews_file): return {"errore": "Nessun dato di scraping trovato."}
+              if not os.path.exists(reviews_file): return {"errore": "Nessun dato di scraping."}
               with open(reviews_file, "r", encoding="utf-8") as f:
                   reviews = json.load(f)
                   
@@ -174,18 +266,17 @@ import asyncio
               
               if not risultati_validi: return {"avviso": "Nessuna immagine analizzata."}
               
-              # PROMPT SINTESI REDAZIONALE
+              # PROMPT SINTESI REDAZIONALE DESK RESEARCH
               prompt_fase2 = """
-              Sei un giornalista di viaggio che sta facendo 'desk research' guardando le foto scattate dagli avventori di un luogo.
-              Il tuo obiettivo è compilare un report di appunti ultra-dettagliati e fattuali, che permetterà a un altro redattore di descrivere il posto in modo iper-realistico, come se ci fosse stato di persona.
-              Estrai e organizza i dati da tutti gli appunti visivi forniti.
+              Sei un assistente alla redazione giornalistica. Ti fornisco gli appunti grezzi presi osservando decine di foto caricate dagli avventori di un luogo.
+              Il tuo compito è aggregare questi frammenti per fornire al giornalista un report chiaro, pratico e iper-realistico di "come è davvero il posto".
               
-              Restituisci ESCLUSIVAMENTE un JSON puro (dentro un blocco ```json ... ```) con questa struttura:
+              Restituisci l'output ESCLUSIVAMENTE in formato JSON dentro un blocco ```json ... ``` con la seguente struttura:
               {
-                  "dettagli_pratici_estratti_dai_cartelli": "Elenca orari, prezzi, avvertenze, menu, ingredienti, biglietti o numeri di telefono trascritti dai cartelli o scontrini fotografati.",
-                  "descrizione_fisica_realistica": "Descrizione iper-concreta di come si presenta il luogo. Com'è il sentiero d'accesso? Com'è l'arredamento interno? Che aspetto hanno davvero le camere/i tavoli/le vasche?",
-                  "cibo_o_attrezzature": "Cosa si vede materialmente consumare o usare? Es: 'Pasta servita in scodelle di terracotta', 'Ci sono solo 3 docce vecchie', 'Caffè servito in bicchieri di vetro'.",
-                  "atmosfera_e_condizioni_reali": "Il posto è affollato? Le file arrivano in strada? Sembra pulito o trascurato? C'è puzza di zolfo o vapore (dedotto dal contesto)?"
+                  "info_testuali_e_prezzi_recuperati": "Elenca tutti i dati testuali trascritti: orari, prezzi, piatti del menù, avvisi da cartelli o scontrini. Sii preciso.",
+                  "descrizione_fisica_nuda_e_cruda": "Descrizione fattuale. Es: i tavoli sono di legno grezzo, il sentiero è franoso, ci sono tubi a vista, le posate sono di metallo.",
+                  "osservazioni_su_cibo_e_servizio": "Cosa si consuma e come viene servito (porzioni, tipi di bicchieri, condimenti evidenti, ecc).",
+                  "contesto_ambientale": "È affollato? Le persone fanno la fila fuori? Sembra pulito o trasandato?"
               }
               """
               
@@ -206,15 +297,14 @@ import asyncio
               sintesi_globale = await call_with_retry(esegui_sintesi)
               
               match = re.search(r'```json\s*(.*?)\s*```', sintesi_globale, re.DOTALL)
-              try: 
-                  sintesi_json = json.loads(match.group(1)) if match else json.loads(sintesi_globale)
-              except: 
-                  sintesi_json = {"appunti_grezzi": sintesi_globale}
+              try: sintesi_json = json.loads(match.group(1)) if match else json.loads(sintesi_globale)
+              except: sintesi_json = {"dati_grezzi": sintesi_globale}
                   
               return {"report_desk_research": sintesi_json}
 
           async def worker(worker_id, proxy_port, coda_luoghi, diz_mappe, diz_ai):
-              await asyncio.sleep(worker_id * 3)
+              # Sfalsiamo l'avvio per non intasare l'IO
+              await asyncio.sleep(worker_id * 4)
               proxy_url = f"socks5://127.0.0.1:{proxy_port}"
               worker_dir = f"worker_{worker_id}_env"
               
@@ -223,20 +313,22 @@ import asyncio
               
               while not coda_luoghi.empty():
                   luogo = await coda_luoghi.get()
-                  print(f"► [W-{worker_id}] Inizio: '{luogo}'", flush=True)
+                  print(f"► [Worker {worker_id}] Prende in carico: '{luogo}'", flush=True)
+                  
+                  # Crea un identificativo file univoco (es. "da_enzo_al_29_roma")
                   safe_luogo = genera_nome_file(luogo)
                   
-                  # FASE 1: MAPS (con bypass dei risultati sbagliati)
+                  # --- FASE 1: RISOLUZIONE MAPS ---
                   info_locale = await fase1_risolvi_mappa_worker(luogo, proxy_url)
                   
                   if not info_locale or info_locale.get('url_mappa') == 'N/D':
-                      print(f"✖ [W-{worker_id}] Errore o URL non trovato per '{luogo}'.", flush=True)
+                      print(f"✖ [Worker {worker_id}] Fallita ricerca per '{luogo}'. Salto.", flush=True)
                       coda_luoghi.task_done()
                       continue
                       
                   diz_mappe[luogo] = info_locale
                   
-                  # FASE 2: SCRAPING (Isolato via file)
+                  # --- FASE 2: SCRAPING ISOLATO ---
                   reviews_filename = f"reviews_{safe_luogo}.json"
                   db_filename = f"db_{safe_luogo}.sqlite"
                   
@@ -256,16 +348,16 @@ import asyncio
                   )
                   await process.communicate()
                   
-                  # FASE 3: AI Desk Research
+                  # --- FASE 3: AI DESK RESEARCH ---
                   file_recensioni_path = os.path.join(worker_dir, reviews_filename)
                   risultati_ai = await fase3_ai_analisi(luogo, file_recensioni_path)
                   diz_ai[luogo] = risultati_ai
                   
-                  print(f"✔ [W-{worker_id}] Finito: '{luogo}'", flush=True)
+                  print(f"✔ [Worker {worker_id}] Completato: '{luogo}'", flush=True)
                   coda_luoghi.task_done()
 
           async def main():
-              print("=== AVVIO PIPELINE ===", flush=True)
+              print("=== AVVIO ORCHESTRATORE ===", flush=True)
               coda = asyncio.Queue()
               for l in LUOGHI_DA_ANALIZZARE: coda.put_nowait(l)
                   
@@ -275,20 +367,23 @@ import asyncio
               tasks = [asyncio.create_task(worker(cfg["id"], cfg["proxy_port"], coda, risultati_mappe, risultati_ai)) for cfg in WORKER_CONFIGS]
               await coda.join()
               
+              # Esportazione
               with open("dati_completi_mappe.json", "w", encoding="utf-8") as f:
                   json.dump(list(risultati_mappe.values()), f, indent=4, ensure_ascii=False)
                   
-              with open("guida_viaggio_visiva.json", "w", encoding="utf-8") as f:
+              with open("report_fotografico_desk_research.json", "w", encoding="utf-8") as f:
                   json.dump(risultati_ai, f, indent=4, ensure_ascii=False)
                   
+              # Estrazione intelligente e univoca delle recensioni salvate da ogni worker
               all_reviews = []
               for i in range(1, 7):
                   worker_dir = f"worker_{i}_env"
+                  # Prende tutti i file JSON che iniziano con "reviews_" in quella cartella
                   for rev_file in glob.glob(os.path.join(worker_dir, "reviews_*.json")):
                       try:
                           with open(rev_file, "r", encoding="utf-8") as f:
                               all_reviews.extend(json.load(f))
-                      except: pass
+                      except Exception: pass
                       
               with open("google_reviews.json", "w", encoding="utf-8") as f:
                   json.dump(all_reviews, f, indent=4, ensure_ascii=False)
@@ -297,3 +392,19 @@ import asyncio
 
           if __name__ == "__main__":
               asyncio.run(main())
+          EOF
+
+      - name: Esecuzione Pipeline Concorrente Orchestrata
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python orchestrator.py
+
+      - name: Esporta Risultati AI Finale
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Desk_Research_e_Scraping
+          path: |
+            dati_completi_mappe.json
+            google_reviews.json
+            report_fotografico_desk_research.json
