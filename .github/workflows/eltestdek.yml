@@ -282,7 +282,7 @@ jobs:
               
               if not risultati_validi: return {"avviso": "Nessuna immagine analizzata."}
               
-              # PROMPT SINTESI REDAZIONALE DESK RESEARCH (API STANDARD)
+              # PROMPT SINTESI REDAZIONALE DESK RESEARCH (LIVE API)
               prompt_fase2 = """
               Role: Lead Editor and Travel Document Compiler.
               Task: Synthesize the provided raw visual extraction notes from multiple photographs into a structured travel report. Filter out any transient, non-permanent, or subjective details.
@@ -300,17 +300,25 @@ jobs:
               payload = json.dumps(risultati_validi, ensure_ascii=False)
               combined = f"RAW VISUAL EXTRACTS:\n{payload}\n\nINSTRUCTIONS:\n{prompt_fase2}"
               
+              # UTILIZZO ESCLUSIVO DELLA API LIVE PER LA SINTESI FINALE
               async def esegui_sintesi():
-                  response = await client.aio.models.generate_content(
-                      model='gemini-2.5-flash',
-                      contents=combined,
-                      config=types.GenerateContentConfig(
-                          response_mime_type="application/json"
-                      )
-                  )
-                  return json.loads(response.text)
+                  sintesi = ""
+                  async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
+                      await session.send_realtime_input(text=combined)
+                      async for response in session.receive():
+                          if response.server_content and response.server_content.output_transcription:
+                              if response.server_content.output_transcription.text:
+                                  sintesi += response.server_content.output_transcription.text
+                          if response.server_content and response.server_content.turn_complete: break
+                  return sintesi
 
-              sintesi_json = await call_with_retry(esegui_sintesi)
+              sintesi_globale = await call_with_retry(esegui_sintesi)
+              
+              match = re.search(r'```json\s*(.*?)\s*```', sintesi_globale, re.DOTALL)
+              try: 
+                  sintesi_json = json.loads(match.group(1)) if match else json.loads(sintesi_globale)
+              except Exception: 
+                  sintesi_json = {"appunti_grezzi": sintesi_globale}
                   
               return {
                   "report_desk_research": sintesi_json,
