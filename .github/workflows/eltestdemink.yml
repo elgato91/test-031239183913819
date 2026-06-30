@@ -207,7 +207,7 @@ jobs:
               soup = BeautifulSoup(html, "html.parser")
               for a in soup.find_all("a", href=True):
                   href = a["href"]
-                  if href.startswith("http") and palm := not any(d in href for d in ["startpage.com", "ixquick.com"]):
+                  if href.startswith("http") and not any(d in href for d in ["startpage.com", "ixquick.com"]):
                       links.append(href)
               return links
 
