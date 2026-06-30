@@ -64,41 +64,66 @@ jobs:
           import os
           import json
           import random
+          import time
+          import requests
           from cloakbrowser import launch_persistent_context_async
 
+          def wait_for_proxy(port, max_retries=10, delay=5):
+              proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              for i in range(max_retries):
+                  try:
+                      resp = requests.get("https://api6.ipify.org?format=json", proxies=proxies, timeout=6)
+                      if resp.status_code == 200:
+                          print(f"[HARVEST] Proxy {port} attivo! IP: {resp.json().get('ip')}", flush=True)
+                          return True
+                  except Exception:
+                      pass
+                  print(f"[HARVEST] In attesa che il proxy {port} sia pronto (tentativo {i+1}/{max_retries})...", flush=True)
+                  time.sleep(delay)
+              return False
+
           async def harvest_for_port(port):
+              if not wait_for_proxy(port):
+                  print(f"[HARVEST] Salto porta {port} per inattività del proxy.", flush=True)
+                  return
+
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/harvest_{port}")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
+              # Configurazione proxy passata direttamente a Chromium per forzare DNS sul server proxy
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
+                  f"--proxy-server=socks5://127.0.0.1:{port}",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
               
-              print(f"[HARVEST] Avvio CloakBrowser su porta {port} per raccogliere i cookie di sessione...", flush=True)
+              print(f"[HARVEST] Avvio CloakBrowser su porta {port}...", flush=True)
               try:
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
-                      proxy=f"socks5://127.0.0.1:{port}",
+                      geoip=True,
                       args=base_args
                   )
                   page = await context.new_page()
                   
                   # Visita Google per stabilire la sessione ed ottenere i cookie fiduciari
                   try:
-                      await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
-                      await asyncio.sleep(2)
+                      await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
+                      await asyncio.sleep(3)
                   except Exception as e:
                       print(f"[HARVEST] Errore di connessione a Google su porta {port}: {e}", flush=True)
                       
                   # Visita Bing per stabilire la sessione ed ottenere i cookie fiduciari
                   try:
-                      await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=20000)
-                      await asyncio.sleep(2)
+                      await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=25000)
+                      await asyncio.sleep(3)
                   except Exception as e:
                       print(f"[HARVEST] Errore di connessione a Bing su porta {port}: {e}", flush=True)
                       
@@ -106,15 +131,15 @@ jobs:
                   cookie_file = f"results_temp/cookies_{port}.json"
                   with open(cookie_file, "w") as f:
                       json.dump(cookies, f)
-                  print(f"[HARVEST] Sessione stabilita e salvata per porta {port} ({len(cookies)} cookie).", flush=True)
+                  print(f"[HARVEST] Sessione salvata per porta {port} ({len(cookies)} cookie).", flush=True)
                   
                   await context.close()
               except Exception as e:
-                  print(f"[HARVEST] Errore critico di raccolta su porta {port}: {e}", flush=True)
+                  print(f"[HARVEST] Errore critico su porta {port}: {e}", flush=True)
 
           async def main():
               os.makedirs("results_temp", exist_ok=True)
-              # Eseguiamo in sequenza per non sovraccaricare la CPU
+              # Eseguiamo in sequenza per non saturare la CPU
               for port in [40001, 40002, 40003, 40004, 40005, 40006]:
                   await harvest_for_port(port)
 
@@ -328,7 +353,21 @@ jobs:
                           links.append(href)
               return links
 
-          def fetch_startpage(session: requests.Session, query: str, browser: str) -> list[str] | None:
+          def extract_links(html, url):
+              links = []
+              if "google.com" in url: links = extract_google(html)
+              elif "bing.com" in url: links = extract_bing(html)
+              elif "duckduckgo.com" in url: links = extract_duckduckgo(html)
+              elif "startpage.com" in url: links = extract_startpage(html)
+              elif "yahoo.com" in url: links = extract_yahoo(html)
+              
+              cleaned_links = []
+              for l in links:
+                  cleaned = clean_url(l)
+                  if cleaned: cleaned_links.append(cleaned)
+              return cleaned_links
+
+          def fetch_startpage(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
               with STARTPAGE_LOCK:
                   try:
@@ -362,7 +401,7 @@ jobs:
                       return links if links else None
                   except Exception: return None
 
-          def fetch_duckduckgo(session: requests.Session, query: str, browser: str) -> list[str] | None:
+          def fetch_duckduckgo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
               headers.update({
                   "referer": "https://duckduckgo.com/", "origin": "https://duckduckgo.com",
@@ -387,7 +426,6 @@ jobs:
           def fetch_google(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               load_cookies_for_port(session, port)
               headers = get_minimal_headers(browser)
-              # Richiediamo fino a 50 risultati organici reali
               url = f"https://www.google.com/search?q={quote(query)}&gbv=1&num=50"
               try:
                   response = session.get(url, headers=headers, timeout=10.0)
@@ -400,7 +438,6 @@ jobs:
           def fetch_bing(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               load_cookies_for_port(session, port)
               headers = get_minimal_headers(browser)
-              # Richiediamo fino a 50 risultati organici reali
               url = f"https://www.bing.com/search?q={quote(query)}&count=50"
               try:
                   response = session.get(url, headers=headers, timeout=10.0)
@@ -410,9 +447,8 @@ jobs:
                   return links if links else None
               except Exception: return None
 
-          def fetch_yahoo(session: requests.Session, query: str, browser: str) -> list[str] | None:
+          def fetch_yahoo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
-              # Richiediamo fino a 50 risultati organici reali
               url = f"https://search.yahoo.com/search?p={quote(query)}&n=50"
               try:
                   response = session.get(url, headers=headers, timeout=10.0)
@@ -440,11 +476,11 @@ jobs:
 
                   links = None
                   try:
-                      if engine == "google": links = fetch_google(session, query, browser)
+                      if engine == "google": links = fetch_google(session, query, browser, port)
                       elif engine == "bing": links = fetch_bing(session, query, browser, port)
-                      elif engine == "duckduckgo": links = fetch_duckduckgo(session, query, browser)
-                      elif engine == "startpage": links = fetch_startpage(session, query, browser)
-                      elif engine == "yahoo": links = fetch_yahoo(session, query, browser)
+                      elif engine == "duckduckgo": links = fetch_duckduckgo(session, query, browser, port)
+                      elif engine == "startpage": links = fetch_startpage(session, query, browser, port)
+                      elif engine == "yahoo": links = fetch_yahoo(session, query, browser, port)
                   except Exception:
                       pass
 
