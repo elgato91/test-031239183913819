@@ -38,6 +38,7 @@ jobs:
 
       - name: Setup Ambiente e Dipendenze
         run: |
+          # Cloniamo lo scraper in una cartella "base" che poi i worker copieranno
           git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git base-scraper
           cd base-scraper
           pip install -r requirements.txt
@@ -216,7 +217,7 @@ jobs:
                           driver.sleep(2)
                           
                           elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                          for s inBird in elementi_servizi:
+                          for s in elementi_servizi:
                               if s.text and s.text not in info_locale['caratteristiche_servizi']:
                                   info_locale['caratteristiche_servizi'].append(s.text)
                       except: pass
