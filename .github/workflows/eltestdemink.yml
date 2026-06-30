@@ -54,7 +54,7 @@ jobs:
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
 
-      - name: Creazione Libreria Gestione Coda Condivisa (Self-Healing)
+      - name: Creazione Libreria Gestione Coda Condivisa (Self-Healing & Speed-Optimized)
         run: |
           cat << 'EOF' > shared_queue_lib.py
           import fcntl
@@ -97,6 +97,13 @@ jobs:
                       json.dump(data, f, indent=2)
                   fcntl.flock(self.lk, fcntl.LOCK_UN)
                   self.lk.close()
+
+              def is_empty(self):
+                  data = self._lock_and_load()
+                  targets = data.get("targets", [])
+                  fcntl.flock(self.lk, fcntl.LOCK_UN)
+                  self.lk.close()
+                  return len(targets) == 0
 
               def release_active(self, node_id):
                   data = self._lock_and_load()
@@ -218,7 +225,7 @@ jobs:
           EOF
           python -u m2_step1_setup.py
 
-      - name: Creazione Script Python - STEP 1 (curl-cffi con latenza ridotta)
+      - name: Creazione Script Python - STEP 1 (curl-cffi con latenze di sicurezza originali)
         run: |
           cat << 'EOF' > m2_step1.py
           import time
@@ -288,7 +295,7 @@ jobs:
               if status == "DONE":
                   break
               if status == "WAIT":
-                  time.sleep(0.5)
+                  time.sleep(1.0)
                   continue
 
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
@@ -312,8 +319,8 @@ jobs:
               finally:
                   queue.release_active(node_id)
               
-              # Delay ottimizzato per velocizzare l'avanzamento dello Step 1
-              time.sleep(random.uniform(0.5, 1.2))
+              # Ripristinati i tempi di attesa nativi dello Step 1 per evitare i blocchi rate-limit
+              time.sleep(random.uniform(1.0, 2.0))
 
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
@@ -330,7 +337,8 @@ jobs:
           for i in {1..6}; do
             python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
             PIDS+=($!)
-            sleep 0.1
+            # Ripristinato lo sleep di 1.5s per disperdere le chiamate iniziali ai motori di ricerca
+            sleep 1.5
           done
 
           wait "${PIDS[@]}"
@@ -371,7 +379,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Fallback CloakBrowser - Scheda Pulita)
+      - name: Creazione Script Python - STEP 2 (Fallback CloakBrowser - Ottimizzato Velocità & Scheda Pulita)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -401,6 +409,14 @@ jobs:
           async def main():
               queue = SharedQueue()
               
+              # Ottimizzazione Velocità: se la coda è già vuota all'avvio del nodo,
+              # termina all'istante senza istanziare Chrome o fare il warmup.
+              if queue.is_empty():
+                  print(f"[NODO {node_id}] Coda vuota. Termino immediatamente per salvare CPU e tempo.", flush=True)
+                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                      f.write("")
+                  return
+              
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
@@ -425,7 +441,6 @@ jobs:
                       args=base_args
                   )
                   
-                  # Warmup eseguito su una pagina temporanea per configurare il profilo
                   temp_page = await context.new_page()
                   try:
                       await temp_page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
@@ -451,13 +466,13 @@ jobs:
 
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   
-                  # Creiamo una scheda pulita per ogni target per eliminare carryover states o cache corrotte
+                  # Scheda pulita per ogni target per azzerare lo stato di navigazione
                   page = await context.new_page()
                   
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # Ripristino esatto delle impostazioni native del codice originale
+                      # Ripristinate integralmente le latenze del codice originale per garantire il rendering completo
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -489,14 +504,14 @@ jobs:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
                       # --- SILENZIO RADIO ---
-                      # Ripristinati esattamente i 12000ms di timeout networkidle del codice originale
+                      # Ripristinato timeout networkidle originario di 12000ms
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
-                      # Ripristinati i 6 secondi di attesa del codice originale
+                      # Ripristinati i 6 secondi originali
                       await asyncio.sleep(6) 
                       
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware - ripristinate pause originali)
+                      # Scorrimento Lazy Load NATIVO (pause originali ripristinate)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
@@ -533,7 +548,7 @@ jobs:
                       if not requeued:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE DEFINITIVO: {e}\n"
                   finally:
-                      # Chiusura esplicita della scheda per rilasciare memoria e ripulire lo stato di navigazione
+                      # Chiusura esplicita della scheda per rilasciare memoria
                       try: await page.close()
                       except: pass
                   
@@ -560,7 +575,7 @@ jobs:
           for i in {1..6}; do
             python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
             PIDS+=($!)
-            sleep 0.8
+            sleep 1.2
           done
 
           wait "${PIDS[@]}"
