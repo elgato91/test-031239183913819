@@ -68,19 +68,6 @@ jobs:
               except Exception:
                   return url
 
-          def normalize_url(url: str) -> str:
-              try:
-                  url_lower = url.lower().rstrip("/")
-                  parsed = urlparse(url_lower)
-                  netloc = parsed.netloc
-                  if netloc.startswith("www."):
-                      netloc = netloc[4:]
-                  scheme = "https"
-                  params = sorted(parse_qsl(parsed.query))
-                  return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
-              except Exception:
-                  return url
-
           def human_sleep(mean: float, std_dev: float):
               sleep_time = max(0.1, random.gauss(mean, std_dev))
               time.sleep(sleep_time)
@@ -313,7 +300,7 @@ jobs:
               return []
 
           def main():
-              # 50 Query su Orvieto calibrate per un articolo (25 in Italiano e 25 in Inglese)
+              # 50 Query su Orvieto calibrate per l'articolo (25 in Italiano e 25 in Inglese)
               queries = [
                   "cosa vedere a Orvieto in un giorno",
                   "Orvieto sotterranea biglietti e orari",
@@ -346,29 +333,26 @@ jobs:
                   "Orvieto Underground tour review",
                   "Duomo di Orvieto masterpieces to see",
                   "best local restaurants in Orvieto center",
-                  "where to eat in Orates orvieto authentic",
+                  "where to eat in Orvieto authentic food",
                   "traditional trattorias in Orvieto",
-                  "cheap eats and street food in Orati",
-                  "hidden gem restaurants in Orati",
-                  "best historic restaurants in Orati",
-                  "best pasta and pizza in Orati favorites",
-                  "authentic local restaurants Orati",
-                  "where do locals eat in Orati",
-                  "what to see in Orati",
-                  "best viewpoints in Orati",
-                  "where to park in Orati",
-                  "best things to do in Orati",
-                  "Orati travel guide",
-                  "local food specialties Orati",
-                  "best coffee and pastry in Orati",
-                  f"best restaurants in Monti Rome",
-                  f"best traditional trattorias and osterias in Monti Rome",
-                  f"cheap eats and street food in Monti Rome",
-                  f"where do locals eat in Monti Rome"
+                  "cheap eats and street food in Orvieto",
+                  "hidden gem restaurants in Orvieto",
+                  "best historic restaurants in Orvieto",
+                  "best pasta and pizza in Orvieto favorites",
+                  "authentic local restaurants Orvieto",
+                  "where do locals eat in Orvieto",
+                  "what to see in Orvieto",
+                  "best viewpoints in Orvieto",
+                  "where to park in Orvieto",
+                  "best things to do in Orvieto",
+                  "Orvieto travel guide",
+                  "local food specialties Orvieto",
+                  "best coffee and pastry in Orvieto",
+                  "Orvieto Cathedral Signorelli chapel history",
+                  "Etruscan museum Orvieto Claudio Faina",
+                  "Orvieto underground caves historical guide",
+                  "places to visit near Orvieto Umbria"
               ]
-
-              # Sostituito con query uniformate su Orati/Prati
-              queries = [q.replace("Prati", "Prati") for q in queries]
 
               engines = ["duckduckgo", "startpage", "yahoo"]
               tasks = []
@@ -379,10 +363,8 @@ jobs:
               total_tasks = len(tasks)
               log(f"Inizio scraping di {total_tasks} combinazioni (50 query x 3 motori di ricerca)")
 
-              # Cartella di output temporanea
               Path("results_temp").mkdir(exist_ok=True)
 
-              # 6 thread paralleli su 6 proxy WARP indipendenti
               with ThreadPoolExecutor(max_workers=6) as executor:
                   futures = {
                       executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
@@ -408,8 +390,8 @@ jobs:
 
       - name: Combinazione e Deduplica Risultati Finali
         if: always()
+        shell: python
         run: |
-          cat << 'EOF' > m2_merge.py
           import json
           import glob
           import re
@@ -440,9 +422,18 @@ jobs:
                   group_links = links_by_engine[eng]
                   # Ordina solo per rendere l'output leggibile, ma preserva i duplicati
                   group_links.sort()
-                  f.write(f"=========================================\n")
+                  f.write("=========================================\n")
                   f.write(f"{eng.upper()} ({len(group_links)} link estratti)\n")
-                  f.write(f"=========================================\n")
+                  f.write("=========================================\n")
                   for url in group_links:
                       f.write(url + "\n")
-                  f.wr
+                  f.write("\n")
+
+          print("File finale raggruppato generato con successo.")
+
+      - name: Upload Artifact Macchina 2
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
