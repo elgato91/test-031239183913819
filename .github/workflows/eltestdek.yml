@@ -12,7 +12,7 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
           
-          # Avvia 3 proxy su 3 porte diverse per evitare rate limit
+          # Avvia 3 proxy su 3 porte diverse
           for PORT in 40001 40002 40003; do
             docker run --name warproxy-$PORT --network host \
               -e SOCKS5_PORT=$PORT -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
@@ -38,7 +38,6 @@ jobs:
 
       - name: Setup Ambiente e Dipendenze
         run: |
-          # Cloniamo lo scraper in una cartella "base" che poi i worker copieranno
           git clone https://github.com/georgekhananaev/google-reviews-scraper-pro.git base-scraper
           cd base-scraper
           pip install -r requirements.txt
@@ -50,7 +49,7 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Scrittura Orchestratore Parallelo Integrato
+      - name: Scrittura Orchestratore Parallelo Isolato
         shell: bash
         run: |
           cat << 'EOF' > orchestrator.py
@@ -101,17 +100,28 @@ jobs:
                       err_str = str(e).lower()
                       if "quota" in err_str or "429" in err_str or "1011" in err_str:
                           wait_time = (2 ** attempt) * 15
-                          print(f"   [Gemini] Quota API raggiunta. Attesa {wait_time}s...", flush=True)
+                          print(f"   [Gemini] Limite quota. Attesa {wait_time}s...", flush=True)
                           await asyncio.sleep(wait_time)
                       else:
                           raise e
               return None
 
+          # FASE 1: COMPLETAMENTE PARALLELA E ISOLATA
           async def fase1_risolvi_mappa_worker(luogo, proxy_url, worker_id):
               def run_selenium():
-                  # ISOLAMENTO TOTALE: Ogni worker ha la sua cartella profilo Chrome separata
+                  # Isolamento totale dei profili Chrome per prevenire la sovrapposizione delle sessioni
                   user_dir = os.path.abspath(f"./chrome_profile_w{worker_id}")
-                  driver = Driver(uc=True, headless=True, proxy=proxy_url, user_data_dir=user_dir)
+                  if os.path.exists(user_dir):
+                      shutil.rmtree(user_dir, ignore_errors=True)
+                  os.makedirs(user_dir, exist_ok=True)
+                  
+                  driver = Driver(
+                      uc=True, 
+                      headless=True, 
+                      proxy=proxy_url, 
+                      user_data_dir=user_dir,
+                      chromium_arg="--disable-session-crashed-bubble,--disable-infobars"
+                  )
                   
                   info_locale = {
                       'ricerca_originale': luogo, 'url_mappa': 'N/D', 'nome': 'N/D',
@@ -125,19 +135,16 @@ jobs:
                       driver.get(search_url)
                       driver.sleep(5)
                       
-                      # Bypass Cookie Google
                       try:
                           consent_btn = driver.find_element('css selector', 'button[aria-label*="Accetta"], button[aria-label*="Accept"], [aria-label*="Agree"]')
                           consent_btn.click()
                           driver.sleep(2)
                       except: pass
                       
-                      # --- LOGICA RISOLUZIONE URL / LISTE MAPS ---
                       current_url = driver.current_url
                       if '/maps/place/' not in current_url:
                           try:
-                              # Tenta la classe per i risultati di ricerca in lista laterale (a.hfpxzc) o il vecchio selettore
-                              first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"], a.hfpxzc')
+                              first_result_el = driver.find_element('css selector', 'a[href*="/maps/place/"]')
                               resolved_url = first_result_el.get_attribute('href')
                               
                               if 'hl=' not in resolved_url:
@@ -149,11 +156,9 @@ jobs:
                               driver.sleep(5)
                           except Exception:
                               pass
-                      # -------------------------------------------
-                      
+                              
                       info_locale['url_mappa'] = driver.current_url
                       
-                      # Estrazione Dati
                       try: info_locale['nome'] = driver.find_element('css selector', 'h1').text
                       except: pass
                       try: info_locale['categoria'] = driver.find_element('css selector', 'button[jsaction*="category"]').text
@@ -211,7 +216,7 @@ jobs:
                           driver.sleep(2)
                           
                           elementi_servizi = driver.find_elements('css selector', 'li.FontNormal, .DRY99e li, span.Y39Ktc, div.fontBodyMedium')
-                          for s in elementi_servizi:
+                          for s inBird in elementi_servizi:
                               if s.text and s.text not in info_locale['caratteristiche_servizi']:
                                   info_locale['caratteristiche_servizi'].append(s.text)
                       except: pass
@@ -231,11 +236,16 @@ jobs:
                       img_bytes = await loop.run_in_executor(None, lambda: requests.get(url_ottimizzato, timeout=10).content if requests.get(url_ottimizzato).status_code == 200 else None)
                       if not img_bytes: return None
 
-                      # PROMPT DESK RESEARCH
-                      prompt = """Sei un reporter sul campo. Guarda questa foto e prendi appunti ultra-pratici e oggettivi.
-                      1. TESTI VISIBILI: Trascrivi fedelmente orari, prezzi, numeri di telefono, cartelli esplicativi o nomi leggibili su scontrini e menu.
-                      2. FATTI CONCRETI: Descrivi materialmente il luogo. Es: Il sentiero è in terra battuta, i tavoli sono di plastica, il cibo è servito in piatti di ceramica ed è abbondante, la stanza ha moquette, c'è una folla in coda.
-                      Sii freddo, telegrafico e attento ai dettagli pratici. Nessun aggettivo emotivo."""
+                      prompt = """Role: Professional Travel Data Extractor.
+                      Task: Analyze the provided Google Maps photograph to extract objective facts.
+                      Constraint: Exclude any description of transient elements such as tourists, clothing, pedestrians, or animals, unless they serve to quantify extreme crowd density. Focus solely on permanent structural and functional data.
+                      
+                      Extraction Instructions:
+                      1. Textual Information: Transcribe any legible printed or written text (e.g., operating hours, prices, menus, warning signs, historical plaques).
+                      2. Architectural & Physical Features: Describe permanent physical characteristics of the space (e.g., stone masonry, unpaved gravel trail, wooden tables, concrete pool, fresco state of preservation).
+                      3. Services & Commodities: Describe the presentation of food (e.g., serving dishes, portion sizes) or room amenities (e.g., furniture type, layout) if visible.
+                      
+                      Output format: Concise, factual bullet points. No subjective or emotional qualifiers."""
                       
                       accumulated_text = ""
                       async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
@@ -273,22 +283,22 @@ jobs:
               
               # PROMPT SINTESI REDAZIONALE DESK RESEARCH (API STANDARD)
               prompt_fase2 = """
-              Sei un assistente giornalistico. Ti passo gli appunti grezzi presi osservando decine di foto di un luogo.
-              Il tuo compito è aggregarli per fornire al redattore un quadro crudo, pratico e iper-realistico di "come è veramente il posto".
+              Role: Lead Editor and Travel Document Compiler.
+              Task: Synthesize the provided raw visual extraction notes from multiple photographs into a structured travel report. Filter out any transient, non-permanent, or subjective details.
               
-              Restituisci SOLO UN JSON VALIDO con questa struttura esatta:
+              Output Schema:
+              Return a valid JSON object matching this schema:
               {
-                  "info_testuali_e_prezzi_recuperati": "Elenca tutti i dati testuali trascritti: orari, prezzi, piatti del menù, avvisi da cartelli o scontrini. Sii preciso.",
-                  "descrizione_fisica_nuda_e_cruda": "Descrizione fattuale. Es: i tavoli sono di legno, il sentiero è franoso, le pareti sono scrostate, le posate di plastica.",
-                  "osservazioni_su_cibo_e_servizio": "Cosa si consuma e come viene servito (porzioni, tipi di bicchieri, ingredienti evidenti).",
-                  "contesto_ambientale": "È affollato? Le persone fanno la fila fuori? Sembra pulito o trasandato?"
+                  "testi_e_informazioni_pratiche": "Summary of transcribed text, hours, menus, prices, and warnings.",
+                  "architettura_e_ambiente_reale": "Objective description of the physical space, materials, layout, and structural state of preservation.",
+                  "dettagli_su_cibo_o_camere": "Factual description of the food presentation, dining amenities, or room/lodging features.",
+                  "atmosfera_e_manutenzione": "Assessment of maintenance level, visible cleanliness, and structural crowd indicators."
               }
               """
               
               payload = json.dumps(risultati_validi, ensure_ascii=False)
-              combined = f"APPUNTI VISIVI DALLE FOTO:\n{payload}\n\nISTRUZIONI REDAZIONALI:\n{prompt_fase2}"
+              combined = f"RAW VISUAL EXTRACTS:\n{payload}\n\nINSTRUCTIONS:\n{prompt_fase2}"
               
-              # USA API GENERATE CONTENT PER IL JSON FINALE
               async def esegui_sintesi():
                   response = await client.aio.models.generate_content(
                       model='gemini-2.5-flash',
@@ -316,10 +326,10 @@ jobs:
               
               while not coda_luoghi.empty():
                   luogo = await coda_luoghi.get()
-                  print(f"► [Worker {worker_id}] Prende in carico: '{luogo}'", flush=True)
+                  print(f"► [Worker {worker_id}] Ricerca e scraping parallelo per: '{luogo}'", flush=True)
                   safe_luogo = genera_nome_file(luogo)
                   
-                  # FASE 1: Risoluzione Maps (con worker_id passato per Chrome Profile)
+                  # FASE 1: Risoluzione Maps (parallela, isolata tramite worker_id)
                   info_locale = await fase1_risolvi_mappa_worker(luogo, proxy_url, worker_id)
                   
                   if not info_locale or info_locale.get('url_mappa') == 'N/D':
@@ -358,7 +368,7 @@ jobs:
                   coda_luoghi.task_done()
 
           async def main():
-              print("=== AVVIO ORCHESTRATORE ===", flush=True)
+              print("=== AVVIO ORCHESTRATORE PARALLELO ===", flush=True)
               coda = asyncio.Queue()
               for l in LUOGHI_DA_ANALIZZARE: coda.put_nowait(l)
                   
@@ -368,14 +378,14 @@ jobs:
               tasks = [asyncio.create_task(worker(cfg["id"], cfg["proxy_port"], coda, risultati_mappe, risultati_ai)) for cfg in WORKER_CONFIGS]
               await coda.join()
               
-              # Export
+              # Esportazione
               with open("dati_completi_mappe.json", "w", encoding="utf-8") as f:
                   json.dump(list(risultati_mappe.values()), f, indent=4, ensure_ascii=False)
                   
               with open("report_fotografico_desk_research.json", "w", encoding="utf-8") as f:
                   json.dump(risultati_ai, f, indent=4, ensure_ascii=False)
                   
-              # Raccoglie i file univoci per luogo
+              # Estrazione pulita per nome file
               all_reviews = []
               for i in range(1, 7):
                   worker_dir = f"worker_{i}_env"
