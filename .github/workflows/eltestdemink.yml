@@ -359,14 +359,14 @@ jobs:
               for loc in locs:
                   queries.extend([
                       f"best restaurants in {loc} Rome",
-                      f"best restaurants in {loc} Rome reviews blog",
-                      f"where to eat in {loc} Rome local recommendations",
-                      f"best traditional trattorias and osterias in {loc} Rome",
-                      f"cheap eats and street food in {loc} Rome",
+                      f"best restaurants in {loc} Rome reviews",
+                      f"where to eat in {loc} Rome",
+                      f"traditional trattorias in {loc} Rome",
+                      f"cheap eats in {loc} Rome",
                       f"hidden gem restaurants in {loc} Rome",
-                      f"best historic restaurants in {loc} Rome",
-                      f"best pasta and pizza in {loc} Rome favorites",
-                      f"authentic local restaurants {loc} Rome",
+                      f"historic restaurants in {loc}",
+                      f"best pizza in {loc} Rome",
+                      f"authentic local restaurants {loc}",
                       f"where do locals eat in {loc} Rome",
                   ])
 
@@ -414,66 +414,40 @@ jobs:
           import glob
           import re
           import os
-          from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-          def clean_url(url: str) -> str:
-              try:
-                  parsed = urlparse(url)
-                  query_params = parse_qsl(parsed.query)
-                  filtered_params = [
-                      (k, v) for k, v in query_params
-                      if k.lower() not in ["srsltid", "gclid", "fbclid"]
-                      and not k.lower().startswith("utm_")
-                  ]
-                  new_query = urlencode(filtered_params)
-                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-              except Exception:
-                  return url
+          engines = ["google", "bing", "duckduckgo", "startpage", "yahoo"]
+          links_by_engine = {eng: [] for eng in engines}
 
-          def normalize_url(url: str) -> str:
-              try:
-                  url_lower = url.lower().rstrip("/")
-                  parsed = urlparse(url_lower)
-                  netloc = parsed.netloc
-                  if netloc.startswith("www."):
-                      netloc = netloc[4:]
-                  scheme = "https"
-                  params = sorted(parse_qsl(parsed.query))
-                  return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
-              except Exception:
-                  return url
-
-          all_urls = []
           # Legge i file parziali salvati progressivamente su disco
           for filepath in glob.glob("results_temp/task_*.json"):
               try:
                   with open(filepath, "r", encoding="utf-8") as f:
                       data = json.load(f)
+                      eng = data.get("engine")
                       links = data.get("links", [])
-                      if isinstance(links, list):
-                          all_urls.extend(links)
+                      if eng in links_by_engine and isinstance(links, list):
+                          for l in links:
+                              # Pulizia di base degli spazi ma NESSUNA deduplicazione
+                              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", l).strip()
+                              if cleaned.startswith("http") and len(cleaned) >= 12:
+                                  links_by_engine[eng].append(cleaned)
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
-          seen_normalized = set()
-          deduped_urls = []
-          for u in all_urls:
-              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", u).strip()
-              if not cleaned.startswith("http") or len(cleaned) < 12:
-                  continue
-              norm = normalize_url(cleaned)
-              if norm not in seen_normalized:
-                  seen_normalized.add(norm)
-                  deduped_urls.append(cleaned)
-
-          deduped_urls.sort()
-
-          # Salva la lista pulita finale (sarà creata anche se vuota, evitando errori nello step successivo)
+          # Salva la lista finale suddivisa per motore
           with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              for url in deduped_urls:
-                  f.write(url + "\n")
+              for eng in engines:
+                  group_links = links_by_engine[eng]
+                  # Ordina solo per rendere l'output leggibile, ma preserva i duplicati
+                  group_links.sort()
+                  f.write(f"=========================================\n")
+                  f.write(f"{eng.upper()} ({len(group_links)} link estratti)\n")
+                  f.write(f"=========================================\n")
+                  for url in group_links:
+                      f.write(url + "\n")
+                  f.write("\n")
 
-          print(f"File finale generato: {len(deduped_urls)} URL unici estratti e deduplicati.")
+          print(f"File finale raggruppato generato con successo.")
           EOF
           python m2_merge.py
 
