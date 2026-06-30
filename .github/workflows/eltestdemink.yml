@@ -48,16 +48,31 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
           done
           
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          echo "Attesa stabilizzazione tunnel WARP (Polling intelligente)..."
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            for attempt in {1..15}; do
+              if curl -s -m 5 -x socks5h://127.0.0.1:$PORT https://api6.ipify.org > /dev/null; then
+                echo "WARP proxy $PORT stabile e pronto."
+                break
+              fi
+              sleep 1
+            done
+          done
 
-      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+      - name: Esecuzione STEP 1 (Multithreading Dinamico curl-cffi)
         run: |
-          cat << 'EOF' > m2_step1_setup.py
+          cat << 'EOF' > m2_step1_master.py
+          import time
+          import random
           import json
+          import queue
+          import threading
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests
+
           TARGETS = [
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
@@ -82,43 +97,16 @@ jobs:
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
-          
-          # Suddivisione matematica statica (Chunking) per performance ottimali
-          for i in range(1, 7):
-              chunk = TARGETS[i-1::6]
-              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-          print("Code distribuite Step 1 generate con successo.")
-          EOF
-          python -u m2_step1_setup.py
-
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
-        run: |
-          cat << 'EOF' > m2_step1.py
-          import time
-          import sys
-          import random
-          import os
-          import json
-          from bs4 import BeautifulSoup
-          from curl_cffi import requests
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
+          # Coda centralizzata: i nodi pescano dinamicamente
+          q = queue.Queue()
+          for t in TARGETS: q.put(t)
 
-          def verify_proxy_active(port, max_retries=5, delay=5):
-              test_session = requests.Session(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for _ in range(max_retries):
-                  try:
-                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200: return True
-                  except: pass
-                  time.sleep(delay)
-              return False
+          results_list = []
+          failed_targets = []
+          lock = threading.Lock()
 
           def validate_html(html, url, status_code):
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
@@ -137,119 +125,93 @@ jobs:
                   "se non vieni reindirizzato", "se hai problemi ad accedere", 
                   "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
               ]
-              
               for ind in blocking_indicators:
-                  if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
+                  if ind in low_html: return False, f"WAF/Captcha: {ind}"
               return True, ""
 
-          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
+          def worker_step1(node_id, port):
+              session = requests.Session(impersonate="chrome120")
+              session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              session.headers.update({
+                  "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+              })
 
-          queue_file = f"/tmp/step1_queue_{node_id}.json"
-          if not os.path.exists(queue_file): sys.exit(0)
-          
-          with open(queue_file, "r") as f:
-              targets = json.load(f)
+              while True:
+                  try:
+                      url = q.get_nowait()
+                  except queue.Empty:
+                      break
 
-          results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
-          failed_targets = []
-          
-          session = requests.Session(impersonate="chrome120")
-          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-          session.headers.update({
-              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-          })
-
-          for url in targets:
-              print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
-              try:
-                  resp = session.get(url, timeout=12)
-                  is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+                  print(f"[NODO {node_id}] Analizzando: {url}", flush=True)
+                  try:
+                      resp = session.get(url, timeout=12)
+                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+                      
+                      if is_ok:
+                          soup = BeautifulSoup(resp.text, 'html.parser')
+                          text = soup.get_text(separator=' ', strip=True)[:5000]
+                          if any(site in url for site in DIAGNOSTIC_SITES):
+                              text = soup.get_text(separator=' ', strip=True)
+                          with lock:
+                              results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n")
+                          print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
+                      else:
+                          print(f"[NODO {node_id}] -> Bloccato ({err_msg}). Passo allo Step 2.", flush=True)
+                          with lock: failed_targets.append(url)
+                  except Exception as e:
+                      print(f"[NODO {node_id}] -> Errore di rete. Passo allo Step 2.", flush=True)
+                      with lock: failed_targets.append(url)
                   
-                  if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator=' ', strip=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
-                      failed_targets.append(url)
-              except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
-                  failed_targets.append(url)
-              
-              time.sleep(random.uniform(1.0, 2.0))
+                  time.sleep(random.uniform(1.0, 2.0))
+                  q.task_done()
 
-          with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
-          with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
+          # Avvio dei 6 Worker concorrenti
+          threads = []
+          for i in range(1, 7):
+              t = threading.Thread(target=worker_step1, args=(i, 40000 + i))
+              t.start()
+              threads.append(t)
+
+          for t in threads: t.join()
+
+          with open("output_step1.txt", "w", encoding="utf-8") as f:
+              f.write(f"\n{'#'*60}\nREPORT STEP 1 (Veloce curl-cffi)\n{'#'*60}\n")
+              f.write("".join(results_list))
+
+          # Esportazione target falliti per lo Step 2
+          with open("failed_targets.json", "w", encoding="utf-8") as f:
+              json.dump(list(set(failed_targets)), f)
+
+          print("Step 1 Completato in modo dinamico e sincronizzato.")
           EOF
-
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
+          python -u m2_step1_master.py
 
       - name: Refresh IP Container per lo STEP 2
         run: |
           echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 2
-        run: |
-          cat << 'EOF' > m2_step2_setup.py
-          import json
-          import os
-
-          merged_failed = []
-          for i in range(1, 7):
-              filename = f"failed_node_{i}.json"
-              if os.path.exists(filename):
-                  with open(filename, "r", encoding="utf-8") as f:
-                      try: merged_failed.extend(json.load(f))
-                      except Exception: pass
           
-          unique_failed = list(dict.fromkeys(merged_failed))
-          
-          for i in range(1, 7):
-              chunk = unique_failed[i-1::6]
-              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-                  
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
-          EOF
-          python -u m2_step2_setup.py
+          echo "Attesa nuova stabilizzazione WARP..."
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            for attempt in {1..10}; do
+              if curl -s -m 5 -x socks5h://127.0.0.1:$PORT https://api6.ipify.org > /dev/null; then break; fi
+              sleep 1
+            done
+          done
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
+      - name: Esecuzione STEP 2 (Asyncio Dinamico CloakBrowser su Target Falliti)
         run: |
-          cat << 'EOF' > m2_step2.py
+          cat << 'EOF' > m2_step2_master.py
           import asyncio
           import time
-          import sys
           import random
           import os
           import json
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
-
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -260,60 +222,53 @@ jobs:
               except: pass
               return default
 
-          async def main():
-              queue_file = f"/tmp/step2_queue_{node_id}.json"
-              if not os.path.exists(queue_file): return
-              
-              with open(queue_file, "r") as f: targets = json.load(f)
-              if not targets:
-                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
-                  return
+          async def worker_step2(node_id, port, q, results_list):
+              if q.empty(): return  # Non istanziare alcun browser se la coda è già vuota!
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Profilo con noise attivo di default e path per font corretti
               base_args = [
-                  "--no-sandbox",
-                  "--disable-dev-shm-usage",
+                  "--no-sandbox", "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
-              try:
-                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
-                  context = await launch_persistent_context_async(
-                      profile_dir,
-                      headless=False,
-                      humanize=True,
-                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                      geoip=True,
-                      viewport={"width": 1920, "height": 1080},
-                      args=base_args
-                  )
-                  page = await context.new_page()
-                  
-                  # WARMUP Integrato - Creazione di cronologia valida
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
-                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
+              context = None
+              page = None
 
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
-                  return
+              while True:
+                  try:
+                      url = q.get_nowait()
+                  except asyncio.QueueEmpty:
+                      break
 
-              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+                  # Warmup Lazily Evaluated: Il browser parte solo se c'è almeno 1 URL
+                  if context is None:
+                      print(f"[NODO {node_id}] Avvio Browser Cloak (Warmup)...", flush=True)
+                      try:
+                          context = await launch_persistent_context_async(
+                              profile_dir, headless=False, humanize=True,
+                              human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
+                              proxy=f"socks5://127.0.0.1:{port}", geoip=True,
+                              viewport={"width": 1920, "height": 1080}, args=base_args
+                          )
+                          page = await context.new_page()
+                          await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
+                          await asyncio.sleep(2)
+                          await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
+                          await asyncio.sleep(2)
+                      except Exception as e:
+                          print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
+                          q.task_done()
+                          break
 
-              for url in targets:
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
+                      # RICERCHE NATIVE
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -344,26 +299,21 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
                       await asyncio.sleep(6) 
                       
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
                       
-                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
                       text = soup.get_text(separator=' ', strip=True)[:5000]
                       text_lower = text.lower()
                       
-                      # Rilevamento passivo WAF/Captcha
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -373,63 +323,62 @@ jobs:
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
                       if len(text) > 150 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
+                          results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n")
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                       else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
+                          results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n")
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+                      results_list.append(f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n")
                   
                   await asyncio.sleep(random.uniform(4.0, 7.0))
+                  q.task_done()
 
-              try: await context.close()
-              except: pass
+              if context:
+                  try: await context.close()
+                  except: pass
 
-              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                  f.write(results)
+          async def main():
+              if not os.path.exists("failed_targets.json"): return
+              with open("failed_targets.json", "r") as f:
+                  targets = json.load(f)
+              
+              if not targets: return
+
+              q = asyncio.Queue()
+              for t in targets: q.put_nowait(t)
+
+              results_list = []
+              
+              # Lancia tutti e 6 i worker (Massima Potenza!)
+              # I worker "estrarranno" il lavoro dalla coda asincrona man mano che si liberano.
+              tasks = []
+              for i in range(1, 7):
+                  port = 40000 + i
+                  tasks.append(worker_step2(i, port, q, results_list))
+
+              await asyncio.gather(*tasks)
+
+              with open("output_step2.txt", "w", encoding="utf-8") as f:
+                  f.write(f"\n{'#'*60}\nREPORT STEP 2 (Fallback CloakBrowser)\n{'#'*60}\n")
+                  f.write("".join(results_list))
 
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
+          python -u m2_step2_master.py
 
-      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
+      - name: Pulizia Proxy e Combina Output
         run: |
-          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
-          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
-          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-          
           for i in {1..6}; do
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
           done
 
-          touch output_node_1_step1.txt output_node_1_step2.txt \
-                output_node_2_step1.txt output_node_2_step2.txt \
-                output_node_3_step1.txt output_node_3_step2.txt \
-                output_node_4_step1.txt output_node_4_step2.txt \
-                output_node_5_step1.txt output_node_5_step2.txt \
-                output_node_6_step1.txt output_node_6_step2.txt
-
-          cat output_node_1_step1.txt output_node_1_step2.txt \
-              output_node_2_step1.txt output_node_2_step2.txt \
-              output_node_3_step1.txt output_node_3_step2.txt \
-              output_node_4_step1.txt output_node_4_step2.txt \
-              output_node_5_step1.txt output_node_5_step2.txt \
-              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
+          touch output_step1.txt output_step2.txt
+          cat output_step1.txt output_step2.txt > output_macchina2_cdp.txt
 
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
