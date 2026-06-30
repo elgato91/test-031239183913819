@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (Coda di Micro-Task Granulari)
+      - name: Creazione Scraper Multithread Ultra-Stealth (Recupero Granulare a Sessione Calda)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -77,9 +77,9 @@ jobs:
                   if exclude_ports is None:
                       exclude_ports = set()
                   with self.lock:
-                      # Esclude i proxy falliti in precedenza per questo specifico task
                       available_ports = [p for p in self.ports if p not in exclude_ports]
                       if not available_ports:
+                          # Reset temporaneo se tutti i proxy sono stati esclusi
                           available_ports = self.ports
                       sorted_ports = sorted(available_ports, key=lambda p: self.last_used[p])
                       best_port = sorted_ports[0]
@@ -193,9 +193,27 @@ jobs:
                           links.append(href)
               return links
 
-          # --- Fetcher per singola pagina ---
+          # --- Task di Scraping Sequenziale con memoria dei progressi ---
 
-          def fetch_single_startpage(query: str, offset: int, browser: str, port: int) -> list[str] | None:
+          class QueryEngineTask:
+              def __init__(self, query: str, engine: str, task_index: int):
+                  self.query = query
+                  self.engine = engine
+                  self.task_index = task_index
+                  self.retries = 0
+                  self.failed_ports = set()
+                  self.links = []  # Accumulatore globale dei link trovati
+                  
+                  if engine == "startpage":
+                      self.remaining_pages = list(range(7))  # Pagine 0..6 (offsets 0, 10, ..., 60)
+                  elif engine == "duckduckgo":
+                      self.remaining_pages = [0, 30, 60]     # Offsets
+                  elif engine == "yahoo":
+                      self.remaining_pages = [1, 41]         # Offsets
+
+          # --- Fetchers sequenziali che consumano 'remaining_pages' ---
+
+          def fetch_startpage_task(task: QueryEngineTask, port: int, browser: str) -> bool:
               session = create_session(port, browser)
 
               def get_sc_token(sess):
@@ -213,107 +231,116 @@ jobs:
 
               sc_token = get_sc_token(session)
               if not sc_token:
-                  return None
+                  return False
 
-              payload = {
-                  "query": query, "sc": sc_token, "cat": "web", "t": "device",
-                  "language": "italiano", "lui": "english", "qadf": "moderate",
-                  "startat": str(offset)
-              }
-              
-              headers_post = get_minimal_headers(browser)
-              headers_post.update({
-                  "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
-                  "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
-                  "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
-              })
-              
-              try:
-                  response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
-                  if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
-                      page_links = extract_startpage(response_post.text)
-                      return page_links if page_links else []
-              except Exception:
-                  pass
-              return None
+              pages_to_attempt = list(task.remaining_pages)
+              for page in pages_to_attempt:
+                  offset = page * 10
+                  payload = {
+                      "query": task.query, "sc": sc_token, "cat": "web", "t": "device",
+                      "language": "italiano", "lui": "english", "qadf": "moderate",
+                      "startat": str(offset)
+                  }
+                  headers_post = get_minimal_headers(browser)
+                  headers_post.update({
+                      "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
+                      "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
+                      "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
+                  })
+                  try:
+                      response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
+                      if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
+                          page_links = extract_startpage(response_post.text)
+                          if page_links:
+                              task.links.extend(page_links)
+                          task.remaining_pages.remove(page)
+                          time.sleep(random.uniform(0.15, 0.4))
+                      else:
+                          return False  # Interruzione immediata in caso di blocco
+                  except Exception:
+                      return False
+              return True
 
-          def fetch_single_duckduckgo(query: str, offset: int, page_idx: int, browser: str, port: int) -> list[str] | None:
+          def fetch_duckduckgo_task(task: QueryEngineTask, port: int, browser: str) -> bool:
               session = create_session(port, browser)
-              if page_idx == 0:
-                  url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-              else:
-                  url = f"https://html.duckduckgo.com/html/?q={quote(query)}&s={offset}&dc={offset+1}&v=l"
+              offsets_to_attempt = list(task.remaining_pages)
               
-              headers = get_minimal_headers(browser)
-              headers.update({
-                  "referer": "https://duckduckgo.com/", "origin": "https://duckduckgo.com",
-                  "sec-fetch-dest": "document", "sec-fetch-mode": "navigate",
-                  "sec-fetch-site": "same-origin", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1"
-              })
-              
-              try:
-                  response = session.get(url, headers=headers, timeout=8.0)
-                  if response.status_code == 202:
-                      time.sleep(1.5)
+              for offset in offsets_to_attempt:
+                  if offset == 0:
+                      url = f"https://html.duckduckgo.com/html/?q={quote(task.query)}"
+                  else:
+                      url = f"https://html.duckduckgo.com/html/?q={quote(task.query)}&s={offset}&dc={offset+1}&v=l"
+                  
+                  headers = get_minimal_headers(browser)
+                  headers.update({
+                      "referer": "https://duckduckgo.com/", "origin": "https://duckduckgo.com",
+                      "sec-fetch-dest": "document", "sec-fetch-mode": "navigate",
+                      "sec-fetch-site": "same-origin", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1"
+                  })
+                  try:
                       response = session.get(url, headers=headers, timeout=8.0)
-                  if response.status_code == 200 and "captcha" not in response.text.lower():
-                      page_links = extract_duckduckgo(response.text)
-                      return page_links if page_links else []
-              except Exception:
-                  pass
-              return None
+                      if response.status_code == 202:
+                          time.sleep(1.5)
+                          response = session.get(url, headers=headers, timeout=8.0)
+                      if response.status_code == 200 and "captcha" not in response.text.lower():
+                          page_links = extract_duckduckgo(response.text)
+                          if page_links:
+                              task.links.extend(page_links)
+                          task.remaining_pages.remove(offset)
+                          time.sleep(random.uniform(0.15, 0.4))
+                      else:
+                          return False
+                  except Exception:
+                      return False
+              return True
 
-          def fetch_single_yahoo(query: str, offset: int, browser: str, port: int) -> list[str] | None:
+          def fetch_yahoo_task(task: QueryEngineTask, port: int, browser: str) -> bool:
               session = create_session(port, browser)
-              url = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b={offset}"
-              headers = get_minimal_headers(browser)
+              offsets_to_attempt = list(task.remaining_pages)
               
-              try:
-                  response = session.get(url, headers=headers, timeout=10.0)
-                  if response.status_code == 200:
-                      page_links = extract_yahoo(response.text)
-                      return page_links if page_links else []
-              except Exception:
-                  pass
-              return None
+              for offset in offsets_to_attempt:
+                  url = f"https://search.yahoo.com/search?p={quote(task.query)}&n=50&b={offset}"
+                  headers = get_minimal_headers(browser)
+                  try:
+                      response = session.get(url, headers=headers, timeout=10.0)
+                      if response.status_code == 200:
+                          page_links = extract_yahoo(response.text)
+                          if page_links:
+                              task.links.extend(page_links)
+                          task.remaining_pages.remove(offset)
+                          time.sleep(random.uniform(0.15, 0.4))
+                      else:
+                          return False
+                  except Exception:
+                      return False
+              return True
 
-          # --- Task Granulare per singola pagina/offset ---
-
-          class ScrapeTask:
-              def __init__(self, query: str, engine: str, offset: int, page_idx: int, task_index: int):
-                  self.query = query
-                  self.engine = engine
-                  self.offset = offset
-                  self.page_idx = page_idx
-                  self.task_index = task_index
-                  self.failed_ports = set()  # IP/Porte falliti per questo specifico micro-task
-                  self.retries = 0
-
-          def execute_single_task(task: ScrapeTask, total_combos: int) -> bool:
-              # Seleziona una porta proxy escludendo quelle già marcate come fallite per questo micro-task
+          def execute_task(task: QueryEngineTask, total_combos: int) -> bool:
               port = PROXY_POOL.get_proxy(exclude_ports=task.failed_ports)
               browser = random.choice(["chrome", "edge"])
-              links = None
-
+              
+              success = False
               try:
                   if task.engine == "duckduckgo":
-                      links = fetch_single_duckduckgo(task.query, task.offset, task.page_idx, browser, port)
+                      success = fetch_duckduckgo_task(task, port, browser)
                   elif task.engine == "startpage":
-                      links = fetch_single_startpage(task.query, task.offset, browser, port)
+                      success = fetch_startpage_task(task, port, browser)
                   elif task.engine == "yahoo":
-                      links = fetch_single_yahoo(task.query, task.offset, browser, port)
+                      success = fetch_yahoo_task(task, port, browser)
               except Exception:
                   pass
 
-              if links is not None:
-                  cleaned_links = [clean_url(l) for l in links if l]
-                  temp_file = Path("results_temp") / f"task_{task.task_index:03d}_p{task.page_idx}.json"
+              if len(task.remaining_pages) == 0:
+                  # Scrittura dei risultati cumulativi finali
+                  cleaned_links = [clean_url(l) for l in task.links if l]
+                  temp_file = Path("results_temp") / f"task_{task.task_index:03d}.json"
                   with open(temp_file, "w", encoding="utf-8") as f:
                       json.dump({"query": task.query, "engine": task.engine, "links": cleaned_links}, f, ensure_ascii=False, indent=2)
                   
-                  log(f"[{task.task_index:03d}/{total_combos}] [OK] {task.engine.upper()} (p.{task.page_idx}) -> {len(cleaned_links)} link con proxy {port}")
+                  log(f"[{task.task_index:03d}/{total_combos}] [OK] {task.engine.upper()} -> {len(cleaned_links)} risultati per: '{task.query}'")
                   return True
               else:
+                  # Registra il proxy fallito per non usarlo nuovamente al prossimo recupero
                   task.failed_ports.add(port)
                   return False
 
@@ -324,18 +351,25 @@ jobs:
                   except queue.Empty:
                       break
 
-                  success = execute_single_task(task, total_combos)
-                  if not success:
+                  success = execute_task(task, total_combos)
+                  if success:
+                      task_queue.task_done()
+                  else:
                       if task.retries < 3:
                           task.retries += 1
-                          # Reinserimento del task singolo in coda per farlo processare da un altro proxy
                           task_queue.put(task)
-                          log(f"[{task.task_index:03d}] [RIPROVA] {task.engine.upper()} (p.{task.page_idx}) fallito. Rimesso in coda. Tentativo #{task.retries}")
+                          log(f"[{task.task_index:03d}] [RIPROVA] {task.engine.upper()} fallito parzialmente (mancano: {len(task.remaining_pages)} pag). Reinserito in coda. Tentativo #{task.retries}")
                       else:
-                          log(f"[{task.task_index:03d}] [FALLITO DEFINITIVO] {task.engine.upper()} (p.{task.page_idx}) dopo 3 tentativi")
+                          # Fallimento definitivo: salva comunque i link raccolti fino a questo momento
+                          cleaned_links = [clean_url(l) for l in task.links if l]
+                          temp_file = Path("results_temp") / f"task_{task.task_index:03d}.json"
+                          with open(temp_file, "w", encoding="utf-8") as f:
+                              json.dump({"query": task.query, "engine": task.engine, "links": cleaned_links}, f, ensure_ascii=False, indent=2)
+                          
+                          log(f"[{task.task_index:03d}] [FALLITO DEFINITIVO] {task.engine.upper()} per: '{task.query}' - salvati comunque {len(cleaned_links)} link.")
+                          task_queue.task_done()
                   
-                  task_queue.task_done()
-                  time.sleep(random.uniform(0.1, 0.4))
+                  time.sleep(random.uniform(0.1, 0.3))
 
           def main():
               queries = [
@@ -397,24 +431,15 @@ jobs:
               task_idx = 1
               for q in queries:
                   for eng in engines:
-                      if eng == "startpage":
-                          for p_idx in range(7):
-                              task_queue.put(ScrapeTask(q, eng, p_idx * 10, p_idx, task_idx))
-                      elif eng == "duckduckgo":
-                          offsets = [0, 30, 60]
-                          for p_idx, off in enumerate(offsets):
-                              task_queue.put(ScrapeTask(q, eng, off, p_idx, task_idx))
-                      elif eng == "yahoo":
-                          offsets = [1, 41]
-                          for p_idx, off in enumerate(offsets):
-                              task_queue.put(ScrapeTask(q, eng, off, p_idx, task_idx))
+                      task_queue.put(QueryEngineTask(q, eng, task_idx))
                       task_idx += 1
 
               total_combos = task_idx - 1
-              log(f"Inizio scraping di {total_combos} combinazioni tramite coda concorrente.")
+              log(f"Inizio scraping di {total_combos} combinazioni (50 query x 3 motori di ricerca)")
 
               Path("results_temp").mkdir(exist_ok=True)
 
+              # Concorrenza calibrata a 10 thread su 10 proxy WARP
               threads = []
               for _ in range(10):
                   t = threading.Thread(target=worker_loop, args=(task_queue, total_combos))
@@ -423,7 +448,7 @@ jobs:
                   threads.append(t)
 
               task_queue.join()
-              log("Scraping completato o tentativi esauriti.")
+              log("Processo di scraping terminato.")
 
           if __name__ == "__main__":
               main()
@@ -497,7 +522,7 @@ jobs:
                   f.write(url + "\n")
 
           print(f"Sintesi completata: {len(all_raw_links)} link estratti complessivamente.")
-          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali in output_macchina2_cdp.txt.")
+          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali scritti in output_macchina2_cdp.txt.")
 
       - name: Upload Artifact Macchina 2
         if: always()
