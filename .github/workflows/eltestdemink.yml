@@ -12,11 +12,11 @@ jobs:
         run: |
           pip install beautifulsoup4 requests "requests[socks]" curl-cffi
 
-      - name: Setup Container WARP (IPv6)
+      - name: Setup Container WARP (7 Nodi IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          for i in {1..6}; do
+          for i in {1..7}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth
+      - name: Creazione Scraper Multithread Ultra-Stealth (Inline Retry + 7 Proxy)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -84,7 +84,8 @@ jobs:
                       self.last_used[best_port] = time.time()
                       return best_port
 
-          PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006])
+          # Esteso a 7 proxy WARP attivi
+          PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006, 40007])
           STARTPAGE_LOCK = threading.Lock()
 
           ACCEPT_LANGUAGES = [
@@ -195,49 +196,70 @@ jobs:
 
           def fetch_startpage(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
-              with STARTPAGE_LOCK:
-                  try:
-                      response_get = session.get("https://www.startpage.com/", headers=headers, timeout=8.0)
-                      if response_get.status_code != 200: return None
-                      sc_match = (
-                          re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
-                          or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
-                      )
-                      sc_token = sc_match.group(1) if sc_match else ""
-                  except Exception: return None
+              
+              def get_sc_token(sess):
+                  with STARTPAGE_LOCK:
+                      try:
+                          response_get = sess.get("https://www.startpage.com/", headers=headers, timeout=8.0)
+                          if response_get.status_code == 200:
+                              sc_match = (
+                                  re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
+                                  or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
+                              )
+                              return sc_match.group(1) if sc_match else ""
+                      except Exception: pass
+                  return ""
 
-                  time.sleep(random.uniform(0.2, 0.5))
+              sc_token = get_sc_token(session)
+              if not sc_token: return None
 
-                  links = []
-                  headers_post = headers.copy()
-                  headers_post.update({
-                      "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
-                      "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
-                      "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
-                  })
+              links = []
+              headers_post = headers.copy()
+              headers_post.update({
+                  "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
+                  "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
+                  "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
+              })
 
-                  for page in range(5):
-                      offset = page * 10
-                      payload = {
-                          "query": query, "sc": sc_token, "cat": "web", "t": "device",
-                          "language": "italiano", "lui": "english", "qadf": "moderate",
-                          "startat": str(offset)
-                      }
+              for page in range(5):
+                  offset = page * 10
+                  payload = {
+                      "query": query, "sc": sc_token, "cat": "web", "t": "device",
+                      "language": "italiano", "lui": "english", "qadf": "moderate",
+                      "startat": str(offset)
+                  }
+                  
+                  page_success = False
+                  # Retry ed inline proxy rotation a livello di singola pagina
+                  for attempt in range(3):
                       try:
                           response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
                           if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
                               page_links = extract_startpage(response_post.text)
                               if page_links:
                                   links.extend(page_links)
-                              else:
-                                  break
-                          else:
+                              page_success = True
                               break
                       except Exception:
-                          break
-                      time.sleep(random.uniform(0.1, 0.3))
+                          pass
+                      
+                      # Rotazione proxy immediata in caso di blocco e rigenerazione token
+                      new_port = PROXY_POOL.get_proxy()
+                      session.proxies = {
+                          "http": f"socks5h://127.0.0.1:{new_port}",
+                          "https": f"socks5h://127.0.0.1:{new_port}"
+                      }
+                      sc_token = get_sc_token(session)
+                      if not sc_token: break
+                      payload["sc"] = sc_token
+                      time.sleep(random.uniform(0.3, 0.8))
 
-                  return links if links else None
+                  if not page_success:
+                      break  # Esci se la pagina fallisce definitivamente dopo 3 tentativi
+                  
+                  time.sleep(random.uniform(0.1, 0.3))
+
+              return links if links else None
 
           def fetch_duckduckgo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
@@ -248,38 +270,75 @@ jobs:
               })
               
               links = []
+              # Pagina 1
               url1 = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-              try:
-                  response = session.get(url1, headers=headers, timeout=8.0)
-                  if response.status_code == 202:
-                      time.sleep(1.5)
+              page1_success = False
+              for attempt in range(3):
+                  try:
                       response = session.get(url1, headers=headers, timeout=8.0)
-                  if response.status_code == 200 and "captcha" not in response.text.lower():
-                      links.extend(extract_duckduckgo(response.text))
-              except Exception:
+                      if response.status_code == 202:
+                          time.sleep(1.5)
+                          response = session.get(url1, headers=headers, timeout=8.0)
+                      if response.status_code == 200 and "captcha" not in response.text.lower():
+                          links.extend(extract_duckduckgo(response.text))
+                          page1_success = True
+                          break
+                  except Exception:
+                      pass
+                  
+                  # Rotazione proxy se la prima pagina DDG fallisce
+                  new_port = PROXY_POOL.get_proxy()
+                  session.proxies = {
+                      "http": f"socks5h://127.0.0.1:{new_port}",
+                      "https": f"socks5h://127.0.0.1:{new_port}"
+                  }
+                  time.sleep(random.uniform(0.3, 0.8))
+
+              if not page1_success:
                   return None
 
-              if len(links) > 0:
-                  time.sleep(random.uniform(0.1, 0.4))
-                  url2 = f"https://html.duckduckgo.com/html/?q={quote(query)}&s=30&dc=31&v=l"
+              # Pagina 2
+              time.sleep(random.uniform(0.1, 0.4))
+              url2 = f"https://html.duckduckgo.com/html/?q={quote(query)}&s=30&dc=31&v=l"
+              page2_success = False
+              for attempt in range(3):
                   try:
                       response2 = session.get(url2, headers=headers, timeout=8.0)
                       if response2.status_code == 200 and "captcha" not in response2.text.lower():
                           links.extend(extract_duckduckgo(response2.text))
+                          page2_success = True
+                          break
                   except Exception:
                       pass
+                  
+                  new_port = PROXY_POOL.get_proxy()
+                  session.proxies = {
+                      "http": f"socks5h://127.0.0.1:{new_port}",
+                      "https": f"socks5h://127.0.0.1:{new_port}"
+                  }
+                  time.sleep(random.uniform(0.3, 0.8))
 
               return links if links else None
 
           def fetch_yahoo(session: requests.Session, query: str, browser: str, port: int) -> list[str] | None:
               headers = get_minimal_headers(browser)
               url = f"https://search.yahoo.com/search?p={quote(query)}&n=50"
-              try:
-                  response = session.get(url, headers=headers, timeout=10.0)
-                  if response.status_code == 200:
-                      links = extract_yahoo(response.text)
-                      return links if links else None
-              except Exception: pass
+              # Yahoo ha 1 pagina, ma ruotiamo il proxy ed eseguiamo retry in caso di blocco
+              for attempt in range(3):
+                  try:
+                      response = session.get(url, headers=headers, timeout=10.0)
+                      if response.status_code == 200:
+                          links = extract_yahoo(response.text)
+                          if links:
+                              return links
+                  except Exception: pass
+                  
+                  new_port = PROXY_POOL.get_proxy()
+                  session.proxies = {
+                      "http": f"socks5h://127.0.0.1:{new_port}",
+                      "https": f"socks5h://127.0.0.1:{new_port}"
+                  }
+                  time.sleep(random.uniform(0.3, 0.8))
               return None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int) -> list[str]:
@@ -382,7 +441,8 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
 
-              with ThreadPoolExecutor(max_workers=12) as executor:
+              # Concorrenza estesa a 14 thread paralleli (2 thread per ciascuno dei 7 proxy WARP)
+              with ThreadPoolExecutor(max_workers=14) as executor:
                   futures = {
                       executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
                       for idx, task in enumerate(tasks)
@@ -472,7 +532,7 @@ jobs:
               for url in deduped_urls:
                   f.write(url + "\n")
 
-          print(f"Sintesi completata: {len(all_raw_links)} link elaborati totali.")
+          print(f"Sintesi completata: {len(all_raw_links)} link estratti complessivamente.")
           print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali scritti in output_macchina2_cdp.txt.")
 
       - name: Upload Artifact Macchina 2
