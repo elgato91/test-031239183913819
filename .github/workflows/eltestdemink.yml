@@ -10,13 +10,13 @@ jobs:
 
       - name: Installazione Dipendenze Scraper Veloce
         run: |
-          pip install beautifulsoup4 requests "requests[socks]" curl-cffi
+          pip install beautifulsoup4 curl-cffi
 
-      - name: Setup Container WARP (10 Nodi IPv6)
+      - name: Setup Container WARP (20 Nodi IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          for i in {1..10}; do
+          for i in {1..20}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
@@ -25,7 +25,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+            sleep 0.3
           done
           
           echo "Attesa stabilizzazione tunnel WARP..."
@@ -34,7 +34,7 @@ jobs:
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p results_temp
 
-      - name: Creazione Scraper Multithread Ultra-Stealth
+      - name: Creazione Scraper Multithread Ultra-Stealth (20 Nodi + Deep Clean)
         run: |
           cat << 'EOF' > stealth_scraper.py
           import json
@@ -56,15 +56,25 @@ jobs:
 
           def clean_url(url: str) -> str:
               try:
-                  parsed = urlparse(url)
+                  # Miglioramento 3: Rimuove le ancore (#fragment) che creano duplicati inutili
+                  url_no_anchor = url.split('#')[0]
+                  parsed = urlparse(url_no_anchor)
                   query_params = parse_qsl(parsed.query)
+                  
+                  # Lista estesa e aggressiva di tracking parameters da eliminare
+                  blacklist_params = {
+                      "fbclid", "gclid", "srsltid", "msclkid", "yclid", 
+                      "mc_cid", "mc_eid", "_hsenc", "_hsmi", "hsctatracking", 
+                      "submissionguid", "rb_clickid"
+                  }
+                  
                   filtered_params = [
                       (k, v) for k, v in query_params
-                      if k.lower() not in ["srsltid", "gclid", "fbclid"]
+                      if k.lower() not in blacklist_params
                       and not k.lower().startswith("utm_")
                   ]
                   new_query = urlencode(filtered_params)
-                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ""))
               except Exception:
                   return url
 
@@ -81,7 +91,6 @@ jobs:
 
               def get_proxy(self):
                   with self.lock:
-                      # Peschiamo solo dai proxy che NON sono in fase di riavvio background
                       available = [p for p in self.ports if p not in self.restarting]
                       if not available:
                           return None
@@ -92,7 +101,6 @@ jobs:
                       if port in self.restarting:
                           return
                       self.usage_count[port] += 1
-                      # RIGENERAZIONE IP OGNI 5 QUERY (in Background asincrono)
                       if self.usage_count[port] >= 5:
                           self.usage_count[port] = 0
                           self.restarting.add(port)
@@ -102,11 +110,12 @@ jobs:
                   container_index = port - 40000
                   log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 5 richieste. Cambio IP IPv6 in background...")
                   subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
-                  time.sleep(6) # Attesa che il tunnel Cloudflare WARP si ri-allinei
+                  time.sleep(6) # Attesa stabilizzazione tunnel WARP
                   with self.lock:
                       self.restarting.remove(port)
 
-          PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 40009, 40010])
+          # Miglioramento 4: Esteso il pool a 20 porte mappate sui 20 container
+          PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
           STARTPAGE_LOCK = threading.Lock()
 
           ACCEPT_LANGUAGES = [
@@ -115,16 +124,17 @@ jobs:
               "en-US,en;q=0.9,it;q=0.8"
           ]
 
+          # Appunto D risolto: Profili browser aggiornati con le firme rolling stabili di curl-cffi e UA del 2026/2025
           BROWSER_PROFILES = {
               "chrome": {
-                  "impersonate": "chrome120",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  "impersonate": "chrome",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               },
-              "edge": {
-                  "impersonate": "chrome120",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              "safari": {
+                  "impersonate": "safari",
+                  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/apple-webkitvng,image/webp,*/*;q=0.8",
               }
           }
 
@@ -213,7 +223,8 @@ jobs:
                           links.append(href)
               return links
 
-          def fetch_startpage(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
+          # Appunto B risolto: Rimosso parametro inutilizzato "session" da tutte le firme di fetch
+          def fetch_startpage(query: str, browser: str, initial_port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
 
@@ -266,6 +277,11 @@ jobs:
                       except Exception:
                           pass
                       
+                      port = PROXY_POOL.get_proxy()
+                      session = create_session(port, browser)
+                      sc_token = get_sc_token(session)
+                      if not sc_token: break
+                      payload["sc"] = sc_token
                       human_sleep(0.5, 0.2)
 
                   if not page_success:
@@ -274,7 +290,7 @@ jobs:
 
               return links if links else None
 
-          def fetch_duckduckgo(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
+          def fetch_duckduckgo(query: str, browser: str, initial_port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
               links = []
@@ -308,6 +324,8 @@ jobs:
                       except Exception:
                           pass
                       
+                      port = PROXY_POOL.get_proxy()
+                      session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
                   if not page_success:
@@ -316,7 +334,7 @@ jobs:
 
               return links if links else None
 
-          def fetch_yahoo(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
+          def fetch_yahoo(query: str, browser: str, initial_port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
               links = []
@@ -339,6 +357,8 @@ jobs:
                       except Exception:
                           pass
                       
+                      port = PROXY_POOL.get_proxy()
+                      session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
                   if not page_success:
@@ -348,7 +368,7 @@ jobs:
               return links if links else None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
-              # STAGGERED START (Ritardo randomico per le prime query, disperde l'impatto ai motori)
+              # Sfasamento iniziale (Delay randomico prima delle task per evitare picchi di concorrenza)
               if global_attempt == 1:
                   time.sleep(random.uniform(0.1, 7.0))
               
@@ -360,16 +380,17 @@ jobs:
                       time.sleep(1.0)
                       continue
                       
-                  browser = random.choice(["chrome", "edge"])
+                  # Appunto D risolto: seleziona tra profili aggiornati chrome e safari
+                  browser = random.choice(["chrome", "safari"])
                   links = None
                   try:
-                      if engine == "duckduckgo": links = fetch_duckduckgo(None, query, browser, port)
-                      elif engine == "startpage": links = fetch_startpage(None, query, browser, port)
-                      elif engine == "yahoo": links = fetch_yahoo(None, query, browser, port)
+                      # Appunto B risolto: Chiamata pulita senza passare None
+                      if engine == "duckduckgo": links = fetch_duckduckgo(query, browser, port)
+                      elif engine == "startpage": links = fetch_startpage(query, browser, port)
+                      elif engine == "yahoo": links = fetch_yahoo(query, browser, port)
                   except Exception:
                       pass
 
-                  # L'IP ha lavorato: Contabilizziamo nel ProxyPool per far scattare il riavvio background ogni 5 query
                   PROXY_POOL.report_usage(port)
 
                   if links is not None and len(links) > 0:
@@ -379,7 +400,6 @@ jobs:
                   else:
                       human_sleep(1.0, 0.3)
 
-              # PAUSA RAFFREDDAMENTO (Addormenta QUESTO thread per 4 sec, non lo script intero, prima del rinvio in coda)
               log(f"[{task_index:03d}/{total_tasks}] [RITARDO] {engine.upper()} per '{query}'. Pausa raffreddamento... (Giro {global_attempt})")
               time.sleep(random.uniform(4.0, 6.0))
               
@@ -450,7 +470,6 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
               
-              # Margine Estremo per garantirti Zero Abbandoni.
               MAX_GLOBAL_RETRIES = 50
 
               with ThreadPoolExecutor(max_workers=10) as executor:
@@ -477,7 +496,7 @@ jobs:
                                       new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
                                       futures[new_future] = (q, eng, t_idx, global_attempt + 1)
                                   else:
-                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'. (Mai raggiunto nella pratica)")
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'. Limite estremo raggiunto.")
                           except Exception as e:
                               log(f"Errore grave nel thread task {t_idx:03d}: {e}")
 
@@ -485,7 +504,7 @@ jobs:
               main()
           EOF
 
-      - name: Esecuzione Scraping Veloce e Automatico
+      - name: Esecuzione Scraping Veloce
         run: python -u stealth_scraper.py
 
       - name: Combinazione e Deduplica Risultati Finali
@@ -498,30 +517,20 @@ jobs:
           import os
           from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-          def clean_url(url: str) -> str:
-              try:
-                  parsed = urlparse(url)
-                  query_params = parse_qsl(parsed.query)
-                  filtered_params = [
-                      (k, v) for k, v in query_params
-                      if k.lower() not in ["srsltid", "gclid", "fbclid"]
-                      and not k.lower().startswith("utm_")
-                  ]
-                  new_query = urlencode(filtered_params)
-                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-              except Exception:
-                  return url
-
+          # Appunto Bug Case-Sensitivity risolto: Normalizzazione precisa (Preserva il case di path e query)
           def normalize_url(url: str) -> str:
               try:
-                  url_lower = url.lower().rstrip("/")
-                  parsed = urlparse(url_lower)
-                  netloc = parsed.netloc
+                  parsed = urlparse(url)
+                  scheme = parsed.scheme.lower() if parsed.scheme else "https"
+                  netloc = parsed.netloc.lower()
                   if netloc.startswith("www."):
                       netloc = netloc[4:]
-                  scheme = "https"
+                  
+                  # Preserva intatti path (con rimozione trailing slash) e query originale ordinata
+                  path = parsed.path.rstrip("/")
                   params = sorted(parse_qsl(parsed.query))
-                  return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
+                  query = urlencode(params)
+                  return urlunparse((scheme, netloc, path, "", query, ""))
               except Exception:
                   return url
 
@@ -536,6 +545,7 @@ jobs:
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
+          # Deduplicazione Globale su base Normalizzata (Appunto C risolto: Non serve ri-eseguire clean_url!)
           seen_normalized = set()
           deduped_urls = []
           for u in all_raw_links:
@@ -545,7 +555,7 @@ jobs:
               norm = normalize_url(cleaned)
               if norm not in seen_normalized:
                   seen_normalized.add(norm)
-                  deduped_urls.append(clean_url(cleaned))
+                  deduped_urls.append(cleaned) # Il link salvato è già pulito aggressivamente dallo script python
 
           deduped_urls.sort()
 
