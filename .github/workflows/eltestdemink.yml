@@ -45,7 +45,7 @@ jobs:
           import threading
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
-          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
@@ -84,7 +84,6 @@ jobs:
                       self.last_used[best_port] = time.time()
                       return best_port
 
-          # Pool esteso a 10 proxy WARP
           PROXY_POOL = ProxyPool([40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 40009, 40010])
           STARTPAGE_LOCK = threading.Lock()
 
@@ -117,7 +116,6 @@ jobs:
               }
 
           def create_session(port, browser):
-              """Inizializza una sessione fresca eliminando la cache delle vecchie connessioni."""
               impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
               proxies = {
                   "http": f"socks5h://127.0.0.1:{port}",
@@ -193,18 +191,6 @@ jobs:
                           links.append(href)
               return links
 
-          def extract_links(html, url):
-              links = []
-              if "duckduckgo.com" in url: links = extract_duckduckgo(html)
-              elif "startpage.com" in url: links = extract_startpage(html)
-              elif "yahoo.com" in url: links = extract_yahoo(html)
-              
-              cleaned_links = []
-              for l in links:
-                  cleaned = clean_url(l)
-                  if cleaned: cleaned_links.append(cleaned)
-              return cleaned_links
-
           def fetch_startpage(session: requests.Session, query: str, browser: str, initial_port: int) -> list[str] | None:
               port = initial_port
               session = create_session(port, browser)
@@ -224,14 +210,12 @@ jobs:
 
               sc_token = get_sc_token(session)
               if not sc_token:
-                  # Se il proxy iniziale fallisce, ruotiamo subito ad un altro nodo per ottenere il token fiduciario
                   port = PROXY_POOL.get_proxy()
                   session = create_session(port, browser)
                   sc_token = get_sc_token(session)
                   if not sc_token: return None
 
               links = []
-              # Richiediamo 7 pagine sequenziali per estrarre esattamente 70 risultati organici reali
               for page in range(7):
                   offset = page * 10
                   payload = {
@@ -241,7 +225,6 @@ jobs:
                   }
                   
                   page_success = False
-                  # Session Flushing e rotazione fiduciaria a livello di singola pagina
                   for attempt in range(3):
                       headers_post = get_minimal_headers(browser)
                       headers_post.update({
@@ -260,7 +243,6 @@ jobs:
                       except Exception:
                           pass
                       
-                      # Page-Level Failure: Distruzione e creazione sessione fresca con cambio IP fiduciario
                       port = PROXY_POOL.get_proxy()
                       session = create_session(port, browser)
                       sc_token = get_sc_token(session)
@@ -269,8 +251,7 @@ jobs:
                       time.sleep(random.uniform(0.3, 0.8))
 
                   if not page_success:
-                      break  # Stop se la pagina fallisce definitivamente dopo 3 tentativi separati
-                  
+                      break 
                   time.sleep(random.uniform(0.1, 0.3))
 
               return links if links else None
@@ -280,7 +261,6 @@ jobs:
               session = create_session(port, browser)
               links = []
               
-              # Estrarre 3 pagine (offset s=0, 30, 60) per coprire stabilmente fino a 90 risultati totali
               offsets = [0, 30, 60]
               for page_idx, offset in enumerate(offsets):
                   if page_idx == 0:
@@ -310,14 +290,12 @@ jobs:
                       except Exception:
                           pass
                       
-                      # Session Flushing: reset connessione e cambio proxy
                       port = PROXY_POOL.get_proxy()
                       session = create_session(port, browser)
                       time.sleep(random.uniform(0.3, 0.8))
                   
                   if not page_success:
                       break
-                  
                   time.sleep(random.uniform(0.1, 0.4))
 
               return links if links else None
@@ -327,7 +305,6 @@ jobs:
               session = create_session(port, browser)
               links = []
               
-              # Estrarre 2 pagine da 50 (offset b=1, 41) per raggiungere stabilmente fino a 100 link reali
               offsets = [1, 41]
               for page_idx, offset in enumerate(offsets):
                   url = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b={offset}"
@@ -346,46 +323,47 @@ jobs:
                       except Exception:
                           pass
                       
-                      # Session Flushing: reset connessione e cambio proxy
                       port = PROXY_POOL.get_proxy()
                       session = create_session(port, browser)
                       time.sleep(random.uniform(0.3, 0.8))
                   
                   if not page_success:
                       break
-                  
                   time.sleep(random.uniform(0.2, 0.5))
                   
               return links if links else None
 
-          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int) -> list[str]:
-              time.sleep(random.uniform(0.1, 0.8))
-              max_retries = 3
-              for attempt in range(1, max_retries + 1):
-                  port = PROXY_POOL.get_proxy()
-                  if not port:
-                      time.sleep(1.0)
-                      continue
+          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, attempt: int) -> list[str] | None:
+              # Sleep iniziale per evitare allineamenti perfetti delle richieste
+              time.sleep(random.uniform(0.5, 1.5))
+              
+              port = PROXY_POOL.get_proxy()
+              if not port:
+                  time.sleep(1.0)
+                  return None
 
-                  browser = random.choice(["chrome", "edge"])
-                  links = None
-                  try:
-                      # Passiamo la porta iniziale al modulo; i moduli gestiranno la rotazione interna in autonomia
-                      if engine == "duckduckgo": links = fetch_duckduckgo(None, query, browser, port)
-                      elif engine == "startpage": links = fetch_startpage(None, query, browser, port)
-                      elif engine == "yahoo": links = fetch_yahoo(None, query, browser, port)
-                  except Exception:
-                      pass
+              browser = random.choice(["chrome", "edge"])
+              links = None
+              try:
+                  if engine == "duckduckgo": links = fetch_duckduckgo(None, query, browser, port)
+                  elif engine == "startpage": links = fetch_startpage(None, query, browser, port)
+                  elif engine == "yahoo": links = fetch_yahoo(None, query, browser, port)
+              except Exception:
+                  pass
 
-                  if links is not None:
-                      cleaned_links = [clean_url(l) for l in links if l]
-                      log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
-                      return cleaned_links
-                  else:
-                      time.sleep(random.uniform(1.0, 2.0))
-
-              log(f"[{task_index:03d}/{total_tasks}] [FALLITO] {engine.upper()} per: '{query}'")
-              return []
+              if links is not None:
+                  cleaned_links = [clean_url(l) for l in links if l]
+                  log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} (Tentativo {attempt}) -> {len(cleaned_links)} risultati per: '{query}'")
+                  return cleaned_links
+              else:
+                  log(f"[{task_index:03d}/{total_tasks}] [FALLITO] {engine.upper()} (Tentativo {attempt}) per: '{query}' su container {port}")
+                  
+                  # -------------------------------------------------------------
+                  # BACKOFF PUNITIVO: rallenta il thread per ingannare il rate limit
+                  # -------------------------------------------------------------
+                  time.sleep(random.uniform(3.0, 6.0))
+                  
+                  return None
 
           def main():
               queries = [
@@ -451,23 +429,38 @@ jobs:
               log(f"Inizio scraping di {total_tasks} combinazioni (50 query x 3 motori di ricerca)")
 
               Path("results_temp").mkdir(exist_ok=True)
+              
+              # Aumentato a 4 per tollerare meglio gli sbattimenti nella coda dinamica
+              MAX_RETRIES = 4
 
-              # Concorrenza tarata a 10 thread su 10 proxy WARP indipendenti (1 thread per proxy fisso)
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
-                      executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks): (task[0], task[1], idx + 1)
+                      executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks, 1): (task[0], task[1], idx + 1, 1)
                       for idx, task in enumerate(tasks)
                   }
 
-                  for future in as_completed(futures):
-                      q, eng, t_idx = futures[future]
-                      try:
-                          links = future.result()
-                          temp_file = Path("results_temp") / f"task_{t_idx:03d}.json"
-                          with open(temp_file, "w", encoding="utf-8") as f:
-                              json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
-                      except Exception as e:
-                          log(f"Errore grave nel thread task {t_idx}: {e}")
+                  while futures:
+                      done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                      
+                      for future in done:
+                          q, eng, t_idx, attempt = futures.pop(future)
+                          
+                          try:
+                              links = future.result()
+                              
+                              if links is not None:
+                                  temp_file = Path("results_temp") / f"task_{t_idx:03d}_{eng}.json"
+                                  with open(temp_file, "w", encoding="utf-8") as f:
+                                      json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
+                              else:
+                                  if attempt < MAX_RETRIES:
+                                      log(f"🔄 Rimetto in coda task {t_idx:03d} ({eng.upper()}) - Prossimo tentativo: {attempt + 1}")
+                                      new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, attempt + 1)
+                                      futures[new_future] = (q, eng, t_idx, attempt + 1)
+                                  else:
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}' dopo {MAX_RETRIES} tentativi.")
+                          except Exception as e:
+                              log(f"Errore grave nel thread task {t_idx:03d}: {e}")
 
           if __name__ == "__main__":
               main()
@@ -524,7 +517,6 @@ jobs:
               except Exception as e:
                   print(f"Errore lettura {filepath}: {e}")
 
-          # Deduplicazione Globale su base Normalizzata
           seen_normalized = set()
           deduped_urls = []
           for u in all_raw_links:
@@ -538,7 +530,6 @@ jobs:
 
           deduped_urls.sort()
 
-          # Salva la lista lineare pulita pronta per la fase di deep research
           with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
               for url in deduped_urls:
                   f.write(url + "\n")
