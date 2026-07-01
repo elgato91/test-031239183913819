@@ -469,7 +469,7 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
               
-              MAX_GLOBAL_RETRIES = 50
+              MAX_GLOBAL_RETRIES = 5
 
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
