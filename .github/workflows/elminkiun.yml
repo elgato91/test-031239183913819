@@ -618,7 +618,7 @@ jobs:
               if not os.path.exists(queue_file): return
               
               with open(queue_file, "r") as f: targets = json.load(f)
-              if not tasks: return
+              if not targets: return # CORRETTO: Cambiato 'tasks' con 'targets'
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
