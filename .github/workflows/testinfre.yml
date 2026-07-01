@@ -36,9 +36,10 @@ jobs:
 
           client = genai.Client(api_key=api_key)
 
-          # Manteniamo la modalità testo per questa specifica operazione
+          # Configurazione Live ORIGINALE e funzionante
           config_live = {
-              "response_modalities": ["TEXT"]
+              "response_modalities": ["AUDIO"],
+              "output_audio_transcription": {}
           }
 
           semaphore = asyncio.Semaphore(20)
@@ -92,13 +93,8 @@ jobs:
                           await session.send_realtime_input(text=payload)
                           
                           async for response in session.receive():
-                              # Compatibilità per output testo nativo
-                              if response.server_content and response.server_content.model_turn:
-                                  for part in response.server_content.model_turn.parts:
-                                      if part.text:
-                                          accumulated_text += part.text
-                              # Fallback se il modello risponde via transcription (come nel tuo esempio originale)
-                              elif response.server_content and hasattr(response.server_content, 'output_transcription') and response.server_content.output_transcription:
+                              # Estrazione originale basata sulla trascrizione audio generata
+                              if response.server_content and response.server_content.output_transcription:
                                   if response.server_content.output_transcription.text:
                                       accumulated_text += response.server_content.output_transcription.text
                                       
@@ -178,11 +174,7 @@ jobs:
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
-
-      - name: Esecuzione Middleware (Gemini 3.1 Live)
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
+          
           python url_screener.py
 
       - name: Esporta URL Filtrati (JSON)
