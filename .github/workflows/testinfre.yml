@@ -1,4 +1,4 @@
-name: Test Middleware - Filtro URL con Gemini 3.1 Live API
+name: Test Middleware - Filtro URL Universale ed Agnostico
 
 on: 
   workflow_dispatch:
@@ -6,6 +6,10 @@ on:
 jobs:
   test_gemini_live_screener:
     runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # Definisci qui il topic di volta in volta (può essere qualunque cosa nel mondo)
+      TARGET_TOPIC: "Orvieto"
     steps:
 
       - name: Setup Ambiente Python
@@ -17,7 +21,7 @@ jobs:
         run: |
           pip install google-genai requests
 
-      - name: Scrivi Script Filtro URL con Gemini 3.1 Live
+      - name: Scrivi Script Filtro URL con Gemini 3.1 Live (Agnostico)
         shell: bash
         run: |
           cat << 'EOF' > url_screener.py
@@ -34,9 +38,11 @@ jobs:
               print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
               exit(1)
 
+          # Recupero dinamico del topic di ricerca (può essere QUALUNQUE cosa)
+          target_topic = os.environ.get("TARGET_TOPIC", "Orvieto")
+
           client = genai.Client(api_key=api_key)
 
-          # Configurazione Live ORIGINALE e funzionante
           config_live = {
               "response_modalities": ["AUDIO"],
               "output_audio_transcription": {}
@@ -44,7 +50,7 @@ jobs:
 
           semaphore = asyncio.Semaphore(20)
 
-          # LISTA SPORCA DI ESEMPIO
+          # Lista URL di test (inserisci qui l'output grezzo della tua ricerca)
           raw_urls = [
               "https://atlanta.eater.com/maps/best-thai-restaurants-atlanta",
               "https://beborghi.com/cosa-vedere-a-vancouver/",
@@ -59,7 +65,7 @@ jobs:
               "https://it.wikipedia.org/wiki/Duomo_di_Orvieto",
               "http://www.duomodiorvieto.it/duomo-di-orvieto/la-facciata",
               "https://www.thefork.com/restaurants/orvieto-c361958/pizza-t652"
-          ] * 10 # Moltiplichiamo per testare i chunk e la concorrenza
+          ] * 10
 
           def pulizia_sintattica(url_list):
               """Fase 1: Pulisce parametri, deduplica e separa PDF/Wiki"""
@@ -75,25 +81,26 @@ jobs:
                       special_urls["wikipedia"].append(url)
                       continue
                   
-                  # Rimuove Query String per deduplicazione aggressiva
+                  # Rimuove Query String per deduplicazione
                   clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
                   clean_urls.add(clean_url)
 
               return list(clean_urls), special_urls
 
-          async def analizza_chunk_live(chunk_idx, chunk, prompt):
+          async def analizza_chunk_live(chunk_idx, chunk, topic, prompt_template):
               """Sotto-funzione asincrona per elaborare un chunk di URL tramite WebSocket"""
               async with semaphore:
                   print(f"   [Chunk {chunk_idx}] Connessione WebSocket attiva. Invio {len(chunk)} URL...", flush=True)
                   accumulated_text = ""
-                  payload = f"ISTRUZIONI:\n{prompt}\n\nURL CHUNK DA ANALIZZARE:\n{json.dumps(chunk)}"
+                  
+                  # Prepariamo il payload iniettando dinamicamente il topic corrente
+                  payload = f"{prompt_template}\n\nTARGET TOPIC:\n{topic}\n\nURL CHUNK:\n{json.dumps(chunk)}"
                   
                   try:
                       async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
                           await session.send_realtime_input(text=payload)
                           
                           async for response in session.receive():
-                              # Estrazione originale basata sulla trascrizione audio generata
                               if response.server_content and response.server_content.output_transcription:
                                   if response.server_content.output_transcription.text:
                                       accumulated_text += response.server_content.output_transcription.text
@@ -109,22 +116,28 @@ jobs:
 
           async def main():
               print("\n=== AVVIO PIPELINE CONCORRENTE MIDDLEWARE URL ===", flush=True)
+              print(f"Target Topic: '{target_topic}'")
               print(f"URL Grezzi Iniziali: {len(raw_urls)}")
 
               url_puliti, url_speciali = pulizia_sintattica(raw_urls)
               print(f"Dopo Pulizia Sintattica (Deduplicazione): {len(url_puliti)} URL unici da valutare.")
               print(f"URL Wiki deviati: {len(url_speciali['wikipedia'])} | PDF deviati: {len(url_speciali['pdf'])}")
 
-              prompt_filtraggio = """
-              Sei un router semantico per un sistema di guide turistiche. Stiamo elaborando URL per: Orvieto (Italia).
-              Analizza gli slug dei seguenti URL e SCARTA quelli che rientrano in queste categorie:
-              1. Fuori luogo geografico (es. atlanta, vancouver, o altre città palesemente errate).
-              2. Real Estate / Servizi non turistici (es. idealista, immobiliare, idraulici).
-              3. E-commerce di prodotti (es. pomodori, braccialetti, scarpe).
-              4. App generatrici di itinerari AI (es. mindtrip.ai, roamaround).
+              # PROMPT TOTALMENTE AGNOSTICO E ASTRATTO
+              prompt_template = """
+              Sei un agente di filtraggio semantico per un sistema di estrazione contenuti web.
+              Il tuo compito è analizzare una lista di URL e identificare quali sono strettamente pertinenti al "TARGET TOPIC" fornito, scartando il rumore.
               
-              MANTIENI tutto il resto (blog, OTA come TheFork/Tripadvisor, musei, siti istituzionali).
-              Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi. Usa il formato markdown ```json ... ```.
+              CRITERI DI ESCLUSIONE (Applica queste regole logiche in modo astratto su qualunque lingua o argomento):
+              1. Deviazione Semantica/Geografica: Lo slug o il dominio fa riferimento a entità, argomenti, concetti o aree geografiche palesemente distinte ed estranee rispetto al "TARGET TOPIC".
+              2. Pagine di Servizio o Utility: URL che portano a form di login, carrelli di e-commerce generici, o registrazioni di sistema.
+              3. Annunci e Directory Generiche: URL provenienti da portali immobiliari, elenchi commerciali generici o bacheche di annunci locali senza valore editoriale.
+              4. Contenuto Autogenerato o Strumentale: Pagine di ricerca interna di altri siti o landing page vuote create per scopi pubblicitari.
+              
+              CRITERI DI INCLUSIONE:
+              Mantieni qualsiasi URL (blog, portale, sito istituzionale, forum, portale di recensioni o schede informative) che contenga o possa contenere testo, dati, descrizioni, recensioni o approfondimenti pertinenti al "TARGET TOPIC".
+              
+              Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi e mantenuti. Usa il formato markdown ```json ... ```. Non aggiungere altro testo.
               """
 
               # Chunking da 50 URL
@@ -133,7 +146,7 @@ jobs:
               
               tasks = []
               for idx, chunk in enumerate(chunks):
-                  tasks.append(analizza_chunk_live(idx + 1, chunk, prompt_filtraggio))
+                  tasks.append(analizza_chunk_live(idx + 1, chunk, target_topic, prompt_template))
                   
               print(f"-> Lancio di {len(chunks)} analisi parallele istantanee sui chunk...", flush=True)
               risultati_raw = await asyncio.gather(*tasks)
@@ -142,7 +155,6 @@ jobs:
               for idx, ris in enumerate(risultati_raw):
                   if ris:
                       try:
-                          # Estrazione del JSON usando la tua regex
                           match = re.search(r'```json\s*(.*?)\s*```', ris, re.DOTALL)
                           json_str = match.group(1) if match else ris
                           chunk_approvati = json.loads(json_str)
@@ -156,6 +168,7 @@ jobs:
 
               output_finale = {
                   "stats": {
+                      "target_topic": target_topic,
                       "totale_grezzi": len(raw_urls),
                       "totale_wiki_api": len(url_speciali['wikipedia']),
                       "totale_pdf_parser": len(url_speciali['pdf']),
@@ -174,7 +187,9 @@ jobs:
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
-          
+
+      - name: Esecuzione Middleware (Gemini 3.1 Live)
+        run: |
           python url_screener.py
 
       - name: Esporta URL Filtrati (JSON)
