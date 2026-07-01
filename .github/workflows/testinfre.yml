@@ -8,10 +8,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      TARGET_TOPIC: "Orvieto" # Modifica qui il topic di ricerca
+      TARGET_TOPIC: "Orvieto"
     steps:
 
-      # 1. Scarica il codice e i file (incluso urls_grezze.txt) dalla tua repo
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -24,7 +23,7 @@ jobs:
         run: |
           pip install google-genai requests
 
-      - name: Scrivi Script Filtro URL con Gemini 3.1 Live
+      - name: Scrivi Script Filtro URL con Gemini 3.1 Live (Agnostico & Potenziato)
         shell: bash
         run: |
           cat << 'EOF' > url_screener.py
@@ -51,33 +50,92 @@ jobs:
 
           semaphore = asyncio.Semaphore(20)
 
-          # LEGGE DINAMICAMENTE IL FILE CARICATO NELLA REPO
           input_file = "urls_grezze.txt"
           if not os.path.exists(input_file):
               print(f"Errore: Il file '{input_file}' non è stato trovato nella root della repository.")
               exit(1)
 
           with open(input_file, "r", encoding="utf-8") as f:
-              # Legge le righe ignorando quelle vuote o i commenti che iniziano con #
               raw_urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
+          # --- CONFIGURAZIONE FILTRO DETERMINISTICO PYTHON ---
+          IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+
+          # Blocklist globale di domini o sotto-stringhe di dominio (multilingua e agnostica)
+          BLOCKLIST_DOMAINS = {
+              # Social & Media
+              "facebook.com", "instagram.com", "tiktok.com", "youtube.com", "youtu.be", "twitter.com", "x.com", "pinterest.", "flickr.com",
+              # Real Estate & Classifieds
+              "idealista.", "immobiliare.it", "casa.it", "zillow.com", "zoopla.", "trulia.com",
+              # OTAs & Aggregators (Non utili come articoli editoriali da raschiare)
+              "booking.com", "expedia.", "hotels.com", "vrbo.com", "airbnb.", "viator.com", "getyourguide.", "tiqets.com", "eventbrite.",
+              # Directory commerciali / Pagine Gialle / Aggregatori fuffa
+              "paginegialle.it", "misterimprese.it", "yelp.", "restaurantguru.com", "things.in", "evendo.com", "italiarecensioni.com",
+              # Forum & Q&A generici (unstructured & noisy)
+              "reddit.com", "quora.com", "community.ricksteves.com", "sloweurope.com",
+              # Meteo
+              "accuweather.com", "weather.com", "ilmeteo.it", "3bmeteo.com"
+          }
+
+          # Pattern di URL che indicano pagine di servizio, recensioni singole o ricerche
+          BLOCKLIST_PATTERNS = [
+              r'/showuserreviews-',  # Recensioni individuali TripAdvisor
+              r'/showtopic-',        # Thread di forum TripAdvisor
+              r'/search',            # Ricerche interne
+              r'\?s=',               # Query di ricerca standard WordPress
+              r'find_desc=',         # Parametri di ricerca Yelp/directory
+              r'find_loc='
+          ]
+          BLOCK_REGEX = re.compile('|'.join(BLOCKLIST_PATTERNS), re.IGNORECASE)
+
           def pulizia_sintattica(url_list):
-              """Fase 1: Pulisce parametri, deduplica e separa PDF/Wiki"""
+              """Fase 1: Pulisce parametri, deduplica e applica la blocklist deterministica"""
               clean_urls = set()
               special_urls = {"pdf": [], "wikipedia": []}
 
               for url in url_list:
                   parsed = urlparse(url)
+                  netloc = parsed.netloc.lower()
+
+                  # 1. Filtra IP grezzi
+                  if IP_PATTERN.match(netloc):
+                      continue
+
+                  # 2. Isola PDF e Wikipedia
                   if parsed.path.lower().endswith('.pdf'):
                       special_urls["pdf"].append(url)
                       continue
-                  if "wikipedia.org" in parsed.netloc:
+                  if "wikipedia.org" in netloc:
                       special_urls["wikipedia"].append(url)
                       continue
+
+                  # 3. Applica Blocklist Domini
+                  is_blocked_domain = False
+                  for blocked_domain in BLOCKLIST_DOMAINS:
+                      if blocked_domain in netloc:
+                          is_blocked_domain = True
+                          break
+                  if is_blocked_domain:
+                      continue
+
+                  # 4. Applica Blocklist Pattern (es. recensioni singole, ricerche)
+                  if BLOCK_REGEX.search(url):
+                      continue
                   
-                  # Rimuove Query String per deduplicazione
-                  clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+                  # 5. Normalizzazione del netloc (rimozione www.)
+                  if netloc.startswith("www."):
+                      netloc = netloc[4:]
+                      
+                  # 6. Ricalcola l'URL forzando https e rimuovendo query/frammenti
+                  clean_url = f"https://{netloc}{parsed.path}"
+                  if clean_url.endswith('/'):
+                      clean_url = clean_url[:-1]
+                      
                   clean_urls.add(clean_url)
+
+              # Rimuove duplicati anche dalle liste speciali
+              special_urls["pdf"] = list(set(special_urls["pdf"]))
+              special_urls["wikipedia"] = list(set(special_urls["wikipedia"]))
 
               return list(clean_urls), special_urls
 
@@ -112,21 +170,19 @@ jobs:
               print(f"File di input letto: '{input_file}' ({len(raw_urls)} URL grezzi trovati)")
 
               url_puliti, url_speciali = pulizia_sintattica(raw_urls)
-              print(f"Dopo Pulizia Sintattica (Deduplicazione): {len(url_puliti)} URL unici da valutare.")
+              print(f"Dopo Pulizia Sintattica (Deduplicazione + Blocklist): {len(url_puliti)} URL unici da valutare.")
               print(f"URL Wiki deviati: {len(url_speciali['wikipedia'])} | PDF deviati: {len(url_speciali['pdf'])}")
 
+              # PROMPT AGNOSTICO MA MOLTO PIÙ RIGIDO E SELETTIVO
               prompt_template = """
-              Sei un agente di filtraggio semantico per un sistema di estrazione contenuti web.
-              Il tuo compito è analizzare una lista di URL e identificare quali sono strettamente pertinenti al "TARGET TOPIC" fornito, scartando il rumore.
+              Sei uno screener semantico iper-selettivo per un sistema di estrazione contenuti web.
+              Il tuo compito è analizzare una lista di URL e tenere ESCLUSIVAMENTE quelli che sono veri e propri articoli editoriali, guide, blog post o pagine informative di alta qualità sul "TARGET TOPIC" fornito.
               
-              CRITERI DI ESCLUSIONE (Applica queste regole logiche in modo astratto su qualunque lingua o argomento):
-              1. Deviazione Semantica/Geografica: Lo slug o il dominio fa riferimento a entità, argomenti, concetti o aree geografiche palesemente distinte ed estranee rispetto al "TARGET TOPIC".
-              2. Pagine di Servizio o Utility: URL che portano a form di login, carrelli di e-commerce generici, o registrazioni di sistema.
-              3. Annunci e Directory Generiche: URL provenienti da portali immobiliari, elenchi commerciali generici o bacheche di annunci locali senza valore editoriale.
-              4. Contenuto Autogenerato o Strumentale: Pagine di ricerca interna di altri siti o landing page vuote create per scopi pubblicitari.
-              
-              CRITERI DI INCLUSIONE:
-              Mantieni qualsiasi URL (blog, portale, sito istituzionale, forum, portale di recensioni o schede informative) che contenga o possa contenere testo, dati, descrizioni, recensioni o approfondimenti pertinenti al "TARGET TOPIC".
+              REGOLE DI ESCLUSIONE DRASTICHE (Ragiona in modo astratto su qualunque lingua o argomento):
+              1. Deviazione Geografica/Semantica: Lo slug o il dominio fa riferimento a entità, argomenti o aree geografiche estranee rispetto al "TARGET TOPIC".
+              2. Pagine di Categoria o Indice vuote: Pagine che elencano solo link ad altre pagine (es. liste di tag, archivi per data, indici di forum, home page generiche di grossi portali).
+              3. Pagine di Transazione o Prodotto: Pagine finalizzate alla vendita di prodotti, form di registrazione, carrelli o tariffe.
+              4. Contenuto a Basso Valore/FAQ Autogenerate: Landing page create unicamente per scopi SEO (es. FAQ ripetitive, elenchi automatici di prezzi o orari privi di testo descrittivo reale).
               
               Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi e mantenuti. Usa il formato markdown ```json ... ```. Non aggiungere altro testo.
               """
@@ -153,6 +209,9 @@ jobs:
                               url_approvati.extend(chunk_approvati)
                       except Exception as e:
                           print(f"   [Chunk {idx+1}] Errore parsing JSON. Output grezzo: {ris[:50]}...", flush=True)
+
+              # Rimuove duplicati residui e ordina
+              url_approvati = sorted(list(set(url_approvati)))
 
               print(f"\n=== RISULTATO FINALE ===")
               print(f"URL Approvati per lo Scraper: {len(url_approvati)}")
