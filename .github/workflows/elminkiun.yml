@@ -418,57 +418,13 @@ jobs:
               return None
 
           def main():
+              # ACCORCIATO: Solo 5 query per velocizzare i test intermedi di funzionamento
               queries = [
                   "cosa vedere a Orvieto in un giorno",
                   "Orvieto sotterranea biglietti e orari",
                   "Duomo di Orvieto facciata e capolavori",
                   "Pozzo di San Patrizio storia e segreti",
-                  "itinerario Orvieto a piedi centro storico",
-                  "migliori ristoranti cucina tipica Orvieto",
-                  "cosa fare a Orvieto nel weekend",
-                  "Pozzo della Cava Orvieto recensioni",
-                  "Orvieto attrazioni principali da non perdere",
-                  "dove mangiare la gallina ubriaca a Orvieto",
-                  "Orvieto nascosta e luoghi insoliti",
-                  "storia del Pozzo di San Patrizio Orvieto",
-                  "MUSEO Claudio Faina Orvieto cosa vedere",
-                  "Orvieto con bambini cosa fare",
-                  "guida turistica Orvieto consigli utili",
-                  "Orvieto sotterranea visita guidata opinioni",
-                  "dove parcheggiare gratis a Orvieto centro",
-                  "Tempio del Belvedere Orvieto rovina etrusca",
-                  "Orvieto cantine storiche e degustazione vini",
-                  "Cappella di San Brizio Luca Signorelli Duomo",
-                  "Orvieto punti panoramici migliori",
-                  "cosa vedere vicino a Orvieto nei dintorni",
-                  "Orvieto artigianato locale ceramiche",
-                  "Torre del Moro Orvieto salita e panorama",
-                  "Orvieto d'inverno cosa vedere e fare",
-                  "best things to do in Orvieto Umbria",
-                  "Orvieto 1 day itinerary walk",
-                  "St Patrick's Well Orvieto tickets and history",
-                  "Orvieto Underground tour review",
-                  "Duomo di Orvieto masterpieces to see",
-                  "best local restaurants in Orvieto center",
-                  "where to eat in Orvieto authentic food",
-                  "traditional trattorias in Orvieto",
-                  "cheap eats and street food in Orvieto",
-                  "hidden gem restaurants in Orvieto",
-                  "best historic restaurants in Orvieto",
-                  "best pasta and pizza in Orvieto favorites",
-                  "authentic local restaurants Orvieto",
-                  "where do locals eat in Orvieto",
-                  "what to see in Orvieto",
-                  "best viewpoints in Orvieto",
-                  "where to park in Orvieto",
-                  "best things to do in Orvieto",
-                  "Orvieto travel guide",
-                  "local food specialties Orvieto",
-                  "best coffee and pastry in Orvieto",
-                  "Orvieto Cathedral Signorelli chapel history",
-                  "Etruscan museum Orvieto Claudio Faina",
-                  "Orvieto underground caves historical guide",
-                  "places to visit near Orvieto Umbria"
+                  "itinerario Orvieto a piedi centro storico"
               ]
 
               engines = ["duckduckgo", "startpage", "yahoo"]
@@ -478,7 +434,7 @@ jobs:
                       tasks.append((q, eng))
 
               total_tasks = len(tasks)
-              log(f"Inizio scraping di {total_tasks} combinazioni (50 query x 3 motori di ricerca)")
+              log(f"Inizio scraping di {total_tasks} combinazioni (5 query x 3 motori di ricerca)")
 
               Path("results_temp").mkdir(exist_ok=True)
               
@@ -523,6 +479,7 @@ jobs:
         run: |
           cat << 'EOF' > m2_cloak_setup.py
           import json
+          import urllib.parse
           
           # Le 10 query cardinali fondamentali per Orvieto da far elaborare in modo iper-stealth su Google e Bing
           queries_critiche = [
@@ -538,11 +495,12 @@ jobs:
               "dove mangiare la gallina ubriaca a Orvieto"
           ]
           
-          engines = ["google", "bing"]
           tasks = []
           for q in queries_critiche:
-              for eng in engines:
-                  tasks.append({"query": q, "engine": eng})
+              # Google Search URL
+              tasks.append(f"https://www.google.com/search?q={urllib.parse.quote(q)}&hl=it")
+              # Bing Search URL
+              tasks.append(f"https://www.bing.com/search?q={urllib.parse.quote(q)}")
           
           # Suddivisione logica su 5 canali (5 container CloakBrowser paralleli)
           for i in range(1, 6):
@@ -554,7 +512,7 @@ jobs:
           EOF
           python -u m2_cloak_setup.py
 
-      - name: Creazione Script Python - FASE 2 (CloakBrowser su 5 Nodi)
+      - name: Creazione Script Python - FASE 2 (CloakBrowser su 5 Nodi - No custom manual inputs)
         run: |
           cat << 'EOF' > cloak_scraper.py
           import asyncio
@@ -564,7 +522,7 @@ jobs:
           import os
           import json
           from pathlib import Path
-          from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+          from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode
           from bs4 import BeautifulSoup
           from cloakbrowser import launch_persistent_context_async
 
@@ -575,6 +533,15 @@ jobs:
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
+
+          def get_query_from_url(url, default="cosa vedere orvieto"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p', 'find_desc']:
+                      if param in queries: return queries[param][0]
+              except: pass
+              return default
 
           def clean_url(url: str) -> str:
               try:
@@ -621,8 +588,8 @@ jobs:
               queue_file = f"/tmp/cloak_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
               
-              with open(queue_file, "r") as f: tasks = json.load(f)
-              if not tasks: return
+              with open(queue_file, "r") as f: targets = json.load(f)
+              if not targets: return
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
@@ -635,8 +602,8 @@ jobs:
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
+              print(f"[NODO {node_id}] Avvio sessione Persistente nativa (Warmup + Scraping)...", flush=True)
               try:
-                  # GeoIP asincrono unito ai container WARP fissi da 1 a 5
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
@@ -649,60 +616,46 @@ jobs:
                   )
                   page = await context.new_page()
                   
-                  # WARMUP per creare footprint credibile
+                  # WARMUP nativo di cloakbrowser
                   await page.goto("https://www.google.com/?hl=it", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
               except Exception as e:
                   log(f"[CLOAK NODO {node_id}] Errore avvio browser: {e}")
                   return
 
-              for idx, task in enumerate(tasks):
-                  query = task["query"]
-                  engine = task["engine"]
-                  log(f"[CLOAK NODO {node_id}] Recupero Avanzato: {engine.upper()} -> '{query}'")
-                  
-                  links = []
+              for idx, url in enumerate(targets):
+                  print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
-                      if engine == "google":
-                          await page.goto("https://www.google.com/?hl=it", wait_until="domcontentloaded", timeout=35000)
+                      query_to_search = get_query_from_url(url)
+                      
+                      # RICERCHE E COMPORTAMENTO NATIVO (Zero forzature di click o selettori manuali)
+                      if "bing.com" in url:
+                          await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
                           try:
-                              # Bypass del consenso GDPR di Google
-                              accept_btn = page.locator("#L2AGLb, button:has-text('Accetta tutto')").first
-                              if await accept_btn.is_visible(timeout=3000):
-                                  await accept_btn.click()
-                                  await asyncio.sleep(1.5)
-                          except: pass
-                          
-                          search_box = page.locator("textarea[name='q'], input[name='q']").first
-                          await search_box.fill(query)
-                          await page.keyboard.press("Enter")
-                          
-                      elif engine == "bing":
-                          await page.goto("https://www.bing.com/?cc=it", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.5, 4.0))
-                          try:
-                              # Bypass del consenso GDPR di Bing
-                              accept_btn = page.locator("#bnp_btn_accept, button:has-text('Accetta'), a:has-text('Accetta')").first
-                              if await accept_btn.is_visible(timeout=3000):
-                                  await accept_btn.click()
-                                  await asyncio.sleep(1.5)
-                          except: pass
-                          
-                          search_box = page.locator("textarea[name='q'], input[name='q']").first
-                          await search_box.fill(query)
-                          await page.keyboard.press("Enter")
-
+                              search_box = page.locator("textarea[name='q'], input[name='q']").first
+                              await search_box.fill(query_to_search)
+                              await page.keyboard.press("Enter")
+                          except: 
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                      else:
+                          # Navigazione diretta Google (Altamente ottimizzata nel tuo cloakbrowser originario)
+                          await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                      
+                      # --- SILENZIO RADIO (Zero esecuzioni JS per aggirare WAF/Captcha) ---
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
-                      await asyncio.sleep(4)
+                      await asyncio.sleep(6)
                       
-                      # Scroll per forzare il caricamento lazy-load nativo dei risultati
+                      # Scorrimento Lazy Load NATIVO (Simula tastiera hardware)
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
                       
+                      # Scarica l'HTML staticamente una singola volta per estrarre i link (Zero impronta)
                       raw_html = await page.content()
-                      if engine == "google":
+                      if "google.com" in url:
                           links = extract_google_links(raw_html)
                       else:
                           links = extract_bing_links(raw_html)
@@ -712,15 +665,15 @@ jobs:
                           # Salviamo il file JSON in results_temp per fonderlo in automatico alla fine
                           temp_file = Path("results_temp") / f"task_cloak_{node_id}_{idx}.json"
                           with open(temp_file, "w", encoding="utf-8") as f:
-                              json.dump({"query": query, "engine": f"cloak_{engine}", "links": cleaned_links}, f, ensure_ascii=False, indent=2)
-                          log(f"[CLOAK NODO {node_id}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati reali estratti per: '{query}'")
+                              json.dump({"query": query_to_search, "engine": "cloak", "links": cleaned_links}, f, ensure_ascii=False, indent=2)
+                          print(f"[NODO {node_id}] -> Recuperato con Successo! {len(cleaned_links)} link organici estratti.", flush=True)
                       else:
-                          log(f"[CLOAK NODO {node_id}] [FALLITO] Nessun link organico estratto per '{query}'")
+                          print(f"[NODO {node_id}] -> Nessun link organico estratto.", flush=True)
 
                   except Exception as e:
-                      log(f"[CLOAK NODO {node_id}] Errore esecuzione query '{query}': {e}")
+                      print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
                   
-                  await asyncio.sleep(random.uniform(5.0, 9.0))
+                  await asyncio.sleep(random.uniform(4.0, 7.0))
 
               try: await context.close()
               except: pass
@@ -737,7 +690,7 @@ jobs:
           TAIL_PID=$!
           
           PIDS=()
-          # Eseguiamo su 5 nodi paralleli (porte da 40001 a 40005)
+          # Eseguiamo su 5 nodi paralleli (sulle prime 5 porte attive: 40001-40005)
           for i in {1..5}; do
             python -u cloak_scraper.py $i > node${i}_cloak.log 2>&1 &
             PIDS+=($!)
@@ -802,7 +755,7 @@ jobs:
               norm = normalize_url(cleaned)
               if norm not in seen_normalized:
                   seen_normalized.add(norm)
-                  deduped_urls.append(cleaned) # I link nei JSON sono già puliti aggressivamente
+                  deduped_urls.append(cleaned) # I link nei JSON sono già puliti aggressivamente dallo scraper
 
           deduped_urls.sort()
 
