@@ -1,16 +1,19 @@
-name: Test Middleware - Filtro URL Universale ed Agnostico
+name: Test Middleware - Filtro URL da Repository
 
 on: 
   workflow_dispatch:
 
 jobs:
-  test_gemini_live_screener:
+  test_url_screener_repo:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      # Definisci qui il topic di volta in volta (può essere qualunque cosa nel mondo)
-      TARGET_TOPIC: "Orvieto"
+      TARGET_TOPIC: "Orvieto" # Modifica qui il topic di ricerca
     steps:
+
+      # 1. Scarica il codice e i file (incluso urls_grezze.txt) dalla tua repo
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       - name: Setup Ambiente Python
         uses: actions/setup-python@v5
@@ -21,7 +24,7 @@ jobs:
         run: |
           pip install google-genai requests
 
-      - name: Scrivi Script Filtro URL con Gemini 3.1 Live (Agnostico)
+      - name: Scrivi Script Filtro URL con Gemini 3.1 Live
         shell: bash
         run: |
           cat << 'EOF' > url_screener.py
@@ -38,9 +41,7 @@ jobs:
               print("Errore: GEMINI_API_KEY non trovata nelle variabili d'ambiente.")
               exit(1)
 
-          # Recupero dinamico del topic di ricerca (può essere QUALUNQUE cosa)
           target_topic = os.environ.get("TARGET_TOPIC", "Orvieto")
-
           client = genai.Client(api_key=api_key)
 
           config_live = {
@@ -50,22 +51,15 @@ jobs:
 
           semaphore = asyncio.Semaphore(20)
 
-          # Lista URL di test (inserisci qui l'output grezzo della tua ricerca)
-          raw_urls = [
-              "https://atlanta.eater.com/maps/best-thai-restaurants-atlanta",
-              "https://beborghi.com/cosa-vedere-a-vancouver/",
-              "https://www.idealista.it/en/vendita-case/orvieto-terni/",
-              "https://lesperta.com/pasta-come-back-carbs/",
-              "https://www.politesi.polimi.it/retrieve/tesi_01.pdf",
-              "https://viaggi.corriere.it/europa/italia/cards/orvieto/?img=11",
-              "https://viaggi.corriere.it/europa/italia/cards/orvieto/?img=8",
-              "https://mindtrip.ai/attraction/orvieto-umbria/orvieto-underground/at-UjqomX9H",
-              "https://www.orvietoviva.com/en/pozzo-di-san-patrizio/",
-              "https://www.orvietoviva.com/en/orvieto-underground/",
-              "https://it.wikipedia.org/wiki/Duomo_di_Orvieto",
-              "http://www.duomodiorvieto.it/duomo-di-orvieto/la-facciata",
-              "https://www.thefork.com/restaurants/orvieto-c361958/pizza-t652"
-          ] * 10
+          # LEGGE DINAMICAMENTE IL FILE CARICATO NELLA REPO
+          input_file = "urls_grezze.txt"
+          if not os.path.exists(input_file):
+              print(f"Errore: Il file '{input_file}' non è stato trovato nella root della repository.")
+              exit(1)
+
+          with open(input_file, "r", encoding="utf-8") as f:
+              # Legge le righe ignorando quelle vuote o i commenti che iniziano con #
+              raw_urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
           def pulizia_sintattica(url_list):
               """Fase 1: Pulisce parametri, deduplica e separa PDF/Wiki"""
@@ -92,8 +86,6 @@ jobs:
               async with semaphore:
                   print(f"   [Chunk {chunk_idx}] Connessione WebSocket attiva. Invio {len(chunk)} URL...", flush=True)
                   accumulated_text = ""
-                  
-                  # Prepariamo il payload iniettando dinamicamente il topic corrente
                   payload = f"{prompt_template}\n\nTARGET TOPIC:\n{topic}\n\nURL CHUNK:\n{json.dumps(chunk)}"
                   
                   try:
@@ -117,13 +109,12 @@ jobs:
           async def main():
               print("\n=== AVVIO PIPELINE CONCORRENTE MIDDLEWARE URL ===", flush=True)
               print(f"Target Topic: '{target_topic}'")
-              print(f"URL Grezzi Iniziali: {len(raw_urls)}")
+              print(f"File di input letto: '{input_file}' ({len(raw_urls)} URL grezzi trovati)")
 
               url_puliti, url_speciali = pulizia_sintattica(raw_urls)
               print(f"Dopo Pulizia Sintattica (Deduplicazione): {len(url_puliti)} URL unici da valutare.")
               print(f"URL Wiki deviati: {len(url_speciali['wikipedia'])} | PDF deviati: {len(url_speciali['pdf'])}")
 
-              # PROMPT TOTALMENTE AGNOSTICO E ASTRATTO
               prompt_template = """
               Sei un agente di filtraggio semantico per un sistema di estrazione contenuti web.
               Il tuo compito è analizzare una lista di URL e identificare quali sono strettamente pertinenti al "TARGET TOPIC" fornito, scartando il rumore.
