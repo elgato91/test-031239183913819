@@ -58,7 +58,7 @@ jobs:
           with open(input_file, "r", encoding="utf-8") as f:
               raw_urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
-          # --- STRUTTURA DI ROUTING MULTIPLO (Preserva tutti i dati) ---
+          # --- STRUTTURA DI ROUTING MULTIPLO (Preserva tutti i dati separatamente) ---
           special_routing = {
               "wikipedia": [],
               "pdf": [],
@@ -243,7 +243,7 @@ jobs:
               print(f"-> Lancio di {len(chunks)} analisi parallele sui chunk...", flush=True)
               risultati_raw = await asyncio.gather(*tasks)
 
-              url_approvati = []
+              url_approvati_raw = []
               for idx, ris in enumerate(risultati_raw):
                   if ris:
                       try:
@@ -251,28 +251,45 @@ jobs:
                           json_str = match.group(1) if match else ris
                           chunk_approvati = json.loads(json_str)
                           if isinstance(chunk_approvati, list):
-                              # Correzione del bug degli spazi/caratteri speciali e rimozione di duplicati bianchi
-                              url_approvati.extend([url.strip() for url in chunk_approvati])
+                              url_approvati_raw.extend(chunk_approvati)
                       except Exception as e:
                           print(f"   [Chunk {idx+1}] Errore parsing JSON. Output grezzo: {ris[:50]}...", flush=True)
 
-              # Rimozione di eventuali spazi vuoti o duplicati dai risultati dell'LLM
+              # Risoluzione corruzione spazi bianchi (es. "https:// wanderlog.com" -> "https://wanderlog.com")
               url_approvati_puliti = []
-              for url in list(set(url_approvati)):
-                  # RISOLUZIONE DEI MICRO-DUPLICATI DI RETE
-                  parsed = urlparse(url)
-                  netloc = parsed.netloc.lower()
-                  if netloc.startswith("www."):
-                      netloc = netloc[4:]
-                  clean_url = f"https://{netloc}{parsed.path}"
-                  if clean_url.endswith('/'):
-                      clean_url = clean_url[:-1]
-                  url_approvati.append(clean_url)
+              for url in url_approvati_raw:
+                  url_senza_spazi = re.sub(r'\s+', '', url)
+                  if not url_senza_spazi:
+                      continue
+                  try:
+                      parsed = urlparse(url_senza_spazi)
+                      if not parsed.netloc:
+                          continue
+                      netloc = parsed.netloc.lower()
+                      if netloc.startswith("www."):
+                          netloc = netloc[4:]
+                      clean_url = f"https://{netloc}{parsed.path}"
+                      if clean_url.endswith('/'):
+                          clean_url = clean_url[:-1]
+                      url_approvati_puliti.append(clean_url)
+                  except Exception as e:
+                      print(f"Errore post-processing URL '{url_senza_spazi}': {e}", flush=True)
 
-              # Unicizzazione finale di tutti gli array
-              url_approvati = list(set(url_approvati))
-              url_speciali["pdf"] = list(set(url_speciali["pdf"]))
-              url_speciali["wikipedia"] = list(set(url_speciali["wikipedia"]))
+              # Unicizzazione finale dei risultati dell'LLM
+              url_approvati = sorted(list(set(url_approvati_puliti)))
+
+              # Unicizzazione finale di tutti gli array di routing deterministici
+              special_routing["wikipedia"] = sorted(list(set(special_routing["wikipedia"])))
+              special_routing["pdf"] = sorted(list(set(special_routing["pdf"])))
+              special_routing["video_platforms"] = sorted(list(set(special_routing["video_platforms"])))
+              special_routing["forums_and_communities"] = sorted(list(set(special_routing["forums_and_communities"])))
+              special_routing["yelp_reviews"] = sorted(list(set(special_routing["yelp_reviews"])))
+              special_routing["otas_and_aggregators"] = sorted(list(set(special_routing["otas_and_aggregators"])))
+              special_routing["real_estate"] = sorted(list(set(special_routing["real_estate"])))
+              special_routing["weather"] = sorted(list(set(special_routing["weather"])))
+              
+              for k in special_routing["social"]:
+                  special_routing["social"][k] = sorted(list(set(special_routing["social"][k])))
 
               print(f"\n=== RISULTATO FINALE ===")
               print(f"URL Approvati per lo Scraper: {len(url_approvati)}")
@@ -281,13 +298,32 @@ jobs:
                   "stats": {
                       "target_topic": target_topic,
                       "totale_grezzi": len(raw_urls),
-                      "totale_wiki_api": len(url_speciali['wikipedia']),
-                      "totale_pdf_parser": len(url_speciali['pdf']),
+                      "totale_wiki_api": len(special_routing['wikipedia']),
+                      "totale_pdf_parser": len(special_routing['pdf']),
+                      "totale_social_facebook": len(special_routing['social']['facebook']),
+                      "totale_social_instagram": len(special_routing['social']['instagram']),
+                      "totale_social_tiktok": len(special_routing['social']['tiktok']),
+                      "totale_social_twitter_x": len(special_routing['social']['twitter_x']),
+                      "totale_social_pinterest": len(special_routing['social']['pinterest']),
+                      "totale_social_flickr": len(special_routing['social']['flickr']),
+                      "totale_video_platforms": len(special_routing['video_platforms']),
+                      "totale_forums_and_communities": len(special_routing['forums_and_communities']),
+                      "totale_yelp_reviews": len(special_routing['yelp_reviews']),
+                      "totale_otas_and_aggregators": len(special_routing['otas_and_aggregators']),
+                      "totale_real_estate": len(special_routing['real_estate']),
+                      "totale_weather": len(special_routing['weather']),
                       "totale_approvati_scraper": len(url_approvati)
                   },
                   "urls_per_scraper": url_approvati,
-                  "urls_per_wiki_api": url_speciali['wikipedia'],
-                  "urls_per_pdf_parser": url_speciali['pdf']
+                  "urls_per_wiki_api": special_routing['wikipedia'],
+                  "urls_per_pdf_parser": special_routing['pdf'],
+                  "urls_per_social": special_routing['social'],
+                  "urls_per_video_platforms": special_routing['video_platforms'],
+                  "urls_per_forums_and_communities": special_routing['forums_and_communities'],
+                  "urls_per_yelp_reviews": special_routing['yelp_reviews'],
+                  "urls_per_otas_and_aggregators": special_routing['otas_and_aggregators'],
+                  "urls_per_real_estate": special_routing['real_estate'],
+                  "urls_per_weather": special_routing['weather']
               }
 
               output_path = "urls_filtrati.json"
