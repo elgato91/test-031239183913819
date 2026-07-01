@@ -20,7 +20,7 @@ jobs:
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
-              -p $PORT:$PORT \
+              --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
@@ -42,6 +42,8 @@ jobs:
           import sys
           import time
           import random
+          import threading
+          import subprocess
           from pathlib import Path
           from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
           from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -54,12 +56,10 @@ jobs:
 
           def clean_url(url: str) -> str:
               try:
-                  # Rimuove le ancore (#fragment) prima di tutto per evitare duplicati
                   url_no_anchor = url.split('#')[0]
                   parsed = urlparse(url_no_anchor)
                   query_params = parse_qsl(parsed.query)
                   
-                  # Lista estesa e aggressiva di tracking parameters da eliminare
                   blacklist_params = {
                       "fbclid", "gclid", "srsltid", "msclkid", "yclid", 
                       "mc_cid", "mc_eid", "_hsenc", "_hsmi", "hsctatracking", 
@@ -83,12 +83,39 @@ jobs:
           class ProxyPool:
               def __init__(self, ports):
                   self.ports = ports
+                  self.usage_count = {port: 0 for port in ports}
+                  self.lock = threading.Lock()
+                  self.restarting = set()
 
               def get_proxy(self):
-                  return random.choice(self.ports)
+                  with self.lock:
+                      available = [p for p in self.ports if p not in self.restarting]
+                      if not available:
+                          return None
+                      return random.choice(available)
 
-          # Pool esteso a 20 porte mappate sui 20 container Docker
+              def report_usage(self, port):
+                  with self.lock:
+                      if port in self.restarting:
+                          return
+                      self.usage_count[port] += 1
+                      # Rotazione IP ottimizzata ogni 8 richieste effettive
+                      if self.usage_count[port] >= 8:
+                          self.usage_count[port] = 0
+                          self.restarting.add(port)
+                          threading.Thread(target=self._restart_proxy, args=(port,)).start()
+
+              def _restart_proxy(self, port):
+                  container_index = port - 40000
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha effettuato 8 richieste. Rigenerazione IP WARP in corso...")
+                  subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
+                  time.sleep(6)
+                  with self.lock:
+                      if port in self.restarting:
+                          self.restarting.remove(port)
+
           PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
+          STARTPAGE_LOCK = threading.Lock()
 
           ACCEPT_LANGUAGES = [
               "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -96,7 +123,6 @@ jobs:
               "en-US,en;q=0.9,it;q=0.8"
           ]
 
-          # Profilo Chrome 120 (altamente compatibile ed allineato con impersonate)
           BROWSER_PROFILES = {
               "chrome": {
                   "impersonate": "chrome120",
@@ -120,6 +146,8 @@ jobs:
               }
 
           def create_session(port, browser):
+              # Contabilizza l'utilizzo del proxy a ogni creazione di sessione attiva
+              PROXY_POOL.report_usage(port)
               impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
               proxies = {
                   "http": f"socks5h://127.0.0.1:{port}",
@@ -200,15 +228,16 @@ jobs:
               session = create_session(port, browser)
 
               def get_sc_token(sess):
-                  try:
-                      response_get = sess.get("https://www.startpage.com/", timeout=8.0)
-                      if response_get.status_code == 200:
-                          sc_match = (
-                              re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
-                              or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
-                          )
-                          return sc_match.group(1) if sc_match else ""
-                  except Exception: pass
+                  with STARTPAGE_LOCK:
+                      try:
+                          response_get = sess.get("https://www.startpage.com/", timeout=8.0)
+                          if response_get.status_code == 200:
+                              sc_match = (
+                                  re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
+                                  or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
+                              )
+                              return sc_match.group(1) if sc_match else ""
+                      except Exception: pass
                   return ""
 
               sc_token = get_sc_token(session)
@@ -248,6 +277,7 @@ jobs:
                           pass
                       
                       port = PROXY_POOL.get_proxy()
+                      if not port: break
                       session = create_session(port, browser)
                       sc_token = get_sc_token(session)
                       if not sc_token: break
@@ -295,6 +325,7 @@ jobs:
                           pass
                       
                       port = PROXY_POOL.get_proxy()
+                      if not port: break
                       session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
@@ -328,6 +359,7 @@ jobs:
                           pass
                       
                       port = PROXY_POOL.get_proxy()
+                      if not port: break
                       session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
@@ -435,8 +467,7 @@ jobs:
 
               Path("results_temp").mkdir(exist_ok=True)
               
-              # Valore ottimizzato per evitare runaway infiniti della pipeline in caso di anomalie
-              MAX_GLOBAL_RETRIES = 5
+              MAX_GLOBAL_RETRIES = 50
 
               with ThreadPoolExecutor(max_workers=10) as executor:
                   futures = {
