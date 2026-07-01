@@ -31,6 +31,7 @@ jobs:
           import json
           import re
           import asyncio
+          import difflib  # Per mappare l'output dell'LLM sugli URL originali integri
           from urllib.parse import urlparse, urlunparse
           from google import genai
           from google.genai import types
@@ -58,7 +59,7 @@ jobs:
           with open(input_file, "r", encoding="utf-8") as f:
               raw_urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
-          # --- STRUTTURA DI ROUTING MULTIPLO (Preserva tutti i dati separatamente) ---
+          # --- STRUTTURA DI ROUTING MULTIPLO ---
           special_routing = {
               "wikipedia": [],
               "pdf": [],
@@ -121,10 +122,11 @@ jobs:
                   special_routing["video_platforms"].append(url)
                   return True
 
-              # 5. Forum, Community e Discussioni Singole (Reddit, Quora, TripAdvisor ShowTopic/ShowUserReviews)
+              # 5. Forum, Community e Discussioni (CamperOnline, Reddit, TripAdvisor Forum/Reviews, ecc.)
               if ("reddit.com" in netloc or "quora.com" in netloc or 
                   "community.ricksteves.com" in netloc or "sloweurope.com" in netloc or 
-                  "/showtopic-" in path or "/showuserreviews-" in path):
+                  "/showtopic-" in path or "/showuserreviews-" in path or 
+                  "/forum/" in path or "/forums/" in path or "forum." in netloc):
                   special_routing["forums_and_communities"].append(url)
                   return True
 
@@ -133,12 +135,12 @@ jobs:
                   special_routing["yelp_reviews"].append(url)
                   return True
 
-              # 7. OTAs, Aggregatori Commerciali e Directory
+              # 7. OTAs, Aggregatori, Biglietterie terze (Civitatis, Travelocity, Booking, TheFork, ecc.)
               otas_domains = [
                   "booking.com", "expedia.", "hotels.com", "vrbo.com", "airbnb.", "viator.com", 
                   "getyourguide.", "tiqets.com", "eventbrite.", "thefork.", "paginegialle.it", 
                   "misterimprese.it", "restaurantguru.com", "things.in", "evendo.com", 
-                  "italiarecensioni.com", "tripadvisor."
+                  "italiarecensioni.com", "tripadvisor.", "civitatis.", "travelocity."
               ]
               for domain in otas_domains:
                   if domain in netloc:
@@ -162,7 +164,7 @@ jobs:
               return False
 
           def pulizia_sintattica(url_list):
-              """Fase 1: Normalizza i protocolli e smista gli URL speciali senza perderli"""
+              """Fase 1: Normalizza i protocolli e smista gli URL speciali. Elimina mirror cloud."""
               clean_candidates = set()
 
               for url in url_list:
@@ -173,11 +175,15 @@ jobs:
                   if IP_PATTERN.match(netloc):
                       continue
 
-                  # Esegue il routing automatico. Se smistato in un bucket, non va al scraper generalista
+                  # Elimina specchi/backup/cloud storage noti
+                  if "storage.cloud.it" in netloc:
+                      continue
+
+                  # Esegue il routing automatico. Se smistato, esce
                   if rinvio_e_routing(url):
                       continue
 
-                  # Normalizzazione sintattica per deduplicare protocolli e www
+                  # Normalizzazione sintattica per deduplicazione
                   if netloc.startswith("www."):
                       netloc = netloc[4:]
                   clean_url = f"https://{netloc}{parsed.path}"
@@ -208,7 +214,7 @@ jobs:
                                   break
                                   
                       print(f"   [Chunk {chunk_idx}] Analisi completata.", flush=True)
-                      return accumulated_text.strip()
+                      return {"idx": chunk_idx, "raw_result": accumulated_text.strip(), "original_chunk": chunk}
                   except Exception as e:
                       print(f"   [Chunk {chunk_idx}] Errore chiamata Live API: {e}", flush=True)
                       return None
@@ -221,15 +227,26 @@ jobs:
               url_candidati = pulizia_sintattica(raw_urls)
               print(f"Dopo Pulizia Sintattica e Routing: {len(url_candidati)} URL unici da valutare con LLM.")
 
-              # PROMPT PURAMENTE AFFERMATIVO (Nessuna regola di esclusione fragile)
+              # PROMPT AGNOSTICO, ALTAMENTE INCLUSIVO DI RISORSE TURISTICHE REALI
               prompt_template = """
               Sei uno screener semantico ad alta precisione. Il tuo unico compito è valutare se un elenco di URL è geograficamente, concettualmente o semanticamente correlato al "TARGET TOPIC" fornito.
               
-              REGOLE DI VALUTAZIONE:
-              1. Mantieni (KEEP) qualsiasi URL il cui dominio, percorso o slug sia concettualmente, geograficamente o semanticamente legato al "TARGET TOPIC". Non importa se si tratta di una pagina iniziale, una biglietteria, una cantina o informazioni logistiche. Se appartiene all'argomento, va tenuto.
-              2. Scarta (DISCARD) solo ed esclusivamente gli URL che fanno palesemente riferimento a un'altra area geografica, a un'entità del tutto estranea o a un argomento totalmente disconnesso rispetto al "TARGET TOPIC".
+              REGOLE DI VALUTAZIONE (KEEP):
+              1. Mantieni (KEEP) qualsiasi URL il cui dominio, percorso o slug sia concettualmente, geograficamente o semanticamente legato al "TARGET TOPIC".
+              2. Mantieni ASSOLUTAMENTE:
+                 - Home page istituzionali di monumenti, attrazioni e musei locali.
+                 - Biglietterie ufficiali locali o passes turistici della città (es. city cards, passes).
+                 - Pagine di utilità logistica ufficiali o locali (es. dove parcheggiare, regole ZTL, come arrivare).
+                 - Siti ufficiali di cantine vinicole storiche, vigneti o esperienze di degustazione enogastronomica locale.
+                 - Guide turistiche, blog di viaggio e itinerari dedicati.
+
+              REGOLE DI ESCLUSIONE (DISCARD):
+              1. Omonimia / Deviazione Geografica: URL legati a luoghi con lo stesso nome ma situati in altre nazioni o continenti (es. se il topic è Orvieto Italia, scarta alloggi a Tampa Florida, ristoranti ad Atlanta, o cose a Vancouver).
+              2. E-Commerce di Prodotti Fisici / Libri: Pagine per l'acquisto di libri fisici o e-book (es. cataloghi di librerie online come Rizzoli Bookstore o Amazon).
+              3. Prestiti o Anteprime Bibliografiche: Pagine che offrono solo anteprime limitate di libri digitali o prestiti d'archivio (es. internet archive /details/).
+              4. Panoramiche Regionali Generiche: Articoli che descrivono genericamente un'intera nazione o regione senza capitoli o sezioni dedicate specificamente al "TARGET TOPIC".
               
-              Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi e mantenuti. Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
+              Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi e mantenuti. Usa il formato markdown ```json ... ```. Non aggiungere altro testo.
               """
 
               # Chunking da 50 URL
@@ -243,37 +260,33 @@ jobs:
               print(f"-> Lancio di {len(chunks)} analisi parallele sui chunk...", flush=True)
               risultati_raw = await asyncio.gather(*tasks)
 
-              url_approvati_raw = []
-              for idx, ris in enumerate(risultati_raw):
-                  if ris:
-                      try:
-                          match = re.search(r'```json\s*(.*?)\s*```', ris, re.DOTALL)
-                          json_str = match.group(1) if match else ris
-                          chunk_approvati = json.loads(json_str)
-                          if isinstance(chunk_approvati, list):
-                              url_approvati_raw.extend(chunk_approvati)
-                      except Exception as e:
-                          print(f"   [Chunk {idx+1}] Errore parsing JSON. Output grezzo: {ris[:50]}...", flush=True)
-
-              # Risoluzione corruzione spazi bianchi (es. "https:// wanderlog.com" -> "https://wanderlog.com")
               url_approvati_puliti = []
-              for url in url_approvati_raw:
-                  url_senza_spazi = re.sub(r'\s+', '', url)
-                  if not url_senza_spazi:
-                      continue
-                  try:
-                      parsed = urlparse(url_senza_spazi)
-                      if not parsed.netloc:
-                          continue
-                      netloc = parsed.netloc.lower()
-                      if netloc.startswith("www."):
-                          netloc = netloc[4:]
-                      clean_url = f"https://{netloc}{parsed.path}"
-                      if clean_url.endswith('/'):
-                          clean_url = clean_url[:-1]
-                      url_approvati_puliti.append(clean_url)
-                  except Exception as e:
-                      print(f"Errore post-processing URL '{url_senza_spazi}': {e}", flush=True)
+              for item in risultati_raw:
+                  if item and item["raw_result"]:
+                      try:
+                          # Estrazione del JSON
+                          match = re.search(r'```json\s*(.*?)\s*```', item["raw_result"], re.DOTALL)
+                          json_str = match.group(1) if match else item["raw_result"]
+                          chunk_approvati = json.loads(json_str)
+                          
+                          if isinstance(chunk_approvati, list):
+                              # CORREZIONE DANNEGGIAMENTO URL (Fuzzy Recovery)
+                              # Confrontiamo ogni output dell'LLM con gli URL originali del relativo chunk
+                              for url in chunk_approvati:
+                                  # Rimuove spazi vuoti (es. "https:// wanderlog.com" -> "https://wanderlog.com")
+                                  url_senza_spazi = re.sub(r'\s+', '', url)
+                                  if not url_senza_spazi:
+                                      continue
+                                  
+                                  # Cerca l'URL originale più simile nel chunk originale inviato a Gemini
+                                  matches = difflib.get_close_matches(url_senza_spazi, item["original_chunk"], n=1, cutoff=0.75)
+                                  if matches:
+                                      url_approvati_puliti.append(matches[0])
+                                  else:
+                                      # Fallback di sicurezza se non trova corrispondenza (usa l'URL ripulito dagli spazi)
+                                      url_approvati_puliti.append(url_senza_spazi)
+                      except Exception as e:
+                          print(f"   [Chunk {item['idx']}] Errore parsing JSON. Output grezzo: {item['raw_result'][:50]}...", flush=True)
 
               # Unicizzazione finale dei risultati dell'LLM
               url_approvati = sorted(list(set(url_approvati_puliti)))
