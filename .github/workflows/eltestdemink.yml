@@ -56,10 +56,12 @@ jobs:
 
           def clean_url(url: str) -> str:
               try:
+                  # Rimuove le ancore (#fragment) prima di tutto per evitare duplicati
                   url_no_anchor = url.split('#')[0]
                   parsed = urlparse(url_no_anchor)
                   query_params = parse_qsl(parsed.query)
                   
+                  # Lista estesa e aggressiva di tracking parameters da eliminare
                   blacklist_params = {
                       "fbclid", "gclid", "srsltid", "msclkid", "yclid", 
                       "mc_cid", "mc_eid", "_hsenc", "_hsmi", "hsctatracking", 
@@ -89,6 +91,7 @@ jobs:
 
               def get_proxy(self):
                   with self.lock:
+                      # Peschiamo solo dai proxy che NON sono in fase di riavvio background
                       available = [p for p in self.ports if p not in self.restarting]
                       if not available:
                           return None
@@ -99,21 +102,21 @@ jobs:
                       if port in self.restarting:
                           return
                       self.usage_count[port] += 1
-                      # Rotazione IP ottimizzata ogni 8 richieste effettive
-                      if self.usage_count[port] >= 8:
+                      # Alzato a 35 per evitare lo spam di riavvii e massimizzare le performance
+                      if self.usage_count[port] >= 35:
                           self.usage_count[port] = 0
                           self.restarting.add(port)
                           threading.Thread(target=self._restart_proxy, args=(port,)).start()
 
               def _restart_proxy(self, port):
                   container_index = port - 40000
-                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha effettuato 8 richieste. Rigenerazione IP WARP in corso...")
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 35 richieste. Cambio IP IPv6 in background...")
                   subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
-                  time.sleep(6)
+                  time.sleep(6) # Attesa stabilizzazione tunnel WARP
                   with self.lock:
-                      if port in self.restarting:
-                          self.restarting.remove(port)
+                      self.restarting.remove(port)
 
+          # Pool esteso a 20 porte mappate sui 20 container Docker
           PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
           STARTPAGE_LOCK = threading.Lock()
 
@@ -123,6 +126,7 @@ jobs:
               "en-US,en;q=0.9,it;q=0.8"
           ]
 
+          # Ripristinato il profilo d'oro Chrome 120 (estremamente stealth e compatibile)
           BROWSER_PROFILES = {
               "chrome": {
                   "impersonate": "chrome120",
@@ -146,8 +150,6 @@ jobs:
               }
 
           def create_session(port, browser):
-              # Contabilizza l'utilizzo del proxy a ogni creazione di sessione attiva
-              PROXY_POOL.report_usage(port)
               impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
               proxies = {
                   "http": f"socks5h://127.0.0.1:{port}",
@@ -277,7 +279,6 @@ jobs:
                           pass
                       
                       port = PROXY_POOL.get_proxy()
-                      if not port: break
                       session = create_session(port, browser)
                       sc_token = get_sc_token(session)
                       if not sc_token: break
@@ -325,7 +326,6 @@ jobs:
                           pass
                       
                       port = PROXY_POOL.get_proxy()
-                      if not port: break
                       session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
@@ -359,7 +359,6 @@ jobs:
                           pass
                       
                       port = PROXY_POOL.get_proxy()
-                      if not port: break
                       session = create_session(port, browser)
                       human_sleep(0.5, 0.2)
                   
@@ -370,6 +369,7 @@ jobs:
               return links if links else None
 
           def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
+              # Staggered Start (ritardo randomico iniziale per sfasare l'avvio delle task)
               if global_attempt == 1:
                   time.sleep(random.uniform(0.1, 7.0))
               
@@ -389,6 +389,8 @@ jobs:
                       elif engine == "yahoo": links = fetch_yahoo(query, browser, port)
                   except Exception:
                       pass
+
+                  PROXY_POOL.report_usage(port)
 
                   if links is not None and len(links) > 0:
                       cleaned_links = [clean_url(l) for l in links if l]
