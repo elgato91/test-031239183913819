@@ -33,6 +33,8 @@ jobs:
           import asyncio
           import difflib  # Per mappare l'output dell'LLM sugli URL originali integri
           from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+          from google import genai
+          from google.genai import types
 
           api_key = os.environ.get("GEMINI_API_KEY")
           if not api_key:
@@ -141,7 +143,15 @@ jobs:
                   special_routing["video_platforms"].append(url)
                   return True
 
-              # 5. Yelp (Deduplicazione geografica specchiata a livello di business ID)
+              # 5. Forum, Community e Discussioni Singole (Reddit, Quora, TripAdvisor Forum/Reviews, ecc.)
+              if ("reddit.com" in netloc or "quora.com" in netloc or 
+                  "community.ricksteves.com" in netloc or "sloweurope.com" in netloc or 
+                  "/showtopic-" in path or "/showuserreviews-" in path or 
+                  "/forum/" in path or "/forums/" in path or "forum." in netloc):
+                  special_routing["forums_and_communities"].append(url)
+                  return True
+
+              # 6. Yelp (Deduplicazione geografica specchiata a livello di business ID)
               if "yelp." in netloc:
                   biz_match = re.search(r'/biz/([^/]+)', path)
                   if biz_match:
@@ -155,7 +165,7 @@ jobs:
                       special_routing["yelp_reviews"].append(clean_yelp_url)
                       return True
 
-              # 6. TripAdvisor (Deduplicazione geografica profonda su ID attrazione/locale)
+              # 7. TripAdvisor (Deduplicazione geografica profonda su ID attrazione/locale)
               if "tripadvisor." in netloc:
                   d_match = re.search(r'-d(\d+)-', url_lower)
                   if d_match:
@@ -168,14 +178,6 @@ jobs:
                   cleaned_path = re.sub(r'-or\d+-', '-', parsed.path)
                   clean_ta_url = urlunparse(("https", "www.tripadvisor.com", cleaned_path, '', '', ''))
                   special_routing["otas_and_aggregators"].append(clean_ta_url)
-                  return True
-
-              # 7. Forum, Community e Discussioni
-              if ("reddit.com" in netloc or "quora.com" in netloc or 
-                  "community.ricksteves.com" in netloc or "sloweurope.com" in netloc or 
-                  "/showtopic-" in path or "/showuserreviews-" in path or 
-                  "/forum/" in path or "/forums/" in path or "forum." in netloc):
-                  special_routing["forums_and_communities"].append(url)
                   return True
 
               # 8. OTAs, Aggregatori, Biglietterie terze (Civitatis, Winedering, Travelocity, Booking, ecc.)
@@ -207,7 +209,7 @@ jobs:
               return False
 
           def pulizia_sintattica(url_list):
-              """Fase 1: Pulisce parametri, deduplica e applica la blocklist deterministica"""
+              """Fase 1: Normalizza i protocolli e smista gli URL speciali. Elimina mirror cloud."""
               clean_candidates = set()
 
               for raw_url in url_list:
@@ -305,7 +307,7 @@ jobs:
               print(f"-> Lancio di {len(chunks)} analisi parallele sui chunk...", flush=True)
               risultati_raw = await asyncio.gather(*tasks)
 
-              url_approvati_raw = []
+              url_approvati_puliti = []
               for item in risultati_raw:
                   if item and item["raw_result"]:
                       try:
@@ -331,8 +333,19 @@ jobs:
                       except Exception as e:
                           print(f"   [Chunk {item['idx']}] Errore parsing JSON. Output grezzo: {item['raw_result'][:50]}...", flush=True)
 
-              # Unicizzazione finale dei risultati dell'LLM
-              url_approvati = sorted(list(set(url_approvati_puliti)))
+              # Unicizzazione finale dei risultati dell'LLM (e normalizzazione)
+              url_approvati_finali = []
+              for url in list(set(url_approvati_puliti)):
+                  parsed = urlparse(url)
+                  netloc = parsed.netloc.lower()
+                  if netloc.startswith("www."):
+                      netloc = netloc[4:]
+                  clean_url = f"https://{netloc}{parsed.path}"
+                  if clean_url.endswith('/'):
+                      clean_url = clean_url[:-1]
+                  url_approvati_finali.append(clean_url)
+
+              url_approvati = sorted(list(set(url_approvati_finali)))
 
               # Unicizzazione finale di tutti gli array di routing deterministici
               special_routing["wikipedia"] = sorted(list(set(special_routing["wikipedia"])))
@@ -375,7 +388,7 @@ jobs:
                   "urls_per_pdf_parser": special_routing['pdf'],
                   "urls_per_social": special_routing['social'],
                   "urls_per_video_platforms": special_routing['video_platforms'],
-                  "urls_per_forums_and_communities": special_routing['forums_and_communities'],
+                  "forums_and_communities": special_routing['forums_and_communities'],
                   "urls_per_yelp_reviews": special_routing['yelp_reviews'],
                   "urls_per_otas_and_aggregators": special_routing['otas_and_aggregators'],
                   "urls_per_real_estate": special_routing['real_estate'],
