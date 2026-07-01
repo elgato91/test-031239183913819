@@ -32,9 +32,7 @@ jobs:
           import re
           import asyncio
           import difflib  # Per mappare l'output dell'LLM sugli URL originali integri
-          from urllib.parse import urlparse, urlunparse
-          from google import genai
-          from google.genai import types
+          from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
           api_key = os.environ.get("GEMINI_API_KEY")
           if not api_key:
@@ -80,15 +78,36 @@ jobs:
           }
 
           IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+          PDF_REGEX = re.compile(r'\.pdf(\/|\?|$)', re.IGNORECASE)
+
+          # Tracker globali di ID unici per impedire la duplicazione geografica ed estera
+          seen_tripadvisor_ids = set()
+          seen_yelp_biz = set()
+
+          def clean_query_params(url):
+              """Sbarra a monte i parametri di tracciamento e localizzazione linguistica da TUTTI gli URL"""
+              parsed = urlparse(url)
+              q_params = parse_qsl(parsed.query)
+              
+              # Parametri non essenziali per il contenuto dell'articolo
+              query_blacklist = {
+                  "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+                  "fbclid", "gclid", "ref", "hl", "locale", "tl", "lang", "source", "amp"
+              }
+              
+              clean_params = [(k, v) for k, v in q_params if k.lower() not in query_blacklist]
+              new_query = urlencode(clean_params) if clean_params else ""
+              return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
           def rinvio_e_routing(url):
-              """Analizza l'URL e lo smista nel bucket corretto se appartiene a piattaforme note"""
+              """Analizza l'URL, esegue deduplicazione geografica e lo smista nel bucket corretto"""
               parsed = urlparse(url)
               netloc = parsed.netloc.lower()
               path = parsed.path.lower()
+              url_lower = url.lower()
 
-              # 1. PDFs
-              if path.endswith('.pdf'):
+              # 1. PDFs (Regex robusta per intercettare PDF camuffati)
+              if PDF_REGEX.search(url_lower):
                   special_routing["pdf"].append(url)
                   return True
 
@@ -122,7 +141,36 @@ jobs:
                   special_routing["video_platforms"].append(url)
                   return True
 
-              # 5. Forum, Community e Discussioni (CamperOnline, Reddit, TripAdvisor Forum/Reviews, ecc.)
+              # 5. Yelp (Deduplicazione geografica specchiata a livello di business ID)
+              if "yelp." in netloc:
+                  biz_match = re.search(r'/biz/([^/]+)', path)
+                  if biz_match:
+                      biz_id = biz_match.group(1)
+                      if biz_id in seen_yelp_biz:
+                          return True  # Salta duplicato geografico
+                      seen_yelp_biz.add(biz_id)
+                      
+                      # Conduce Yelp su dominio standard .com privo di localizzazione
+                      clean_yelp_url = urlunparse(("https", "www.yelp.com", f"/biz/{biz_id}", '', '', ''))
+                      special_routing["yelp_reviews"].append(clean_yelp_url)
+                      return True
+
+              # 6. TripAdvisor (Deduplicazione geografica profonda su ID attrazione/locale)
+              if "tripadvisor." in netloc:
+                  d_match = re.search(r'-d(\d+)-', url_lower)
+                  if d_match:
+                      d_id = d_match.group(1)
+                      if d_id in seen_tripadvisor_ids:
+                          return True  # Salta duplicato specchiato/tradotto estero
+                      seen_tripadvisor_ids.add(d_id)
+
+                  # Normalizza TLD a .com ed elimina eventuale paginazione (-or75-)
+                  cleaned_path = re.sub(r'-or\d+-', '-', parsed.path)
+                  clean_ta_url = urlunparse(("https", "www.tripadvisor.com", cleaned_path, '', '', ''))
+                  special_routing["otas_and_aggregators"].append(clean_ta_url)
+                  return True
+
+              # 7. Forum, Community e Discussioni
               if ("reddit.com" in netloc or "quora.com" in netloc or 
                   "community.ricksteves.com" in netloc or "sloweurope.com" in netloc or 
                   "/showtopic-" in path or "/showuserreviews-" in path or 
@@ -130,31 +178,26 @@ jobs:
                   special_routing["forums_and_communities"].append(url)
                   return True
 
-              # 6. Yelp
-              if "yelp." in netloc:
-                  special_routing["yelp_reviews"].append(url)
-                  return True
-
-              # 7. OTAs, Aggregatori, Biglietterie terze (Civitatis, Travelocity, Booking, TheFork, ecc.)
+              # 8. OTAs, Aggregatori, Biglietterie terze (Civitatis, Winedering, Travelocity, Booking, ecc.)
               otas_domains = [
                   "booking.com", "expedia.", "hotels.com", "vrbo.com", "airbnb.", "viator.com", 
                   "getyourguide.", "tiqets.com", "eventbrite.", "thefork.", "paginegialle.it", 
                   "misterimprese.it", "restaurantguru.com", "things.in", "evendo.com", 
-                  "italiarecensioni.com", "tripadvisor.", "civitatis.", "travelocity."
+                  "italiarecensioni.com", "civitatis.", "travelocity.", "winedering."
               ]
               for domain in otas_domains:
                   if domain in netloc:
                       special_routing["otas_and_aggregators"].append(url)
                       return True
 
-              # 8. Portali Immobiliari
+              # 9. Portali Immobiliari
               real_estate_domains = ["idealista.", "immobiliare.it", "casa.it", "zillow.com", "zoopla.", "trulia.com"]
               for domain in real_estate_domains:
                   if domain in netloc:
                       special_routing["real_estate"].append(url)
                       return True
 
-              # 9. Meteo
+              # 10. Meteo
               weather_domains = ["accuweather.com", "weather.com", "ilmeteo.it", "3bmeteo.com"]
               for domain in weather_domains:
                   if domain in netloc:
@@ -164,10 +207,12 @@ jobs:
               return False
 
           def pulizia_sintattica(url_list):
-              """Fase 1: Normalizza i protocolli e smista gli URL speciali. Elimina mirror cloud."""
+              """Fase 1: Pulisce parametri, deduplica e applica la blocklist deterministica"""
               clean_candidates = set()
 
-              for url in url_list:
+              for raw_url in url_list:
+                  # Sanifica la query string prima di qualsiasi decisione
+                  url = clean_query_params(raw_url)
                   parsed = urlparse(url)
                   netloc = parsed.netloc.lower()
 
@@ -175,7 +220,7 @@ jobs:
                   if IP_PATTERN.match(netloc):
                       continue
 
-                  # Elimina specchi/backup/cloud storage noti
+                  # Elimina mirror cloud o backup non ufficiali
                   if "storage.cloud.it" in netloc:
                       continue
 
@@ -246,7 +291,7 @@ jobs:
               3. Prestiti o Anteprime Bibliografiche: Pagine che offrono solo anteprime limitate di libri digitali o prestiti d'archivio (es. internet archive /details/).
               4. Panoramiche Regionali Generiche: Articoli che descrivono genericamente un'intera nazione o regione senza capitoli o sezioni dedicate specificamente al "TARGET TOPIC".
               
-              Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi e mantenuti. Usa il formato markdown ```json ... ```. Non aggiungere altro testo.
+              Restituisci ESCLUSIVAMENTE un array JSON contenente gli URL validi e mantenuti. Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
               """
 
               # Chunking da 50 URL
@@ -260,7 +305,7 @@ jobs:
               print(f"-> Lancio di {len(chunks)} analisi parallele sui chunk...", flush=True)
               risultati_raw = await asyncio.gather(*tasks)
 
-              url_approvati_puliti = []
+              url_approvati_raw = []
               for item in risultati_raw:
                   if item and item["raw_result"]:
                       try:
@@ -273,7 +318,6 @@ jobs:
                               # CORREZIONE DANNEGGIAMENTO URL (Fuzzy Recovery)
                               # Confrontiamo ogni output dell'LLM con gli URL originali del relativo chunk
                               for url in chunk_approvati:
-                                  # Rimuove spazi vuoti (es. "https:// wanderlog.com" -> "https://wanderlog.com")
                                   url_senza_spazi = re.sub(r'\s+', '', url)
                                   if not url_senza_spazi:
                                       continue
@@ -283,7 +327,6 @@ jobs:
                                   if matches:
                                       url_approvati_puliti.append(matches[0])
                                   else:
-                                      # Fallback di sicurezza se non trova corrispondenza (usa l'URL ripulito dagli spazi)
                                       url_approvati_puliti.append(url_senza_spazi)
                       except Exception as e:
                           print(f"   [Chunk {item['idx']}] Errore parsing JSON. Output grezzo: {item['raw_result'][:50]}...", flush=True)
