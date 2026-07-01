@@ -143,15 +143,7 @@ jobs:
                   special_routing["video_platforms"].append(url)
                   return True
 
-              # 5. Forum, Community e Discussioni Singole (Reddit, Quora, TripAdvisor Forum/Reviews, ecc.)
-              if ("reddit.com" in netloc or "quora.com" in netloc or 
-                  "community.ricksteves.com" in netloc or "sloweurope.com" in netloc or 
-                  "/showtopic-" in path or "/showuserreviews-" in path or 
-                  "/forum/" in path or "/forums/" in path or "forum." in netloc):
-                  special_routing["forums_and_communities"].append(url)
-                  return True
-
-              # 6. Yelp (Deduplicazione geografica specchiata a livello di business ID)
+              # 5. Yelp (Deduplicazione geografica specchiata a livello di business ID)
               if "yelp." in netloc:
                   biz_match = re.search(r'/biz/([^/]+)', path)
                   if biz_match:
@@ -164,28 +156,51 @@ jobs:
                       clean_yelp_url = urlunparse(("https", "www.yelp.com", f"/biz/{biz_id}", '', '', ''))
                       special_routing["yelp_reviews"].append(clean_yelp_url)
                       return True
+                  else:
+                      # Se non contiene /biz/, è una pagina di ricerca o mobile fuffa, va in OTAs
+                      special_routing["otas_and_aggregators"].append(url)
+                      return True
 
-              # 7. TripAdvisor (Deduplicazione geografica profonda su ID attrazione/locale)
+              # 6. TripAdvisor (Deduplicazione geografica profonda su ID attrazione, locale o discussione k-ID)
               if "tripadvisor." in netloc:
                   d_match = re.search(r'-d(\d+)-', url_lower)
+                  k_match = re.search(r'-k(\d+)-', url_lower)
+                  
+                  item_id = None
                   if d_match:
-                      d_id = d_match.group(1)
-                      if d_id in seen_tripadvisor_ids:
-                          return True  # Salta duplicato specchiato/tradotto estero
-                      seen_tripadvisor_ids.add(d_id)
+                      item_id = "d" + d_match.group(1)
+                  elif k_match:
+                      item_id = "k" + k_match.group(1)
+
+                  if item_id:
+                      if item_id in seen_tripadvisor_ids:
+                          return True  # Salta duplicato specchiato/tradotto estero o thread doppio
+                      seen_tripadvisor_ids.add(item_id)
 
                   # Normalizza TLD a .com ed elimina eventuale paginazione (-or75-)
                   cleaned_path = re.sub(r'-or\d+-', '-', parsed.path)
                   clean_ta_url = urlunparse(("https", "www.tripadvisor.com", cleaned_path, '', '', ''))
-                  special_routing["otas_and_aggregators"].append(clean_ta_url)
+
+                  # Smista nel corretto bucket (Forum vs Pagine commerciali standard)
+                  if "/showtopic-" in path or "/showuserreviews-" in path:
+                      special_routing["forums_and_communities"].append(clean_ta_url)
+                  else:
+                      special_routing["otas_and_aggregators"].append(clean_ta_url)
                   return True
 
-              # 8. OTAs, Aggregatori, Biglietterie terze (Civitatis, Winedering, Travelocity, Booking, ecc.)
+              # 7. Forum, Community e Discussioni Singole (Reddit, Quora, Rick Steves Forum, ecc.)
+              if ("reddit.com" in netloc or "quora.com" in netloc or 
+                  "community.ricksteves.com" in netloc or "sloweurope.com" in netloc or 
+                  "/forum/" in path or "/forums/" in path or "forum." in netloc):
+                  special_routing["forums_and_communities"].append(url)
+                  return True
+
+              # 8. OTAs, Aggregatori, Biglietterie terze (Civitatis, Winedering, WineriesExperience, ecc.)
               otas_domains = [
                   "booking.com", "expedia.", "hotels.com", "vrbo.com", "airbnb.", "viator.com", 
                   "getyourguide.", "tiqets.com", "eventbrite.", "thefork.", "paginegialle.it", 
                   "misterimprese.it", "restaurantguru.com", "things.in", "evendo.com", 
-                  "italiarecensioni.com", "civitatis.", "travelocity.", "winedering."
+                  "italiarecensioni.com", "civitatis.", "travelocity.", "winedering.", "wineriesexperience."
               ]
               for domain in otas_domains:
                   if domain in netloc:
@@ -388,7 +403,7 @@ jobs:
                   "urls_per_pdf_parser": special_routing['pdf'],
                   "urls_per_social": special_routing['social'],
                   "urls_per_video_platforms": special_routing['video_platforms'],
-                  "forums_and_communities": special_routing['forums_and_communities'],
+                  "urls_per_forums_and_communities": special_routing['forums_and_communities'],
                   "urls_per_yelp_reviews": special_routing['yelp_reviews'],
                   "urls_per_otas_and_aggregators": special_routing['otas_and_aggregators'],
                   "urls_per_real_estate": special_routing['real_estate'],
