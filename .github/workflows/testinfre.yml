@@ -224,7 +224,7 @@ jobs:
               return False
 
           def pulizia_sintattica(url_list):
-              """Fase 1: Normalizza i protocolli e smista gli URL speciali. Elimina mirror cloud."""
+              """Fase 1: Pulisce parametri, deduplica e applica la blocklist deterministica. Elimina mirror cloud."""
               clean_candidates = set()
 
               for raw_url in url_list:
@@ -257,26 +257,33 @@ jobs:
               return list(clean_candidates)
 
           async def analizza_chunk_live(chunk_idx, chunk, topic, prompt_template):
-              """Sotto-funzione asincrona per elaborare un chunk di URL tramite WebSocket"""
+              """Sotto-funzione asincrona per elaborare un chunk di URL tramite WebSocket con timeout di sicurezza"""
               async with semaphore:
                   print(f"   [Chunk {chunk_idx}] Connessione WebSocket attiva. Invio {len(chunk)} URL...", flush=True)
                   accumulated_text = ""
                   payload = f"{prompt_template}\n\nTARGET TOPIC:\n{topic}\n\nURL CHUNK:\n{json.dumps(chunk)}"
                   
                   try:
-                      async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
-                          await session.send_realtime_input(text=payload)
-                          
-                          async for response in session.receive():
-                              if response.server_content and response.server_content.output_transcription:
-                                  if response.server_content.output_transcription.text:
-                                      accumulated_text += response.server_content.output_transcription.text
+                      async def run_session():
+                          nonlocal accumulated_text
+                          async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config_live) as session:
+                              await session.send_realtime_input(text=payload)
+                              
+                              async for response in session.receive():
+                                  if response.server_content and response.server_content.output_transcription:
+                                      if response.server_content.output_transcription.text:
+                                          accumulated_text += response.server_content.output_transcription.text
+                                          
+                                  if response.server_content and response.server_content.turn_complete:
+                                      break
                                       
-                              if response.server_content and response.server_content.turn_complete:
-                                  break
-                                  
+                      # Timeout asincrono di sicurezza di 45 secondi
+                      await asyncio.wait_for(run_session(), timeout=45.0)
                       print(f"   [Chunk {chunk_idx}] Analisi completata.", flush=True)
                       return {"idx": chunk_idx, "raw_result": accumulated_text.strip(), "original_chunk": chunk}
+                  except (asyncio.TimeoutError, TimeoutError):
+                      print(f"   [Chunk {chunk_idx}] TIMEOUT di 45s scaduto sulla chiamata Live API. Salto il chunk per evitare blocchi.", flush=True)
+                      return None
                   except Exception as e:
                       print(f"   [Chunk {chunk_idx}] Errore chiamata Live API: {e}", flush=True)
                       return None
