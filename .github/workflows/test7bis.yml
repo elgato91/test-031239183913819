@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
+          pip install "cloakbrowser[geoip]" beautifulsoup4 curl-cffi
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -35,11 +35,11 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6)
+      - name: Setup Container WARP (20 Nodi IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          for i in {1..6}; do
+          for i in {1..20}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
@@ -48,210 +48,493 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+            sleep 0.3
           done
           
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          sleep 12
 
-      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+      - name: Creazione Cartella Temporanea Risultati
+        run: mkdir -p results_temp
+
+      - name: Creazione Scraper Veloce - FASE 1 (curl-cffi)
         run: |
-          cat << 'EOF' > m2_step1_setup.py
+          cat << 'EOF' > stealth_scraper.py
           import json
-          TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
-          ]
-          
-          # Suddivisione matematica statica (Chunking) per performance ottimali
-          for i in range(1, 7):
-              chunk = TARGETS[i-1::6]
-              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-          print("Code distribuite Step 1 generate con successo.")
-          EOF
-          python -u m2_step1_setup.py
-
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
-        run: |
-          cat << 'EOF' > m2_step1.py
-          import time
+          import re
           import sys
+          import time
           import random
-          import os
-          import json
+          import threading
+          from pathlib import Path
+          from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
+          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+          def log(message: str):
+              sys.stderr.write(message + "\n")
+              sys.stderr.flush()
 
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-
-          def verify_proxy_active(port, max_retries=5, delay=5):
-              test_session = requests.Session(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for _ in range(max_retries):
-                  try:
-                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200: return True
-                  except: pass
-                  time.sleep(delay)
-              return False
-
-          def validate_html(html, url, status_code):
-              if status_code >= 400: return False, f"Blocco HTTP {status_code}"
-              if not html or len(html.strip()) < 300: return False, "HTML vuoto"
-              if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
-              
-              low_html = html.lower()
-              blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
-                  "just a moment", "security verification", "please enable js", "enable javascript",
-                  "are you a robot", "please wait for verification", "we've detected unusual activity",
-                  "if you are not redirected", "unusual traffic from your computer network",
-                  "checking your browser", "prove your humanity", "captcha verification", 
-                  "please enter in the characters you see below", "access to this page is forbidden",
-                  "error 1020", "you have been blocked", "pardon our interruption",
-                  "se non vieni reindirizzato", "se hai problemi ad accedere", 
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
-              ]
-              
-              for ind in blocking_indicators:
-                  if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
-              return True, ""
-
-          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
-
-          queue_file = f"/tmp/step1_queue_{node_id}.json"
-          if not os.path.exists(queue_file): sys.exit(0)
-          
-          with open(queue_file, "r") as f:
-              targets = json.load(f)
-
-          results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
-          failed_targets = []
-          
-          session = requests.Session(impersonate="chrome120")
-          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-          session.headers.update({
-              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-          })
-
-          for url in targets:
-              print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+          def clean_url(url: str) -> str:
               try:
-                  resp = session.get(url, timeout=12)
-                  is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-                  
-                  if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator=' ', strip=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
-                      failed_targets.append(url)
-              except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
-                  failed_targets.append(url)
-              
-              time.sleep(random.uniform(1.0, 2.0))
+                  url_no_anchor = url.split('#')[0]
+                  parsed = urlparse(url_no_anchor)
+                  query_params = parse_qsl(parsed.query)
+                  blacklist_params = {
+                      "fbclid", "gclid", "srsltid", "msclkid", "yclid", 
+                      "mc_cid", "mc_eid", "_hsenc", "_hsmi", "hsctatracking", 
+                      "submissionguid", "rb_clickid"
+                  }
+                  filtered_params = [
+                      (k, v) for k, v in query_params
+                      if k.lower() not in blacklist_params
+                      and not k.lower().startswith("utm_")
+                  ]
+                  new_query = urlencode(filtered_params)
+                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ""))
+              except Exception:
+                  return url
 
-          with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
-          with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
+          def human_sleep(mean: float, std_dev: float):
+              sleep_time = max(0.1, random.gauss(mean, std_dev))
+              time.sleep(sleep_time)
+
+          class ProxyPool:
+              def __init__(self, ports):
+                  self.ports = ports
+                  self.usage_count = {port: 0 for port in ports}
+                  self.lock = threading.Lock()
+                  self.restarting = set()
+
+              def get_proxy(self):
+                  with self.lock:
+                      available = [p for p in self.ports if p not in self.restarting]
+                      if not available:
+                          return None
+                      return random.choice(available)
+
+              def report_usage(self, port):
+                  with self.lock:
+                      if port in self.restarting:
+                          return
+                      self.usage_count[port] += 1
+                      if self.usage_count[port] >= 35:
+                          self.usage_count[port] = 0
+                          self.restarting.add(port)
+                          threading.Thread(target=self._restart_proxy, args=(port,)).start()
+
+              def _restart_proxy(self, port):
+                  container_index = port - 40000
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 35 richieste. Cambio IP in background...")
+                  subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
+                  time.sleep(6)
+                  with self.lock:
+                      self.restarting.remove(port)
+
+          PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
+          STARTPAGE_LOCK = threading.Lock()
+
+          ACCEPT_LANGUAGES = [
+              "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+              "it-IT,it;q=0.9",
+              "en-US,en;q=0.9,it;q=0.8"
+          ]
+
+          BROWSER_PROFILES = {
+              "chrome": {
+                  "impersonate": "chrome120",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              },
+              "edge": {
+                  "impersonate": "chrome120",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              }
+          }
+
+          def get_minimal_headers(browser: str) -> dict:
+              profile = BROWSER_PROFILES[browser]
+              return {
+                  "user-agent": profile["ua"],
+                  "accept": profile["accept"],
+                  "accept-language": random.choice(ACCEPT_LANGUAGES),
+                  "accept-encoding": "gzip, deflate, br",
+              }
+
+          def create_session(port, browser):
+              impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
+              proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              sess = requests.Session(impersonate=impersonate_target, proxies=proxies)
+              sess.headers.update(get_minimal_headers(browser))
+              return sess
+
+          def extract_react_json(html_content: str) -> dict | None:
+              start_str = '{"render":'
+              idx = html_content.find(start_str)
+              if idx == -1: return None
+              brace_count, json_end = 0, -1
+              for i in range(idx, len(html_content)):
+                  if html_content[i] == "{": brace_count += 1
+                  elif html_content[i] == "}": brace_count -= 1
+                  if brace_count == 0:
+                      json_end = i
+                      break
+              if json_end == -1: return None
+              try: return json.loads(html_content[idx : json_end + 1])
+              except Exception: return None
+
+          def extract_duckduckgo(html):
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              for a in soup.find_all("a", class_="result__url", href=True):
+                  href = a["href"]
+                  match = re.search(r"uddg=([^&]+)", href)
+                  if match:
+                      real_url = unquote(match.group(1))
+                      if real_url.startswith("http") and "duckduckgo.com" not in real_url:
+                          links.append(real_url)
+              return links
+
+          def extract_startpage(html):
+              links = []
+              react_data = extract_react_json(html)
+              if react_data:
+                  try:
+                      mainline = react_data.get("render", {}).get("presenter", {}).get("regions", {}).get("mainline", [])
+                      for section in mainline:
+                          if section.get("display_type") == "web-google" and "results" in section:
+                              for item in section["results"]:
+                                  if "clickUrl" in item:
+                                      links.append(item["clickUrl"])
+                  except Exception: pass
+              
+              if links:
+                  return links
+
+              soup = BeautifulSoup(html, "html.parser")
+              for a in soup.find_all("a", class_=["w-gl__result-title", "w-gl__result-link"], href=True):
+                  href = a["href"]
+                  if href.startswith("http") and not any(d in href for d in ["startpage.com", "ixquick.com", "startmail.com"]):
+                      links.append(href)
+              return links
+
+          def extract_yahoo(html):
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              for div in soup.find_all("div", class_=["compTitle", "algo", "y-algo"]):
+                  for a in div.find_all("a", href=True):
+                      href = a["href"]
+                      if "r.search.yahoo.com" in href and "RU=" in href:
+                          match = re.search(r"RU=([^/]+)", href)
+                          if match:
+                              url = unquote(match.group(1))
+                              if url.startswith("http"):
+                                  links.append(url)
+                      elif href.startswith("http") and not any(d in href for d in ["yahoo.com", "yimg.com", "yahoo.co.jp"]):
+                          links.append(href)
+              return links
+
+          def fetch_startpage(query: str, browser: str, initial_port: int) -> list[str] | None:
+              port = initial_port
+              session = create_session(port, browser)
+
+              def get_sc_token(sess):
+                  with STARTPAGE_LOCK:
+                      try:
+                          response_get = sess.get("https://www.startpage.com/", timeout=8.0)
+                          if response_get.status_code == 200:
+                              sc_match = (
+                                  re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
+                                  or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
+                              )
+                              return sc_match.group(1) if sc_match else ""
+                      except Exception: pass
+                  return ""
+
+              sc_token = get_sc_token(session)
+              if not sc_token:
+                  port = PROXY_POOL.get_proxy()
+                  if not port: return None
+                  session = create_session(port, browser)
+                  sc_token = get_sc_token(session)
+                  if not sc_token: return None
+
+              links = []
+              for page in range(7):
+                  offset = page * 10
+                  payload = {
+                      "query": query, "sc": sc_token, "cat": "web", "t": "device",
+                      "language": "italiano", "lui": "english", "qadf": "moderate",
+                      "startat": str(offset)
+                  }
+                  
+                  page_success = False
+                  for attempt in range(2):
+                      headers_post = get_minimal_headers(browser)
+                      headers_post.update({
+                          "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
+                          "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
+                          "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
+                      })
+                      try:
+                          response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
+                          if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
+                              page_links = extract_startpage(response_post.text)
+                              if page_links:
+                                  links.extend(page_links)
+                              page_success = True
+                              break
+                      except Exception:
+                          pass
+                      
+                      port = PROXY_POOL.get_proxy()
+                      session = create_session(port, browser)
+                      sc_token = get_sc_token(session)
+                      if not sc_token: break
+                      payload["sc"] = sc_token
+                      human_sleep(0.5, 0.2)
+
+                  if not page_success:
+                      break 
+                  human_sleep(0.2, 0.1)
+
+              return links if links else None
+
+          def fetch_duckduckgo(query: str, browser: str, initial_port: int) -> list[str] | None:
+              port = initial_port
+              session = create_session(port, browser)
+              links = []
+              
+              offsets = [0, 30, 60]
+              for page_idx, offset in enumerate(offsets):
+                  if page_idx == 0:
+                      url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+                  else:
+                      url = f"https://html.duckduckgo.com/html/?q={quote(query)}&s={offset}&dc={offset+1}&v=l"
+                  
+                  page_success = False
+                  for attempt in range(2):
+                      headers = get_minimal_headers(browser)
+                      headers.update({
+                          "referer": "https://duckduckgo.com/", "origin": "https://duckduckgo.com",
+                          "sec-fetch-dest": "document", "sec-fetch-mode": "navigate",
+                          "sec-fetch-site": "same-origin", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1"
+                      })
+                      try:
+                          response = session.get(url, headers=headers, timeout=8.0)
+                          if response.status_code == 202:
+                              human_sleep(1.5, 0.3)
+                              response = session.get(url, headers=headers, timeout=8.0)
+                          if response.status_code == 200 and "captcha" not in response.text.lower():
+                              page_links = extract_duckduckgo(response.text)
+                              if page_links:
+                                  links.extend(page_links)
+                              page_success = True
+                              break
+                      except Exception:
+                          pass
+                      
+                      port = PROXY_POOL.get_proxy()
+                      session = create_session(port, browser)
+                      human_sleep(0.5, 0.2)
+                  
+                  if not page_success:
+                      break
+                  human_sleep(0.3, 0.1)
+
+              return links if links else None
+
+          def fetch_yahoo(query: str, browser: str, initial_port: int) -> list[str] | None:
+              port = initial_port
+              session = create_session(port, browser)
+              links = []
+              
+              offsets = [1, 41]
+              for page_idx, offset in enumerate(offsets):
+                  url = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b={offset}"
+                  
+                  page_success = False
+                  for attempt in range(2):
+                      headers = get_minimal_headers(browser)
+                      try:
+                          response = session.get(url, headers=headers, timeout=10.0)
+                          if response.status_code == 200:
+                              page_links = extract_yahoo(response.text)
+                              if page_links:
+                                  links.extend(page_links)
+                              page_success = True
+                              break
+                      except Exception:
+                          pass
+                      
+                      port = PROXY_POOL.get_proxy()
+                      session = create_session(port, browser)
+                      human_sleep(0.5, 0.2)
+                  
+                  if not page_success:
+                      break
+                  human_sleep(0.3, 0.1)
+                  
+              return links if links else None
+
+          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
+              if global_attempt == 1:
+                  time.sleep(random.uniform(0.1, 7.0))
+              
+              max_local_retries = 3
+              
+              for local_attempt in range(1, max_local_retries + 1):
+                  port = PROXY_POOL.get_proxy()
+                  if not port:
+                      time.sleep(1.0)
+                      continue
+                      
+                  browser = random.choice(["chrome", "edge"])
+                  links = None
+                  try:
+                      if engine == "duckduckgo": links = fetch_duckduckgo(query, browser, port)
+                      elif engine == "startpage": links = fetch_startpage(query, browser, port)
+                      elif engine == "yahoo": links = fetch_yahoo(query, browser, port)
+                  except Exception:
+                      pass
+
+                  PROXY_POOL.report_usage(port)
+
+                  if links is not None and len(links) > 0:
+                      cleaned_links = [clean_url(l) for l in links if l]
+                      log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
+                      return cleaned_links
+                  else:
+                      human_sleep(1.0, 0.3)
+
+              log(f"[{task_index:03d}/{total_tasks}] [RITARDO] {engine.upper()} per '{query}'. Pausa raffreddamento... (Giro {global_attempt})")
+              time.sleep(random.uniform(4.0, 6.0))
+              
+              return None
+
+          def main():
+              # ACCORCIATO: Solo 5 query per velocizzare i test intermedi di funzionamento
+              queries = [
+                  "cosa vedere a Orvieto in un giorno",
+                  "Orvieto sotterranea biglietti e orari",
+                  "Duomo di Orvieto facciata e capolavori",
+                  "Pozzo di San Patrizio storia e segreti",
+                  "itinerario Orvieto a piedi centro storico"
+              ]
+
+              engines = ["duckduckgo", "startpage", "yahoo"]
+              tasks = []
+              for q_idx, q in enumerate(queries):
+                  for eng in engines:
+                      tasks.append((q, eng))
+
+              total_tasks = len(tasks)
+              log(f"Inizio scraping di {total_tasks} combinazioni (5 query x 3 motori di ricerca)")
+
+              Path("results_temp").mkdir(exist_ok=True)
+              
+              MAX_GLOBAL_RETRIES = 50
+
+              with ThreadPoolExecutor(max_workers=10) as executor:
+                  futures = {
+                      executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks, 1): (task[0], task[1], idx + 1, 1)
+                      for idx, task in enumerate(tasks)
+                  }
+
+                  while futures:
+                      done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                      
+                      for future in done:
+                          q, eng, t_idx, global_attempt = futures.pop(future)
+                          
+                          try:
+                              links = future.result()
+                              
+                              if links is not None:
+                                  temp_file = Path("results_temp") / f"task_{t_idx:03d}_{eng}.json"
+                                  with open(temp_file, "w", encoding="utf-8") as f:
+                                      json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
+                              else:
+                                  if global_attempt < MAX_GLOBAL_RETRIES:
+                                      new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
+                                      futures[new_future] = (q, eng, t_idx, global_attempt + 1)
+                                  else:
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'.")
+                          except Exception as e:
+                              log(f"Errore grave nel thread task {t_idx:03d}: {e}")
+
+          if __name__ == "__main__":
+              main()
           EOF
 
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
+      - name: Esecuzione Scraping Veloce - FASE 1 (curl-cffi)
+        run: python -u stealth_scraper.py
 
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
-      - name: Refresh IP Container per lo STEP 2
+      - name: Inizializzazione Code DISTRIBUITE - FASE 2 (CloakBrowser)
         run: |
-          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 2
-        run: |
-          cat << 'EOF' > m2_step2_setup.py
+          cat << 'EOF' > m2_cloak_setup.py
           import json
-          import os
-
-          merged_failed = []
-          for i in range(1, 7):
-              filename = f"failed_node_{i}.json"
-              if os.path.exists(filename):
-                  with open(filename, "r", encoding="utf-8") as f:
-                      try: merged_failed.extend(json.load(f))
-                      except Exception: pass
+          import urllib.parse
           
-          unique_failed = list(dict.fromkeys(merged_failed))
+          # Le 10 query cardinali fondamentali per Orvieto da far elaborare in modo iper-stealth su Google e Bing
+          queries_critiche = [
+              "cosa vedere a Orvieto in un giorno",
+              "Orvieto sotterranea biglietti e orari",
+              "Duomo di Orvieto facciata e capolavori",
+              "Pozzo di San Patrizio storia e segreti",
+              "itinerario Orvieto a piedi centro storico",
+              "migliori ristoranti cucina tipica Orvieto",
+              "Pozzo della Cava Orvieto recensioni",
+              "Cappella di San Brizio Luca Signorelli Duomo",
+              "MUSEO Claudio Faina Orvieto cosa vedere",
+              "dove mangiare la gallina ubriaca a Orvieto"
+          ]
           
-          for i in range(1, 7):
-              chunk = unique_failed[i-1::6]
-              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
+          tasks = []
+          for q in queries_critiche:
+              # Google Search URL
+              tasks.append(f"https://www.google.com/search?q={urllib.parse.quote(q)}&hl=it")
+              # Bing Search URL
+              tasks.append(f"https://www.bing.com/search?q={urllib.parse.quote(q)}")
+          
+          # Suddivisione logica su 5 canali (5 container CloakBrowser paralleli)
+          for i in range(1, 6):
+              chunk = tasks[i-1::5]
+              with open(f"/tmp/cloak_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
                   
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          print(f"Generata coda per Step 2 CloakBrowser con {len(tasks)} target distribuiti su 5 nodi.")
           EOF
-          python -u m2_step2_setup.py
+          python -u m2_cloak_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
+      - name: Creazione Script Python - FASE 2 (CloakBrowser su 5 Nodi - No custom manual inputs)
         run: |
-          cat << 'EOF' > m2_step2.py
+          cat << 'EOF' > cloak_scraper.py
           import asyncio
           import time
           import sys
           import random
           import os
           import json
-          from urllib.parse import urlparse, parse_qs
-          from cloakbrowser import launch_persistent_context_async
+          from pathlib import Path
+          from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode
           from bs4 import BeautifulSoup
+          from cloakbrowser import launch_persistent_context_async
+
+          def log(message: str):
+              sys.stderr.write(message + "\n")
+              sys.stderr.flush()
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
+          ACTIVE_PORT = 40000 + node_id
 
-          def get_query_from_url(url, default="migliore carbonara roma"):
+          def get_query_from_url(url, default="cosa vedere orvieto"):
               try:
                   parsed = urlparse(url)
                   queries = parse_qs(parsed.query)
@@ -260,165 +543,231 @@ jobs:
               except: pass
               return default
 
+          def clean_url(url: str) -> str:
+              try:
+                  url_no_anchor = url.split('#')[0]
+                  parsed = urlparse(url_no_anchor)
+                  query_params = parse_qsl(parsed.query)
+                  blacklist_params = {
+                      "fbclid", "gclid", "srsltid", "msclkid", "yclid", 
+                      "mc_cid", "mc_eid", "_hsenc", "_hsmi", "hsctatracking", 
+                      "submissionguid", "rb_clickid"
+                  }
+                  filtered_params = [
+                      (k, v) for k, v in query_params
+                      if k.lower() not in blacklist_params
+                      and not k.lower().startswith("utm_")
+                  ]
+                  new_query = urlencode(filtered_params)
+                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ""))
+              except Exception:
+                  return url
+
+          def extract_google_links(html: str) -> list[str]:
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              for a in soup.find_all("a", href=True):
+                  href = a["href"]
+                  if href.startswith("http") and not any(d in href for d in ["google.com", "google.it", "youtube.com", "accounts.google"]):
+                      parent = a.find_parent(["div", "li"])
+                      if parent and (a.find("h3") or "LC20lb" in str(a)):
+                          links.append(href)
+              return list(dict.fromkeys(links))
+
+          def extract_bing_links(html: str) -> list[str]:
+              soup = BeautifulSoup(html, "html.parser")
+              links = []
+              for li in soup.find_all("li", class_="b_algo"):
+                  for a in li.find_all("a", href=True):
+                      href = a["href"]
+                      if href.startswith("http") and not any(d in href for d in ["bing.com", "microsoft.com"]):
+                          links.append(href)
+              return list(dict.fromkeys(links))
+
           async def main():
-              queue_file = f"/tmp/step2_queue_{node_id}.json"
+              queue_file = f"/tmp/cloak_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
               
               with open(queue_file, "r") as f: targets = json.load(f)
-              if not targets:
-                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
-                  return
+              if not targets: return
 
               home_dir = os.path.expanduser("~")
-              profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
+              profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=10000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
+              print(f"[NODO {node_id}] Avvio sessione Persistente nativa (Warmup + Scraping)...", flush=True)
               try:
-                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
                       humanize=True,
                       human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                      proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
                       geoip=True,
                       viewport={"width": 1920, "height": 1080},
                       args=base_args
                   )
                   page = await context.new_page()
                   
-                  # WARMUP Integrato - Creazione di cronologia valida
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
+                  # WARMUP nativo di cloakbrowser
+                  await page.goto("https://www.google.com/?hl=it", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
-                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=10000)
-                  await asyncio.sleep(2)
-
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
+                  log(f"[CLOAK NODO {node_id}] Errore avvio browser: {e}")
                   return
 
-              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
-
-              for url in targets:
+              for idx, url in enumerate(targets):
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
-                              
-                      if "startpage.com" in url:
-                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.0, 3.5))
+                      # RICERCHE E COMPORTAMENTO NATIVO (Zero forzature di click o selettori manuali)
+                      if "bing.com" in url:
+                          await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                          await asyncio.sleep(random.uniform(2.5, 4.0))
                           try:
-                              search_box = page.locator("input#q").first
+                              search_box = page.locator("textarea[name='q'], input[name='q']").first
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
-                      elif "html.duckduckgo.com" in url:
-                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.0, 3.5))
-                          try:
-                              search_box = page.locator("input[name=q]").first
-                              await search_box.fill(query_to_search)
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
+                          except: 
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                       else:
+                          # Navigazione diretta Google (Altamente ottimizzata nel tuo cloakbrowser originario)
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
+                      # --- SILENZIO RADIO (Zero esecuzioni JS per aggirare WAF/Captcha) ---
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
-                          
-                      await asyncio.sleep(6) 
+                      await asyncio.sleep(6)
                       
-                      # Scarica l'HTML in memoria una singola volta
+                      # Scorrimento Lazy Load NATIVO (Simula tastiera hardware)
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(1)
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(2)
+                      
+                      # Scarica l'HTML staticamente una singola volta per estrarre i link (Zero impronta)
                       raw_html = await page.content()
-                      soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      text_lower = text.lower()
-                      
-                      # Rilevamento passivo WAF/Captcha
-                      blocking_indicators = [
-                          "just a moment", "are you a robot", "prove your humanity",
-                          "captcha verification", "please enter in the characters you see below",
-                          "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity"
-                      ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
-                      
-                      if len(text) > 150 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
-                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                      if "google.com" in url:
+                          links = extract_google_links(raw_html)
                       else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
+                          links = extract_bing_links(raw_html)
+
+                      if links:
+                          cleaned_links = [clean_url(l) for l in links if l]
+                          # Salviamo il file JSON in results_temp per fonderlo in automatico alla fine
+                          temp_file = Path("results_temp") / f"task_cloak_{node_id}_{idx}.json"
+                          with open(temp_file, "w", encoding="utf-8") as f:
+                              json.dump({"query": query_to_search, "engine": "cloak", "links": cleaned_links}, f, ensure_ascii=False, indent=2)
+                          print(f"[NODO {node_id}] -> Recuperato con Successo! {len(cleaned_links)} link organici estratti.", flush=True)
+                      else:
+                          print(f"[NODO {node_id}] -> Nessun link organico estratto.", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
                   
                   await asyncio.sleep(random.uniform(4.0, 7.0))
 
               try: await context.close()
               except: pass
 
-              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                  f.write(results)
-
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
 
-      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
+      - name: Esecuzione Scraping Parallelo - FASE 2 (CloakBrowser su 5 Nodi)
         run: |
-          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
-          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
-          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
+          echo 'Avvio processi CloakBrowser in modalità headful simulata...'
+          touch node1_cloak.log node2_cloak.log node3_cloak.log node4_cloak.log node5_cloak.log
+          tail -q -f node1_cloak.log node2_cloak.log node3_cloak.log node4_cloak.log node5_cloak.log &
           TAIL_PID=$!
           
           PIDS=()
-          for i in {1..6}; do
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+          # Eseguiamo su 5 nodi paralleli (sulle prime 5 porte attive: 40001-40005)
+          for i in {1..5}; do
+            python -u cloak_scraper.py $i > node${i}_cloak.log 2>&1 &
             PIDS+=($!)
-            sleep 1.5
+            sleep 2.0
           done
 
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
-          
-          for i in {1..6}; do
+
+      - name: Arresto Container WARP
+        if: always()
+        run: |
+          for i in {1..20}; do
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
           done
 
-          touch output_node_1_step1.txt output_node_1_step2.txt \
-                output_node_2_step1.txt output_node_2_step2.txt \
-                output_node_3_step1.txt output_node_3_step2.txt \
-                output_node_4_step1.txt output_node_4_step2.txt \
-                output_node_5_step1.txt output_node_5_step2.txt \
-                output_node_6_step1.txt output_node_6_step2.txt
+      - name: Combinazione e Deduplica Risultati Finali
+        if: always()
+        shell: python
+        run: |
+          import json
+          import glob
+          import re
+          import os
+          from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-          cat output_node_1_step1.txt output_node_1_step2.txt \
-              output_node_2_step1.txt output_node_2_step2.txt \
-              output_node_3_step1.txt output_node_3_step2.txt \
-              output_node_4_step1.txt output_node_4_step2.txt \
-              output_node_5_step1.txt output_node_5_step2.txt \
-              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
+          # Normalizzazione case-sensitive sicura (path e query string rimangono intatti)
+          def normalize_url(url: str) -> str:
+              try:
+                  parsed = urlparse(url)
+                  scheme = parsed.scheme.lower() if parsed.scheme else "https"
+                  netloc = parsed.netloc.lower()
+                  if netloc.startswith("www."):
+                      netloc = netloc[4:]
+                  
+                  path = parsed.path.rstrip("/")
+                  params = sorted(parse_qsl(parsed.query))
+                  query = urlencode(params)
+                  return urlunparse((scheme, netloc, path, "", query, ""))
+              except Exception:
+                  return url
+
+          all_raw_links = []
+          # Raccoglie tutti i file temporanei sia di curl-cffi (Fase 1) che di CloakBrowser (Fase 2)
+          for filepath in glob.glob("results_temp/task_*.json"):
+              try:
+                  with open(filepath, "r", encoding="utf-8") as f:
+                      data = json.load(f)
+                      links = data.get("links", [])
+                      if isinstance(links, list):
+                          all_raw_links.extend(links)
+              except Exception as e:
+                  print(f"Errore lettura {filepath}: {e}")
+
+          seen_normalized = set()
+          deduped_urls = []
+          for u in all_raw_links:
+              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", u).strip()
+              if not cleaned.startswith("http") or len(cleaned) < 12:
+                  continue
+              norm = normalize_url(cleaned)
+              if norm not in seen_normalized:
+                  seen_normalized.add(norm)
+                  deduped_urls.append(cleaned) # I link nei JSON sono già puliti aggressivamente dallo scraper
+
+          deduped_urls.sort()
+
+          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
+              for url in deduped_urls:
+                  f.write(url + "\n")
+
+          print(f"Sintesi completata: {len(all_raw_links)} link estratti complessivamente dalle due fasi.")
+          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali scritti in output_macchina2_cdp.txt.")
 
       - name: Upload Artifact Macchina 2
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2
