@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi trafilatura
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -59,18 +59,11 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://theculturetrip.com/europe/poland/articles/a-century-of-architecture-art-and-coastal-living-in-gdynia",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://katieparla.com/budget-dining-in-rome-revised/"
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.canadianinsider.com/money-is-moving"
           ]
           
           # Suddivisione matematica statica (Chunking) per performance ottimali
@@ -92,6 +85,7 @@ jobs:
           import json
           from bs4 import BeautifulSoup
           from curl_cffi import requests
+          import trafilatura
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -132,6 +126,35 @@ jobs:
                   if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
 
+          def extract_content(html, url):
+              # Escludi i siti diagnostici da trafilatura per preservare tabelle di test e JSON nativi
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  soup = BeautifulSoup(html, 'html.parser')
+                  return soup.get_text(separator=' ', strip=True)
+
+              # Tentativo con trafilatura per Markdown ottimizzato
+              cleaned = trafilatura.extract(
+                  html,
+                  output_format="markdown",
+                  include_tables=True,
+                  include_links=False,
+                  include_images=False,
+                  favor_precision=True
+              )
+              if cleaned and len(cleaned.strip()) > 150:
+                  return cleaned
+
+              # Fallback basato su BeautifulSoup ripulito se trafilatura restituisce output troppo corti o vuoti
+              try:
+                  soup = BeautifulSoup(html, 'html.parser')
+                  for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "svg", "noscript"]):
+                      tag.decompose()
+                  for element in soup.find_all(class_=lambda x: x and any(w in x.lower() for w in ['cookie', 'consent', 'banner'])):
+                      element.decompose()
+                  return soup.get_text(separator=' ', strip=True)
+              except:
+                  return ""
+
           if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
 
           queue_file = f"/tmp/step1_queue_{node_id}.json"
@@ -157,8 +180,7 @@ jobs:
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)
+                      text = extract_content(resp.text, url)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
@@ -234,6 +256,9 @@ jobs:
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
+          import trafilatura
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
@@ -247,6 +272,35 @@ jobs:
                       if param in queries: return queries[param][0]
               except: pass
               return default
+
+          def extract_content(html, url):
+              # Escludi i siti diagnostici per conservare tabelle e JSON di test
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  soup = BeautifulSoup(html, 'html.parser')
+                  return soup.get_text(separator=' ', strip=True)
+
+              # Tentativo con trafilatura per Markdown ottimizzato
+              cleaned = trafilatura.extract(
+                  html,
+                  output_format="markdown",
+                  include_tables=True,
+                  include_links=False,
+                  include_images=False,
+                  favor_precision=True
+              )
+              if cleaned and len(cleaned.strip()) > 150:
+                  return cleaned
+
+              # Fallback basato su BeautifulSoup ripulito
+              try:
+                  soup = BeautifulSoup(html, 'html.parser')
+                  for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "svg", "noscript"]):
+                      tag.decompose()
+                  for element in soup.find_all(class_=lambda x: x and any(w in x.lower() for w in ['cookie', 'consent', 'banner'])):
+                      element.decompose()
+                  return soup.get_text(separator=' ', strip=True)
+              except:
+                  return ""
 
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
@@ -347,25 +401,27 @@ jobs:
                       
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
-                      soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)
-                      text_lower = text.lower()
                       
-                      # Rilevamento passivo WAF/Captcha
+                      # Rilevamento passivo WAF/Captcha sul codice HTML grezzo
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
                           "access is forbidden", "access to this page is forbidden", "challenge-platform",
                           "we've detected unusual activity"
                       ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
+                      is_blocked = any(b in raw_html.lower() for b in blocking_indicators)
                       
-                      if len(text) > 150 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
-                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                      if not is_blocked:
+                          text = extract_content(raw_html, url)
+                          if len(text) > 150:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
+                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                          else:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (HTML vuoto o insufficiente)\n"
+                              print(f"[NODO {node_id}] -> Fallito (Contenuto insufficiente).", flush=True)
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
+                          print(f"[NODO {node_id}] -> Fallito (WAF rilevato).", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
