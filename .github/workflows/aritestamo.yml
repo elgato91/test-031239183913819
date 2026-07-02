@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -77,6 +77,192 @@ jobs:
           EOF
           python -u m2_step1_setup.py
 
+      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
+        run: |
+          cat << 'EOF' > extraction_utils.py
+          """
+          Modulo condiviso tra Step 1 e Step 2.
+          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
+          retry, validazione WAF o altra logica di scraping.
+
+          Pulizia link basata esclusivamente su urllib (libreria standard, nessuna
+          dipendenza aggiuntiva):
+            1. Relativi -> assoluti (urljoin)
+            2. Rimozione parametri di tracciamento dalla query string
+            3. Rimozione ancore interne pure (#frammento sulla stessa pagina)
+            4. Rimozione link a social/junk noti
+            5. Rimozione link che puntano alla pagina stessa (self-link)
+          Il testo pulito viene poi convertito in Markdown con markdownify,
+          mantenendo i link superstiti nel formato [Testo](URL).
+          """
+          import re
+          from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
+
+          from bs4 import BeautifulSoup
+          from markdownify import markdownify as md_convert
+
+          # Tag strutturali che non portano contenuto editoriale utile
+          STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
+                                      "form", "noscript", "iframe", "svg"]
+
+          # Parametri di query da rimuovere sempre (tracciamento marketing/analytics)
+          TRACKING_PARAMS_PREFIXES = ("utm_",)
+          TRACKING_PARAMS_EXACT = {
+              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
+              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
+              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
+              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
+              "share", "share_id", "si"
+          }
+
+          # Domini social/junk: i link verso questi domini vengono despogliati
+          # (restano come testo semplice, non come link markdown)
+          JUNK_LINK_DOMAINS = (
+              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
+              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
+              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
+              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
+              "addtoany.com", "sharethis.com", "mailto:"
+          )
+
+
+          def _is_junk_domain(netloc, full_href):
+              netloc_low = netloc.lower()
+              href_low = full_href.lower()
+              for junk in JUNK_LINK_DOMAINS:
+                  if junk in netloc_low or href_low.startswith(junk):
+                      return True
+              return False
+
+
+          def _clean_query(query_string):
+              if not query_string:
+                  return ""
+              pairs = parse_qsl(query_string, keep_blank_values=True)
+              cleaned_pairs = []
+              for key, value in pairs:
+                  key_low = key.lower()
+                  if key_low in TRACKING_PARAMS_EXACT:
+                      continue
+                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES):
+                      continue
+                  cleaned_pairs.append((key, value))
+              return urlencode(cleaned_pairs)
+
+
+          def clean_link_href(raw_href, page_url):
+              """
+              Ritorna l'URL assoluto e ripulito, oppure None se il link va
+              despogliato (ancora interna, self-link, social/junk, vuoto,
+              javascript:, mailto: senza indirizzo valido).
+              """
+              if not raw_href:
+                  return None
+
+              raw_href = raw_href.strip()
+              if not raw_href or raw_href.startswith("javascript:"):
+                  return None
+              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
+                  return None
+
+              # Assolutizza (gestisce anche i protocol-relative //host/path)
+              try:
+                  absolute = urljoin(page_url, raw_href)
+              except Exception:
+                  return None
+
+              try:
+                  parts = urlsplit(absolute)
+              except Exception:
+                  return None
+
+              if parts.scheme not in ("http", "https", "mailto"):
+                  return None
+
+              if parts.scheme == "mailto":
+                  return None
+
+              # Ancora pura sulla stessa pagina (stesso path, solo #frammento)
+              page_parts = urlsplit(page_url)
+              same_path = (parts.netloc == page_parts.netloc and
+                           parts.path.rstrip("/") == page_parts.path.rstrip("/"))
+
+              if same_path and parts.fragment and not parts.query:
+                  return None
+
+              # Social / junk
+              if _is_junk_domain(parts.netloc, absolute):
+                  return None
+
+              # Pulizia query string dai parametri di tracciamento
+              cleaned_query = _clean_query(parts.query)
+
+              # Ricostruzione URL: rimuove sempre il fragment (ancore interne)
+              # a meno che non punti a una pagina diversa con un frammento
+              # significativo (raro nei casi editoriali, quindi lo scartiamo
+              # comunque per pulizia).
+              rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                     cleaned_query, ""))
+
+              # Self-link: stesso URL (dopo pulizia) della pagina sorgente
+              page_rebuilt_parts = urlsplit(page_url)
+              page_cleaned_query = _clean_query(page_rebuilt_parts.query)
+              page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
+                                          page_rebuilt_parts.netloc,
+                                          page_rebuilt_parts.path.rstrip("/"),
+                                          page_cleaned_query, ""))
+              rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc,
+                                                 parts.path.rstrip("/"),
+                                                 cleaned_query, ""))
+              if rebuilt_no_trailing == page_rebuilt:
+                  return None
+
+              return rebuilt
+
+
+          def _strip_anchor_tag(a_tag):
+              """Sostituisce un <a> con il suo solo testo, senza rimuoverlo dal DOM."""
+              a_tag.replace_with(a_tag.get_text())
+
+
+          def html_to_clean_markdown(html, page_url):
+              """
+              Pipeline unica: rimuove tag strutturali, pulisce i link chirurgicamente
+              con urllib, converte in Markdown con markdownify.
+              Ritorna il markdown completo (nessun troncamento).
+              """
+              soup = BeautifulSoup(html, "html.parser")
+
+              for tag_name in STRUCTURAL_TAGS_TO_STRIP:
+                  for tag in soup.find_all(tag_name):
+                      tag.decompose()
+
+              for a_tag in soup.find_all("a"):
+                  href = a_tag.get("href")
+                  cleaned = clean_link_href(href, page_url)
+                  if cleaned is None:
+                      _strip_anchor_tag(a_tag)
+                  else:
+                      a_tag["href"] = cleaned
+                      # Rimuove eventuali attributi di tracciamento superflui
+                      for attr in list(a_tag.attrs):
+                          if attr not in ("href", "title"):
+                              del a_tag[attr]
+
+              markdown_text = md_convert(
+                  str(soup),
+                  heading_style="ATX",
+                  bullets="-",
+                  strip=["img"],
+              )
+
+              # Collassa 3+ righe vuote consecutive in 2, pulisce i bordi
+              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
+              markdown_text = markdown_text.strip()
+
+              return markdown_text
+          EOF
+
       - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
         run: |
           cat << 'EOF' > m2_step1.py
@@ -85,8 +271,8 @@ jobs:
           import random
           import os
           import json
-          from bs4 import BeautifulSoup
           from curl_cffi import requests
+          from extraction_utils import html_to_clean_markdown
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -152,10 +338,12 @@ jobs:
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
                       if any(site in url for site in DIAGNOSTIC_SITES):
+                          from bs4 import BeautifulSoup
+                          soup = BeautifulSoup(resp.text, 'html.parser')
                           text = soup.get_text(separator=' ', strip=True)
+                      else:
+                          text = html_to_clean_markdown(resp.text, url)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
@@ -230,7 +418,7 @@ jobs:
           import json
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
-          from bs4 import BeautifulSoup
+          from extraction_utils import html_to_clean_markdown
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
@@ -344,9 +532,10 @@ jobs:
                       
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
-                      soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      text_lower = text.lower()
+                      current_url = page.url
+
+                      text_for_check = html_to_clean_markdown(raw_html, current_url)
+                      text_lower_for_check = text_for_check.lower()
                       
                       # Rilevamento passivo WAF/Captcha
                       blocking_indicators = [
@@ -355,10 +544,10 @@ jobs:
                           "access is forbidden", "access to this page is forbidden", "challenge-platform",
                           "we've detected unusual activity"
                       ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
+                      is_blocked = any(b in text_lower_for_check for b in blocking_indicators)
                       
-                      if len(text) > 150 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
+                      if len(text_for_check) > 150 and not is_blocked:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_check}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
