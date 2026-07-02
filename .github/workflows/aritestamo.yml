@@ -61,6 +61,7 @@ jobs:
           TARGETS = [
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
               "https://www.passportindex.org/passport/italy/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
               "https://www.canadianinsider.com/money-is-moving"
@@ -126,35 +127,6 @@ jobs:
                   if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
 
-          def extract_content(html, url):
-              # Escludi i siti diagnostici da trafilatura per preservare tabelle di test e JSON nativi
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  soup = BeautifulSoup(html, 'html.parser')
-                  return soup.get_text(separator=' ', strip=True)
-
-              # Tentativo con trafilatura per Markdown ottimizzato
-              cleaned = trafilatura.extract(
-                  html,
-                  output_format="markdown",
-                  include_tables=True,
-                  include_links=False,
-                  include_images=False,
-                  favor_precision=True
-              )
-              if cleaned and len(cleaned.strip()) > 150:
-                  return cleaned
-
-              # Fallback basato su BeautifulSoup ripulito se trafilatura restituisce output troppo corti o vuoti
-              try:
-                  soup = BeautifulSoup(html, 'html.parser')
-                  for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "svg", "noscript"]):
-                      tag.decompose()
-                  for element in soup.find_all(class_=lambda x: x and any(w in x.lower() for w in ['cookie', 'consent', 'banner'])):
-                      element.decompose()
-                  return soup.get_text(separator=' ', strip=True)
-              except:
-                  return ""
-
           if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
 
           queue_file = f"/tmp/step1_queue_{node_id}.json"
@@ -180,8 +152,29 @@ jobs:
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      text = extract_content(resp.text, url)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                      # 1. Estrazione del testo grezzo (Metodo Originale robusto al 100%)
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      raw_text = soup.get_text(separator=' ', strip=True) # Rimosso il limite [:5000] per testo al 100%
+                      
+                      text_to_save = raw_text
+                      
+                      # 2. Ottimizzazione opzionale (Markdown) SOLO per siti non diagnostici
+                      if not any(site in url for site in DIAGNOSTIC_SITES):
+                          try:
+                              cleaned = trafilatura.extract(
+                                  resp.text,
+                                  output_format="markdown",
+                                  include_tables=True,
+                                  include_links=False,
+                                  include_images=False,
+                                  favor_precision=False
+                              )
+                              if cleaned and len(cleaned.strip()) > 150:
+                                  text_to_save = cleaned
+                          except:
+                              pass # Fallback silenzioso sul testo originale di BeautifulSoup in caso di errore
+                      
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text_to_save}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
                       print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
@@ -272,35 +265,6 @@ jobs:
                       if param in queries: return queries[param][0]
               except: pass
               return default
-
-          def extract_content(html, url):
-              # Escludi i siti diagnostici per conservare tabelle e JSON di test
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  soup = BeautifulSoup(html, 'html.parser')
-                  return soup.get_text(separator=' ', strip=True)
-
-              # Tentativo con trafilatura per Markdown ottimizzato
-              cleaned = trafilatura.extract(
-                  html,
-                  output_format="markdown",
-                  include_tables=True,
-                  include_links=False,
-                  include_images=False,
-                  favor_precision=True
-              )
-              if cleaned and len(cleaned.strip()) > 150:
-                  return cleaned
-
-              # Fallback basato su BeautifulSoup ripulito
-              try:
-                  soup = BeautifulSoup(html, 'html.parser')
-                  for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "svg", "noscript"]):
-                      tag.decompose()
-                  for element in soup.find_all(class_=lambda x: x and any(w in x.lower() for w in ['cookie', 'consent', 'banner'])):
-                      element.decompose()
-                  return soup.get_text(separator=' ', strip=True)
-              except:
-                  return ""
 
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
@@ -402,26 +366,47 @@ jobs:
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       
-                      # Rilevamento passivo WAF/Captcha sul codice HTML grezzo
+                      # 1. Estrarre il testo originale tramite BeautifulSoup (Invariato rispetto all'originale)
+                      soup = BeautifulSoup(raw_html, 'html.parser')
+                      raw_text = soup.get_text(separator=' ', strip=True) # Rimosso il limite [:5000] per recuperare il testo al 100%
+                      text_lower = raw_text.lower()
+                      
+                      # 2. Rilevamento passivo WAF/Captcha (Identico e ripristinato sul testo visibile originale)
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
                           "access is forbidden", "access to this page is forbidden", "challenge-platform",
                           "we've detected unusual activity"
                       ]
-                      is_blocked = any(b in raw_html.lower() for b in blocking_indicators)
+                      is_blocked = any(b in text_lower for b in blocking_indicators)
                       
-                      if not is_blocked:
-                          text = extract_content(raw_html, url)
-                          if len(text) > 150:
-                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
-                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                      if len(raw_text) > 150 and not is_blocked:
+                          # 3. Formattazione opzionale in Markdown (Isolata e non bloccante)
+                          text_to_save = raw_text
+                          if not any(site in url for site in DIAGNOSTIC_SITES):
+                              try:
+                                  cleaned = trafilatura.extract(
+                                      raw_html,
+                                      output_format="markdown",
+                                      include_tables=True,
+                                      include_links=False,
+                                      include_images=False,
+                                      favor_precision=False
+                                  )
+                                  if cleaned and len(cleaned.strip()) > 150:
+                                      text_to_save = cleaned
+                              except:
+                                  pass # Fallback automatico e sicuro sul testo di BeautifulSoup in caso di errore
+                          
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_to_save}\n"
+                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                      else:
+                          if is_blocked:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
+                              print(f"[NODO {node_id}] -> Fallito (WAF rilevato).", flush=True)
                           else:
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (HTML vuoto o insufficiente)\n"
                               print(f"[NODO {node_id}] -> Fallito (Contenuto insufficiente).", flush=True)
-                      else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          print(f"[NODO {node_id}] -> Fallito (WAF rilevato).", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
