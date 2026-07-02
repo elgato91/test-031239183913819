@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi trafilatura markdownify
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -100,6 +100,8 @@ jobs:
           import random
           import os
           import json
+          import trafilatura
+          from markdownify import markdownify as md
           from bs4 import BeautifulSoup
           from curl_cffi import requests
 
@@ -108,6 +110,27 @@ jobs:
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
+
+          def extract_ai_ready_text(html, url):
+              # 1. Eccezione per i siti diagnostici (lasciamo grezzo per vedere WAF e IP)
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return BeautifulSoup(html, 'html.parser').get_text(separator='\n', strip=True)
+              
+              # 2. Tentativo Primario: Trafilatura (rimuove navbars, footer, ads ed estrae Markdown puro)
+              text = trafilatura.extract(html, output_format="markdown", include_tables=True, include_links=False)
+              
+              # 3. Fallback (Motori di ricerca o liste dove Trafilatura fallisce)
+              if not text or len(text.strip()) < 150:
+                  soup = BeautifulSoup(html, 'html.parser')
+                  # Pulizia manuale del rumore
+                  for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'noscript', 'form']):
+                      tag.decompose()
+                  # Conversione del restante HTML in Markdown pulito
+                  text = md(str(soup), heading_style="ATX").strip()
+                  # Rimuovi eventuali righe vuote eccessive generate da Markdownify
+                  text = '\n'.join([line for line in text.splitlines() if line.strip()])
+              
+              return text
 
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
@@ -167,12 +190,9 @@ jobs:
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      # Usa \n come separatore per mantenere i confini strutturali per l'AI
-                      text = soup.get_text(separator='\n', strip=True)
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator='\n', strip=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                      # Usa la nuova logica ibrida avanzata
+                      text = extract_ai_ready_text(resp.text, url)
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO (Markdown):\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
                       print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
@@ -244,13 +264,17 @@ jobs:
           import random
           import os
           import json
+          import trafilatura
+          from markdownify import markdownify as md
+          from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
-          from bs4 import BeautifulSoup
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
+          
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -260,6 +284,21 @@ jobs:
                       if param in queries: return queries[param][0]
               except: pass
               return default
+
+          def extract_ai_ready_text(html, url):
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return BeautifulSoup(html, 'html.parser').get_text(separator='\n', strip=True)
+              
+              text = trafilatura.extract(html, output_format="markdown", include_tables=True, include_links=False)
+              
+              if not text or len(text.strip()) < 150:
+                  soup = BeautifulSoup(html, 'html.parser')
+                  for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'noscript', 'form']):
+                      tag.decompose()
+                  text = md(str(soup), heading_style="ATX").strip()
+                  text = '\n'.join([line for line in text.splitlines() if line.strip()])
+              
+              return text
 
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
@@ -360,12 +399,9 @@ jobs:
                       
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
-                      soup = BeautifulSoup(raw_html, 'html.parser')
-                      # Usa \n come separatore per mantenere i confini strutturali per l'AI
-                      text = soup.get_text(separator='\n', strip=True)
-                      text_lower = text.lower()
                       
-                      # Rilevamento passivo WAF/Captcha
+                      # Rilevamento passivo WAF/Captcha sul testo grezzo
+                      text_lower = BeautifulSoup(raw_html, 'html.parser').get_text(separator=' ', strip=True).lower()
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -374,9 +410,15 @@ jobs:
                       ]
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
-                      if len(text) > 150 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
-                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                      if not is_blocked:
+                          # Estrazione intelligente AI-Ready
+                          final_text = extract_ai_ready_text(raw_html, url)
+                          if len(final_text) > 150:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO (Markdown):\n{final_text}\n"
+                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                          else:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (HTML incompleto o non processabile)\n"
+                              print(f"[NODO {node_id}] -> Fallito (Contenuto vuoto).", flush=True)
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
