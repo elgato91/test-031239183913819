@@ -59,11 +59,28 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/"
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
           ]
           
           # Suddivisione matematica statica (Chunking) per performance ottimali
@@ -151,9 +168,10 @@ jobs:
                   
                   if is_ok:
                       soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)
+                      # Usa \n come separatore per mantenere i confini strutturali per l'AI
+                      text = soup.get_text(separator='\n', strip=True)
                       if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator=' ', strip=True)
+                          text = soup.get_text(separator='\n', strip=True)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
@@ -343,7 +361,8 @@ jobs:
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)
+                      # Usa \n come separatore per mantenere i confini strutturali per l'AI
+                      text = soup.get_text(separator='\n', strip=True)
                       text_lower = text.lower()
                       
                       # Rilevamento passivo WAF/Captcha
