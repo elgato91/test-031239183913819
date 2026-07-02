@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -59,12 +59,27 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
           
@@ -85,64 +100,14 @@ jobs:
           import random
           import os
           import json
-          import re
           from bs4 import BeautifulSoup
           from curl_cffi import requests
-          from markdownify import markdownify as md
-          from urllib.parse import urljoin, urlparse, urlunparse
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
-
-          def get_clean_markdown(html, url):
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  return BeautifulSoup(html, 'html.parser').get_text(separator='\n', strip=True)
-              
-              soup = BeautifulSoup(html, 'html.parser')
-              
-              # 1. Rimuoviamo codice invisibile e menu a tendina
-              for tag in soup(['script', 'style', 'noscript', 'canvas', 'svg', 'select', 'meta']):
-                  tag.decompose()
-              
-              # 2. Pulizia e normalizzazione dei link prima del Markdown
-              for a in soup.find_all('a', href=True):
-                  href = a['href'].strip()
-                  
-                  # Ignoriamo le ancore interne (es. #comments) o link vuoti
-                  if href.startswith('#') or not href:
-                      a.unwrap()
-                      continue
-                      
-                  # Convertiamo i link relativi in assoluti
-                  full_url = urljoin(url, href)
-                  parsed = urlparse(full_url)
-                  
-                  # Scartiamo link non web (mailto, tel, javascript) e social che non servono all'IA
-                  if parsed.scheme not in ['http', 'https'] or parsed.netloc in ['twitter.com', 'facebook.com', 'instagram.com', 'linkedin.com', 'pinterest.com', 'youtube.com', 't.me']:
-                      a.unwrap()
-                      continue
-                      
-                  # Puliamo i parametri di tracciamento marketing (?utm_source...)
-                  clean_query = '&'.join([p for p in parsed.query.split('&') if not p.startswith('utm_') and not p.startswith('fbclid')])
-                  cleaned_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, clean_query, ''))
-                  
-                  # Se il link ripulito coincide con la pagina corrente, lo scartiamo per evitare loop ricorsivi
-                  if cleaned_url == url.split('#')[0]:
-                      a.unwrap()
-                      continue
-                      
-                  a['href'] = cleaned_url
-              
-              # 3. Convertiamo in Markdown tenendo i soli link "utili e sani"
-              raw_md = md(str(soup), heading_style="ATX")
-              
-              lines = [line.rstrip() for line in raw_md.splitlines()]
-              clean_md = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
-              
-              return clean_md
 
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
@@ -199,12 +164,14 @@ jobs:
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
               try:
                   resp = session.get(url, timeout=12)
-                  
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      text = get_clean_markdown(resp.text, url)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO (Markdown):\n{text}\n"
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      text = soup.get_text(separator=' ', strip=True)
+                      if any(site in url for site in DIAGNOSTIC_SITES):
+                          text = soup.get_text(separator=' ', strip=True)
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
                       print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
@@ -276,17 +243,13 @@ jobs:
           import random
           import os
           import json
-          import re
-          from bs4 import BeautifulSoup
-          from urllib.parse import urlparse, parse_qs, urljoin, urlunparse
+          from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
-          from markdownify import markdownify as md
+          from bs4 import BeautifulSoup
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
-
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -296,43 +259,6 @@ jobs:
                       if param in queries: return queries[param][0]
               except: pass
               return default
-
-          def get_clean_markdown(html, url):
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  return BeautifulSoup(html, 'html.parser').get_text(separator='\n', strip=True)
-              
-              soup = BeautifulSoup(html, 'html.parser')
-              for tag in soup(['script', 'style', 'noscript', 'canvas', 'svg', 'select', 'meta']):
-                  tag.decompose()
-              
-              # Pulizia e normalizzazione dei link per Deep Research
-              for a in soup.find_all('a', href=True):
-                  href = a['href'].strip()
-                  if href.startswith('#') or not href:
-                      a.unwrap()
-                      continue
-                      
-                  full_url = urljoin(url, href)
-                  parsed = urlparse(full_url)
-                  
-                  if parsed.scheme not in ['http', 'https'] or parsed.netloc in ['twitter.com', 'facebook.com', 'instagram.com', 'linkedin.com', 'pinterest.com', 'youtube.com', 't.me']:
-                      a.unwrap()
-                      continue
-                      
-                  clean_query = '&'.join([p for p in parsed.query.split('&') if not p.startswith('utm_') and not p.startswith('fbclid')])
-                  cleaned_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, clean_query, ''))
-                  
-                  if cleaned_url == url.split('#')[0]:
-                      a.unwrap()
-                      continue
-                      
-                  a['href'] = cleaned_url
-              
-              raw_md = md(str(soup), heading_style="ATX")
-              
-              lines = [line.rstrip() for line in raw_md.splitlines()]
-              clean_md = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
-              return clean_md
 
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
@@ -347,6 +273,7 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
+              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -356,6 +283,7 @@ jobs:
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
+                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
@@ -368,6 +296,7 @@ jobs:
                   )
                   page = await context.new_page()
                   
+                  # WARMUP Integrato - Creazione di cronologia valida
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
                   await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
@@ -384,6 +313,7 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
                       
+                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -414,22 +344,26 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
+                      # --- SILENZIO RADIO ---
+                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
                       await asyncio.sleep(6) 
                       
+                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
                       
+                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
+                      soup = BeautifulSoup(raw_html, 'html.parser')
+                      text = soup.get_text(separator=' ', strip=True)
+                      text_lower = text.lower()
                       
-                      # CONTROLLO WAF SULL'HTML NUDO E CRUDO
-                      raw_soup = BeautifulSoup(raw_html, 'html.parser')
-                      text_lower = raw_soup.get_text(separator=' ', strip=True).lower()
-                      
+                      # Rilevamento passivo WAF/Captcha
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -438,14 +372,9 @@ jobs:
                       ]
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
-                      if not is_blocked:
-                          final_text = get_clean_markdown(raw_html, url)
-                          if len(final_text) > 150:
-                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO (Markdown):\n{final_text}\n"
-                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
-                          else:
-                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (HTML incompleto o non processabile)\n"
-                              print(f"[NODO {node_id}] -> Fallito (Contenuto vuoto).", flush=True)
+                      if len(text) > 150 and not is_blocked:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
+                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
