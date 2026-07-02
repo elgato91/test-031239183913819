@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -87,6 +87,7 @@ jobs:
           import re
           from bs4 import BeautifulSoup
           from curl_cffi import requests
+          from markdownify import markdownify as md
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -94,30 +95,26 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          def get_clean_ai_text(html, url):
-              # Lasciamo i siti diagnostici nudi e crudi
+          def get_clean_markdown(html, url):
+              # I siti diagnostici li restituiamo puri
               if any(site in url for site in DIAGNOSTIC_SITES):
                   return BeautifulSoup(html, 'html.parser').get_text(separator='\n', strip=True)
               
               soup = BeautifulSoup(html, 'html.parser')
               
-              # Distruggiamo script, stili, e i menu a tendina (le 150 nazioni) prima di estrarre
+              # Eliminiamo SOLO codice non visibile e menu a tendina (risolve il problema delle nazioni)
               for tag in soup(['script', 'style', 'noscript', 'canvas', 'svg', 'select', 'meta']):
                   tag.decompose()
               
-              # Troviamo il cuore della pagina per evitare sidebar e banner
-              main_node = soup.find('main') or soup.find('article') or soup.find('div', id=re.compile(r'(main|content|search)', re.I)) or soup.find('body') or soup
+              # Convertiamo in Markdown. 
+              # strip=['a'] toglie i link URL ma mantiene il testo cliccabile, riducendo il rumore per l'IA.
+              raw_md = md(str(soup), heading_style="ATX", strip=['a'])
               
-              # Puliamo il nodo principale da header, footer e navigazione residua
-              for tag in main_node(['nav', 'footer', 'header', 'aside']):
-                  tag.decompose()
-                  
-              # Estraiamo mantenendo i ritorni a capo semantici
-              raw_text = main_node.get_text(separator='\n', strip=True)
+              # Pulizia: rimuove gli spazi a fine riga e collassa righe vuote multiple
+              lines = [line.rstrip() for line in raw_md.splitlines()]
+              clean_md = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
               
-              # Compattiamo le righe vuote multiple in una singola
-              clean_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-              return '\n'.join(clean_lines)
+              return clean_md
 
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
@@ -179,9 +176,9 @@ jobs:
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      # ESTRAZIONE PULITA AI-READY
-                      text = get_clean_ai_text(resp.text, url)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
+                      # ESTRAZIONE MARKDOWN AI-READY
+                      text = get_clean_markdown(resp.text, url)
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO (Markdown):\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
                       print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
@@ -257,6 +254,7 @@ jobs:
           from bs4 import BeautifulSoup
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
+          from markdownify import markdownify as md
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
@@ -273,7 +271,7 @@ jobs:
               except: pass
               return default
 
-          def get_clean_ai_text(html, url):
+          def get_clean_markdown(html, url):
               if any(site in url for site in DIAGNOSTIC_SITES):
                   return BeautifulSoup(html, 'html.parser').get_text(separator='\n', strip=True)
               
@@ -281,14 +279,11 @@ jobs:
               for tag in soup(['script', 'style', 'noscript', 'canvas', 'svg', 'select', 'meta']):
                   tag.decompose()
               
-              main_node = soup.find('main') or soup.find('article') or soup.find('div', id=re.compile(r'(main|content|search)', re.I)) or soup.find('body') or soup
+              raw_md = md(str(soup), heading_style="ATX", strip=['a'])
               
-              for tag in main_node(['nav', 'footer', 'header', 'aside']):
-                  tag.decompose()
-                  
-              raw_text = main_node.get_text(separator='\n', strip=True)
-              clean_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-              return '\n'.join(clean_lines)
+              lines = [line.rstrip() for line in raw_md.splitlines()]
+              clean_md = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
+              return clean_md
 
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
@@ -395,10 +390,10 @@ jobs:
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
                       if not is_blocked:
-                          # Estrazione AI pulita eseguita solo se sicuri di non essere bloccati
-                          final_text = get_clean_ai_text(raw_html, url)
+                          # ESTRAZIONE MARKDOWN ESEGUITA IN SICUREZZA
+                          final_text = get_clean_markdown(raw_html, url)
                           if len(final_text) > 150:
-                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{final_text}\n"
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO (Markdown):\n{final_text}\n"
                               print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                           else:
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (HTML incompleto o non processabile)\n"
