@@ -23,7 +23,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi trafilatura
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -59,11 +59,27 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
               "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
           
@@ -86,7 +102,6 @@ jobs:
           import json
           from bs4 import BeautifulSoup
           from curl_cffi import requests
-          import trafilatura
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -152,29 +167,11 @@ jobs:
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   
                   if is_ok:
-                      # 1. Estrazione del testo grezzo (Metodo Originale robusto al 100%)
+                      # Ripristinato il parsing di BeautifulSoup al 100% (senza troncamento [:5000])
                       soup = BeautifulSoup(resp.text, 'html.parser')
-                      raw_text = soup.get_text(separator=' ', strip=True) # Rimosso il limite [:5000] per testo al 100%
+                      text = soup.get_text(separator=' ', strip=True)
                       
-                      text_to_save = raw_text
-                      
-                      # 2. Ottimizzazione opzionale (Markdown) SOLO per siti non diagnostici
-                      if not any(site in url for site in DIAGNOSTIC_SITES):
-                          try:
-                              cleaned = trafilatura.extract(
-                                  resp.text,
-                                  output_format="markdown",
-                                  include_tables=True,
-                                  include_links=False,
-                                  include_images=False,
-                                  favor_precision=False
-                              )
-                              if cleaned and len(cleaned.strip()) > 150:
-                                  text_to_save = cleaned
-                          except:
-                              pass # Fallback silenzioso sul testo originale di BeautifulSoup in caso di errore
-                      
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text_to_save}\n"
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
                       print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
@@ -249,9 +246,6 @@ jobs:
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
-          import trafilatura
-
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
@@ -366,12 +360,12 @@ jobs:
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       
-                      # 1. Estrarre il testo originale tramite BeautifulSoup (Invariato rispetto all'originale)
+                      # Ripristinata l'estrazione originale al 100% (senza limitazioni o filtri semantici)
                       soup = BeautifulSoup(raw_html, 'html.parser')
-                      raw_text = soup.get_text(separator=' ', strip=True) # Rimosso il limite [:5000] per recuperare il testo al 100%
-                      text_lower = raw_text.lower()
+                      text = soup.get_text(separator=' ', strip=True) # Rimosso il limite [:5000] per testo al 100%
+                      text_lower = text.lower()
                       
-                      # 2. Rilevamento passivo WAF/Captcha (Identico e ripristinato sul testo visibile originale)
+                      # Rilevamento passivo WAF/Captcha (Identico alla logica testata originariamente)
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -380,25 +374,8 @@ jobs:
                       ]
                       is_blocked = any(b in text_lower for b in blocking_indicators)
                       
-                      if len(raw_text) > 150 and not is_blocked:
-                          # 3. Formattazione opzionale in Markdown (Isolata e non bloccante)
-                          text_to_save = raw_text
-                          if not any(site in url for site in DIAGNOSTIC_SITES):
-                              try:
-                                  cleaned = trafilatura.extract(
-                                      raw_html,
-                                      output_format="markdown",
-                                      include_tables=True,
-                                      include_links=False,
-                                      include_images=False,
-                                      favor_precision=False
-                                  )
-                                  if cleaned and len(cleaned.strip()) > 150:
-                                      text_to_save = cleaned
-                              except:
-                                  pass # Fallback automatico e sicuro sul testo di BeautifulSoup in caso di errore
-                          
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_to_save}\n"
+                      if len(text) > 150 and not is_blocked:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                       else:
                           if is_blocked:
