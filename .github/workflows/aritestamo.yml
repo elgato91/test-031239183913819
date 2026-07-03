@@ -51,7 +51,7 @@ jobs:
           ANALYSIS_MODEL_NAME = "gemini-3.1-flash-live-preview"
           MAX_RPM_ANALYSIS = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
           ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
-          MAX_RETRY_TRANSIENT = 4  # 4 tentativi asincroni di sicurezza
+          MAX_RETRY_TRANSIENT = 4
 
           # Parametri di tolleranza per il controllo anti-allucinazione deterministico
           NUMERIC_TOLERANCE_PCT = 0.02
@@ -187,7 +187,7 @@ jobs:
           CLUSTERING_PROMPT_TEMPLATE = """Riceverai un elenco numerato di "nugget" (fatti grezzi estratti da fonti web), ciascuno con un id univoco, il testo del fatto e la categoria assegnata in fase di estrazione.
 
           COMPITO:
-          Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspect logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
+          Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspetto logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
 
           VINCOLI RIGIDI:
           1. Il numero totale di macro-aree NON puo' superare {max_macro_aree}. Se il contenuto e' molto vario, accorpa i temi minori in macro-aree piu' ampie piuttosto che superare il limite.
@@ -496,7 +496,7 @@ jobs:
                   fatto_consolidato["verification_status"] = "unverified"
                   fatto_consolidato["unverified"] = True
                   dettagli["motivo"] = "Nessun id di riferimento o quote originali mancanti."
-                  fatto_consolidato["verification_details"] =原 dettagli
+                  fatto_consolidato["verification_details"] = dettagli
                   return fatto_consolidato
 
               similarity = _testo_supportato_fuzzy(testo_fatto, testi_sorgente)
