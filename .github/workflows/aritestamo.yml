@@ -52,7 +52,7 @@ jobs:
           ANALYSIS_MODEL_NAME = os.environ.get("ANALYSIS_MODEL_NAME", "gemma-4-26b-a4b-it")
           MAX_RPM_ANALYSIS = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
           ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
-          MAX_RETRY_TRANSIENT = 3
+          MAX_RETRY_TRANSIENT = 4  # Portato a 4 con backoff esponenziale per garantire resilienza totale
 
           # Parametri di tolleranza per il controllo anti-allucinazione deterministico
           NUMERIC_TOLERANCE_PCT = 0.02
@@ -87,7 +87,7 @@ jobs:
                           await asyncio.sleep(max(wait_seconds, 0.1))
 
           # ---------------------------------------------------------
-          # 2. Client API con Grounding Disattivabile e Self-Correction
+          # 2. Client API con Grounding Disattivabile e Bypass Bug 500
           # ---------------------------------------------------------
           class GemmaAnalysisClient:
               def __init__(self, api_key: str, max_rpm: int = MAX_RPM_ANALYSIS):
@@ -96,19 +96,24 @@ jobs:
                   self.client = genai.Client(api_key=api_key)
                   self.limiter = RPMLimiter(max_rpm)
 
-              async def generate_grounded_json(self, prompt: str, label: str = "",
+              async def generate_grounded_json(self, prompt: str, system_instruction: str = "", label: str = "",
                                                 expect_list: bool = False,
                                                 timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS,
                                                 use_grounding: bool = True):
-                  last_raw_text = None
                   current_prompt = prompt
 
                   for tentativo in range(MAX_RETRY_TRANSIENT):
                       await self.limiter.acquire(label=label)
 
+                      # Calcolo del backoff in caso di disservizio transitorio del server Google
+                      if tentativo > 0:
+                          backoff = 2 ** tentativo
+                          print(f"{label}[GEMMA] Errore riscontrato. Attesa backoff di {backoff}s prima del tentativo {tentativo + 1}...", flush=True)
+                          await asyncio.sleep(backoff)
+
                       try:
                           response = await asyncio.wait_for(
-                              self._call_model(current_prompt, use_grounding=use_grounding),
+                              self._call_model(current_prompt, system_instruction, use_grounding=use_grounding),
                               timeout=timeout_seconds
                           )
                       except (asyncio.TimeoutError, TimeoutError):
@@ -116,12 +121,10 @@ jobs:
                           continue
                       except Exception as e:
                           print(f"{label}[GEMMA] Errore chiamata modello: {e} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
-                          await asyncio.sleep(2.0 * (tentativo + 1))
                           continue
 
                       raw_text = response.get("text", "")
                       grounding_used = response.get("grounding_used", False)
-                      last_raw_text = raw_text
 
                       parsed = _estrai_json(raw_text, expect_list=expect_list)
                       if parsed is not None:
@@ -136,12 +139,18 @@ jobs:
                             "fences se non i delimitatori ```json ... ``` richiesti."
                       )
 
-                  return None, last_raw_text, False
+                  return None, None, False
 
-              async def _call_model(self, prompt: str, use_grounding: bool = True):
+              async def _call_model(self, prompt: str, system_instruction: str = "", use_grounding: bool = True):
                   tools = []
                   if use_grounding:
                       tools.append(types.Tool(google_search=types.GoogleSearch()))
+
+                  # Integra le istruzioni direttamente all'interno dei contenuti del prompt.
+                  # Questo evita l'uso di system_instruction in config, che attiva il bug 500 dell'adapter.
+                  full_contents = prompt
+                  if system_instruction:
+                      full_contents = f"INSTRUCTIONS / SYSTEM ROLE:\n{system_instruction}\n\nTASK CONTENT:\n{prompt}"
 
                   config = types.GenerateContentConfig(
                       tools=tools if tools else None,
@@ -151,7 +160,7 @@ jobs:
                   def _sync_call():
                       return self.client.models.generate_content(
                           model=ANALYSIS_MODEL_NAME,
-                          contents=prompt,
+                          contents=full_contents,
                           config=config,
                       )
 
@@ -206,9 +215,9 @@ jobs:
           # ---------------------------------------------------------
           # 3. Fase 1: Clustering Agnostico e Riduzione Deterministica (Grounding Spento)
           # ---------------------------------------------------------
-          CLUSTERING_PROMPT_TEMPLATE = """Sei un analista editoriale specializzato in organizzazione di informazioni fattuali per articoli di viaggio/turismo/cultura, in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Il tuo compito e' puramente organizzativo: NON devi riscrivere, correggere o verificare i fatti in questa fase.
+          CLUSTERING_SYSTEM_INSTRUCTION = "Sei un analista editoriale specializzato in organizzazione di informazioni fattuali per articoli di viaggio/turismo/cultura, in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Il tuo compito e' puramente organizzativo: NON devi riscrivere, correggere o verificare i fatti in questa fase."
 
-          Riceverai un elenco numerato di "nugget" (fatti grezzi estratti da fonti web), ciascuno con un id univoco, il testo del fatto e la categoria assegnata in fase di estrazione.
+          CLUSTERING_PROMPT_TEMPLATE = """Riceverai un elenco numerato di "nugget" (fatti grezzi estratti da fonti web), ciascuno con un id univoco, il testo del fatto e la categoria assegnata in fase di estrazione.
 
           COMPITO:
           Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspetto logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
@@ -246,9 +255,10 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_prompt(nuggets_indicizzati)
               )
 
-              # use_grounding=False per evitare che l'API tenti ricerche web complesse su prompt giganti
+              # use_grounding=False e prompt fusion per una stabilità assoluta
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
-                  prompt, label=label, expect_list=False, use_grounding=False
+                  prompt=prompt, system_instruction=CLUSTERING_SYSTEM_INSTRUCTION,
+                  label=label, expect_list=False, use_grounding=False
               )
 
               if parsed is None:
@@ -327,9 +337,9 @@ jobs:
           # ---------------------------------------------------------
           # 4. Fase 2: Riconciliazione Macro-Aree (Grounding Attivo)
           # ---------------------------------------------------------
-          RECONCILIATION_PROMPT_TEMPLATE = """Sei un fact-checker editoriale senior. Ti occupi di riconciliare informazioni raccolte da piu' fonti web su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Hai accesso allo strumento di ricerca Google per verificare dati incerti o contraddittori: usalo ogni volta che serve dirimere un conflitto numerico o fattuale, o per capire quale sia la fonte ufficiale di un dato.
+          RECONCILIATION_SYSTEM_INSTRUCTION = "Sei un fact-checker editoriale senior. Ti occupi di riconciliare informazioni raccolte da piu' fonti web su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Hai accesso allo strumento di ricerca Google per verificare dati incerti o contraddittori: usalo ogni volta che serve dirimere un conflitto numerico o fattuale, o per capire quale sia la fonte ufficiale di un dato."
 
-          MACRO-AREA: {nome_macro_area}
+          RECONCILIATION_PROMPT_TEMPLATE = """MACRO-AREA: {nome_macro_area}
 
           Di seguito i nugget grezzi raccolti su questo argomento, ciascuno con: id, fatto, categoria, url sorgente, e livello di confidence assegnato in fase di estrazione.
 
@@ -357,7 +367,7 @@ jobs:
                 "source_urls": ["https://...", "https://..."],
                 "conflitto_irrisolto": false,
                 "valori_alternativi": [],
-                "note_resoluzione": "nota su come e' stato risolto un eventuale conflitto"
+                "note_risoluzione": "nota su come e' stato risolto un eventuale conflitto"
               }}
             ],
             "verified_facts": [
@@ -390,9 +400,10 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_reconcile(nuggets)
               )
 
-              # Riconciliazione puntuale con ricerca web (use_grounding=True)
+              # Riconciliazione asettica con grounding attivo e istruzioni integrate
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
-                  prompt, label=label, expect_list=False, use_grounding=True
+                  prompt=prompt, system_instruction=RECONCILIATION_SYSTEM_INSTRUCTION,
+                  label=label, expect_list=False, use_grounding=True
               )
 
               if parsed is None or not isinstance(parsed, dict):
@@ -645,7 +656,7 @@ jobs:
                           })
                   area["verified_facts"] = vf_verificati
 
-                  # Mappatura globale sicura e robusta contro gli errori di tipo ( TypeError / Index Error )
+                  # Conversione ed elaborazione robusta degli ID locali (risolve i TypeError in Python)
                   for fatto in area.get("fatti_consolidati", []):
                       global_ids = []
                       for lid in fatto.get("source_nugget_ids", []):
@@ -655,7 +666,6 @@ jobs:
                                   global_ids.append(local_nuggets[lid_int].get("_global_id"))
                           except (TypeError, ValueError):
                               continue
-                      # Rimuove duplicati preservando l'ordine
                       seen = set()
                       unique_global_ids = []
                       for g_id in global_ids:
