@@ -1,346 +1,1410 @@
-import asyncio
-import time
-import sys
-import random
-import os
-import json
-from urllib.parse import urlparse, parse_qs
-from cloakbrowser import launch_persistent_context_async
-from bs4 import BeautifulSoup
-from curl_cffi import requests as curl_requests
-from extraction_utils import html_to_clean_markdown
-from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-if len(sys.argv) < 2:
-    sys.exit(1)
-node_id = int(sys.argv[1])
-INITIAL_PORT = 40000 + node_id
+on:
+  workflow_dispatch:
 
-NUGGET_CONCURRENCY = 5
-TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+jobs:
+  machine2_cdp_insocket:
+    runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      TARGET_TOPIC: "Orvieto"
+    steps:
 
-NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step2.jsonl"
-_jsonl_lock = asyncio.Lock()
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
 
-# Stessi indicatori usati in Step 1: la validazione va fatta sull'HTML
-# grezzo (o su get_text semplice), MAI sul markdown già ripulito da
-# html_to_clean_markdown, perché lo stripping di nav/footer/header/form
-# e la rimozione dei link non validi alterano la lunghezza e il contenuto
-# del testo, producendo falsi positivi di "blocco" su pagine che in realtà
-# sono state scaricate correttamente.
-BLOCKING_INDICATORS = [
-    "just a moment", "are you a robot", "prove your humanity",
-    "captcha verification", "please enter in the characters you see below",
-    "access is forbidden", "access to this page is forbidden", "challenge-platform",
-    "we've detected unusual activity", "checking your browser",
-    "security verification", "unusual traffic from your computer network"
-]
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
+          playwright install-deps chromium
 
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
 
-def carica_gemini_api_keys():
-    keys = []
-    primary = os.environ.get("GEMINI_API_KEY")
-    if primary:
-        keys.append(primary)
-    i = 2
-    while True:
-        k = os.environ.get(f"GEMINI_API_KEY_{i}")
-        if not k:
-            break
-        keys.append(k)
-        i += 1
-    return keys
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
 
+      - name: Setup Container WARP (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-def get_query_from_url(url, default="migliore carbonara roma"):
-    try:
-        parsed = urlparse(url)
-        queries = parse_qs(parsed.query)
-        for param in ['q', 'query', 'p', 'find_desc']:
-            if param in queries:
-                return queries[param][0]
-    except Exception:
-        pass
-    return default
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 0.5
+          done
+          
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 6
 
+      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+        run: |
+          cat << 'EOF' > m2_step1_setup.py
+          import json
+          TARGETS = [
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+          
+          # Suddivisione matematica statica (Chunking) per performance ottimali
+          for i in range(1, 7):
+              chunk = TARGETS[i-1::6]
+              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+          print("Code distribuite Step 1 generate con successo.")
+          EOF
+          python -u m2_step1_setup.py
 
-async def salva_nuggets(nuggets):
-    if not nuggets:
-        return
-    async with _jsonl_lock:
-        scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
+        run: |
+          cat << 'EOF' > extraction_utils.py
+          """
+          Modulo condiviso tra Step 1 e Step 2.
+          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
+          retry, validazione WAF o altra logica di scraping.
 
+          Pulizia link basata esclusivamente su urllib (libreria standard, nessuna
+          dipendenza aggiuntiva):
+            1. Relativi -> assoluti (urljoin)
+            2. Rimozione parametri di tracciamento dalla query string
+            3. Rimozione ancore interne pure (#frammento sulla stessa pagina)
+            4. Rimozione link a social/junk noti
+            5. Rimozione link che puntano alla pagina stessa (self-link)
+          Il testo pulito viene poi convertito in Markdown con markdownify,
+          mantenendo i link superstiti nel formato [Testo](URL).
+          """
+          import re
+          from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
-async def verify_proxy_active(port, max_retries=6, delay=5):
-    """
-    Stessa identica logica del check gia' presente in m2_step1.py.
-    Nella pipeline stabile questo controllo mancava in Step 2, ma il
-    timing tutto sincrono lo rendeva innocuo: il ritardo introdotto dal
-    check bloccante in Step 1 (piu' i 6s di sleep fisso dopo il restart
-    dei container) copriva quasi sempre la latenza di avvio di WARP.
-    Con Step 1 reso asincrono e concorrente quel margine di sicurezza
-    implicito e' sparito: senza questo check, CloakBrowser puo' provare
-    ad aprire Chromium mentre il tunnel SOCKS5 del container non e'
-    ancora up, causando ERR_PROXY_CONNECTION_FAILED al primo goto e la
-    conseguente perdita silenziosa del nodo (nessun output, nessun
-    errore "gestito": il processo muore prima del loop sui target).
-    """
-    test_session = curl_requests.AsyncSession(impersonate="chrome120")
-    test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-    for tentativo in range(max_retries):
-        try:
-            resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
-            if resp.status_code == 200:
-                await test_session.close()
-                return True
-        except Exception:
-            pass
-        print(f"[NODO {node_id}] Proxy non ancora pronto sulla porta {port}, "
-              f"tentativo {tentativo + 1}/{max_retries}...", flush=True)
-        await asyncio.sleep(delay)
-    await test_session.close()
-    return False
+          from bs4 import BeautifulSoup
+          from markdownify import markdownify as md_convert
 
+          # Tag strutturali che non portano contenuto editoriale utile
+          STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
+                                      "form", "noscript", "iframe", "svg"]
 
-def validate_html(html, url, status_code):
-    """
-    Validazione WAF/captcha identica nello spirito a quella di Step 1,
-    ma eseguita sull'HTML grezzo scaricato dal browser (via page.content()),
-    PRIMA di qualunque pulizia o conversione a markdown. La conversione a
-    markdown resta un post-processing esclusivamente per l'output finale
-    e non deve mai influenzare la decisione di successo/fallimento.
-    """
-    if status_code is not None and status_code >= 400:
-        return False, f"Blocco HTTP {status_code}"
-    if not html or len(html.strip()) < 300:
-        return False, "HTML vuoto"
+          # Parametri di query da rimuovere sempre (tracciamento marketing/analytics)
+          TRACKING_PARAMS_PREFIXES = ("utm_",)
+          TRACKING_PARAMS_EXACT = {
+              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
+              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
+              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
+              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
+              "share", "share_id", "si"
+          }
 
-    soup = BeautifulSoup(html, "html.parser")
-    text_grezzo = soup.get_text(separator=' ', strip=True)
-
-    if len(text_grezzo) <= 150:
-        return False, "Contenuto insufficiente"
-
-    low_text = text_grezzo.lower()
-    for ind in BLOCKING_INDICATORS:
-        if ind in low_text:
-            return False, f"WAF/Captcha rilevato: {ind}"
-
-    return True, ""
-
-
-async def main():
-    queue_file = f"/tmp/step2_queue_{node_id}.json"
-    if not os.path.exists(queue_file):
-        return
-
-    with open(queue_file, "r") as f:
-        targets = json.load(f)
-
-    if not targets:
-        with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-            f.write("")
-        return
-
-    # --- FIX 1: health-check del proxy prima di avviare il browser ---
-    if not await verify_proxy_active(INITIAL_PORT):
-        print(f"[NODO {node_id}] Proxy MAI diventato attivo sulla porta {INITIAL_PORT}. "
-              f"Nodo abortito, i target restano falliti.", flush=True)
-        with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-            f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: proxy non disponibile, "
-                     f"nodo abortito prima di iniziare\n{'#'*60}\n")
-        return
-
-    api_keys = carica_gemini_api_keys()
-    key_pool = GeminiKeyPool(api_keys) if api_keys else None
-    if key_pool:
-        print(f"[NODO {node_id}] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
-    else:
-        print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
-
-    nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
-    nugget_retry_pool = []
-    nugget_tasks = []
-
-    async def lancia_nugget_task(url, testo_markdown):
-        if key_pool is None:
-            return
-
-        async def _run():
-            async with nugget_semaphore:
-                esito = await estrai_nuggets(
-                    key_pool=key_pool,
-                    source_url=url,
-                    testo_markdown=testo_markdown,
-                    topic=TARGET_TOPIC,
-                    node_id=node_id
-                )
-            if esito is None:
-                nugget_retry_pool.append((url, testo_markdown))
-            else:
-                await salva_nuggets(esito)
-
-        nugget_tasks.append(asyncio.create_task(_run()))
-
-    home_dir = os.path.expanduser("~")
-    profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
-    windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-
-    base_args = [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        f"--fingerprint={random.randint(100000, 999999)}",
-        f"--fingerprint-fonts-dir={windows_fonts_dir}"
-    ]
-
-    results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
-
-    context = None
-    print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
-    try:
-        # --- FIX 2: try/finally attorno a tutto il ciclo di vita del browser ---
-        # Se qualsiasi cosa fallisce dopo l'apertura del context (incluso il
-        # primissimo goto di warmup), il context viene comunque chiuso in modo
-        # esplicito prima che asyncio.run() chiuda il loop. Prima, un errore
-        # qui faceva "return" immediato lasciando Chromium e le sue pipe aperte,
-        # causando il "RuntimeError: Event loop is closed" nel __del__ del
-        # subprocess transport quando il garbage collector interveniva dopo
-        # la chiusura del loop.
-        try:
-            context = await launch_persistent_context_async(
-                profile_dir,
-                headless=False,
-                humanize=True,
-                human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
-                proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                geoip=True,
-                viewport={"width": 1920, "height": 1080},
-                args=base_args
-            )
-            page = await context.new_page()
-
-            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(2)
-            await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(2)
-
-        except Exception as e:
-            print(f"[NODO {node_id}] Errore critico avvio Browser: {e}", flush=True)
-            with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: errore critico avvio browser: {e}\n{'#'*60}\n")
-            return
-
-        for url in targets:
-            print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
-            try:
-                query_to_search = get_query_from_url(url)
-
-                if "bing.com" in url:
-                    await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                    await asyncio.sleep(random.uniform(2.5, 4.0))
-                    try:
-                        search_box = page.locator("textarea[name='q'], input[name='q']").first
-                        await search_box.fill(query_to_search)
-                        await page.keyboard.press("Enter")
-                    except Exception:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-
-                elif "startpage.com" in url:
-                    await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                    await asyncio.sleep(random.uniform(2.0, 3.5))
-                    try:
-                        search_box = page.locator("input#q").first
-                        await search_box.fill(query_to_search)
-                        await page.keyboard.press("Enter")
-                    except Exception:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-
-                elif "html.duckduckgo.com" in url:
-                    await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                    await asyncio.sleep(random.uniform(2.0, 3.5))
-                    try:
-                        search_box = page.locator("input[name=q]").first
-                        await search_box.fill(query_to_search)
-                        await page.keyboard.press("Enter")
-                    except Exception:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-
-                else:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=12000)
-                except Exception:
-                    pass
-
-                await asyncio.sleep(6)
-
-                await page.keyboard.press("PageDown")
-                await asyncio.sleep(1)
-                await page.keyboard.press("PageDown")
-                await asyncio.sleep(2)
-
-                raw_html = await page.content()
-                current_url = page.url
-
-                # --- FIX 3: validazione sull'HTML grezzo, non sul markdown ---
-                is_ok, err_msg = validate_html(raw_html, current_url, None)
-
-                if is_ok:
-                    text_for_output = html_to_clean_markdown(raw_html, current_url)
-                    results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
-                    print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
-
-                    await lancia_nugget_task(url, text_for_output)
-                else:
-                    results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({err_msg})\n"
-                    print(f"[NODO {node_id}] -> Fallito: {err_msg}", flush=True)
-
-            except Exception as e:
-                print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
-
-            await asyncio.sleep(random.uniform(4.0, 7.0))
-
-        with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-            f.write(results)
-
-        if nugget_tasks:
-            print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
-            await asyncio.gather(*nugget_tasks, return_exceptions=True)
-
-        if nugget_retry_pool and key_pool is not None:
-            print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
-            retry_tasks = []
-            for url, testo_markdown in nugget_retry_pool:
-                async def _retry(url=url, testo_markdown=testo_markdown):
-                    async with nugget_semaphore:
-                        esito = await estrai_nuggets(
-                            key_pool=key_pool,
-                            source_url=url,
-                            testo_markdown=testo_markdown,
-                            topic=TARGET_TOPIC,
-                            node_id=node_id
-                        )
-                    if esito:
-                        await salva_nuggets(esito)
-                    else:
-                        print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
-                retry_tasks.append(asyncio.create_task(_retry()))
-            await asyncio.gather(*retry_tasks, return_exceptions=True)
-
-        print(f"[NODO {node_id}] STEP 2 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
-
-    finally:
-        # Chiusura esplicita e garantita del context, qualunque cosa succeda
-        # sopra (successo, eccezione, return anticipato). Questo e' il pezzo
-        # che mancava ed e' la causa diretta del RuntimeError sul loop chiuso.
-        if context is not None:
-            try:
-                await context.close()
-            except Exception:
-                pass
+          # Domini social/junk: i link verso questi domini vengono despogliati
+          # (restano come testo semplice, non come link markdown)
+          JUNK_LINK_DOMAINS = (
+              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
+              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
+              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
+              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
+              "addtoany.com", "sharethis.com", "mailto:"
+          )
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+          def _is_junk_domain(netloc, full_href):
+              netloc_low = netloc.lower()
+              href_low = full_href.lower()
+              for junk in JUNK_LINK_DOMAINS:
+                  if junk in netloc_low or href_low.startswith(junk):
+                      return True
+              return False
+
+
+          def _clean_query(query_string):
+              if not query_string:
+                  return ""
+              pairs = parse_qsl(query_string, keep_blank_values=True)
+              cleaned_pairs = []
+              for key, value in pairs:
+                  key_low = key.lower()
+                  if key_low in TRACKING_PARAMS_EXACT:
+                      continue
+                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES):
+                      continue
+                  cleaned_pairs.append((key, value))
+              return urlencode(cleaned_pairs)
+
+
+          def clean_link_href(raw_href, page_url):
+              """
+              Ritorna l'URL assoluto e ripulito, oppure None se il link va
+              despogliato (ancora interna, self-link, social/junk, vuoto,
+              javascript:, mailto: senza indirizzo valido).
+              """
+              if not raw_href:
+                  return None
+
+              raw_href = raw_href.strip()
+              if not raw_href or raw_href.startswith("javascript:"):
+                  return None
+              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
+                  return None
+
+              # Assolutizza (gestisce anche i protocol-relative //host/path)
+              try:
+                  absolute = urljoin(page_url, raw_href)
+              except Exception:
+                  return None
+
+              try:
+                  parts = urlsplit(absolute)
+              except Exception:
+                  return None
+
+              if parts.scheme not in ("http", "https", "mailto"):
+                  return None
+
+              if parts.scheme == "mailto":
+                  return None
+
+              # Ancora pura sulla stessa pagina (stesso path, solo #frammento)
+              page_parts = urlsplit(page_url)
+              same_path = (parts.netloc == page_parts.netloc and
+                           parts.path.rstrip("/") == page_parts.path.rstrip("/"))
+
+              if same_path and parts.fragment and not parts.query:
+                  return None
+
+              # Social / junk
+              if _is_junk_domain(parts.netloc, absolute):
+                  return None
+
+              # Pulizia query string dai parametri di tracciamento
+              cleaned_query = _clean_query(parts.query)
+
+              # Ricostruzione URL: rimuove sempre il fragment (ancore interne)
+              # a meno che non punti a una pagina diversa con un frammento
+              # significativo (raro nei casi editoriali, quindi lo scartiamo
+              # comunque per pulizia).
+              rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                     cleaned_query, ""))
+
+              # Self-link: stesso URL (dopo pulizia) della pagina sorgente
+              page_rebuilt_parts = urlsplit(page_url)
+              page_cleaned_query = _clean_query(page_rebuilt_parts.query)
+              page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
+                                          page_rebuilt_parts.netloc,
+                                          page_rebuilt_parts.path.rstrip("/"),
+                                          page_cleaned_query, ""))
+              rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc,
+                                                 parts.path.rstrip("/"),
+                                                 cleaned_query, ""))
+              if rebuilt_no_trailing == page_rebuilt:
+                  return None
+
+              return rebuilt
+
+
+          def _strip_anchor_tag(a_tag):
+              """Sostituisce un <a> con il suo solo testo, senza rimuoverlo dal DOM."""
+              a_tag.replace_with(a_tag.get_text())
+
+
+          def html_to_clean_markdown(html, page_url):
+              """
+              Pipeline unica: rimuove tag strutturali, pulisce i link chirurgicamente
+              con urllib, converte in Markdown con markdownify.
+              Ritorna il markdown completo (nessun troncamento).
+              """
+              soup = BeautifulSoup(html, "html.parser")
+
+              for tag_name in STRUCTURAL_TAGS_TO_STRIP:
+                  for tag in soup.find_all(tag_name):
+                      tag.decompose()
+
+              for a_tag in soup.find_all("a"):
+                  href = a_tag.get("href")
+                  cleaned = clean_link_href(href, page_url)
+                  if cleaned is None:
+                      _strip_anchor_tag(a_tag)
+                  else:
+                      a_tag["href"] = cleaned
+                      # Rimuove eventuali attributi di tracciamento superflui
+                      for attr in list(a_tag.attrs):
+                          if attr not in ("href", "title"):
+                              del a_tag[attr]
+
+              markdown_text = md_convert(
+                  str(soup),
+                  heading_style="ATX",
+                  bullets="-",
+                  strip=["img"],
+              )
+
+              # Collassa 3+ righe vuote consecutive in 2, pulisce i bordi
+              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
+              markdown_text = markdown_text.strip()
+
+              return markdown_text
+          EOF
+
+      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
+        run: |
+          cat << 'EOF' > nugget_extractor.py
+          """
+          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati
+          tramite Gemini Live API (gemini-3.1-flash-live-preview).
+
+          Segue lo stesso pattern del middleware filtro URL (url_screener.py):
+            - client.aio.live.connect con response_modalities=["AUDIO"] +
+              output_audio_transcription per ottenere testo dalla sessione Live
+            - timeout di sicurezza con asyncio.wait_for
+            - parsing JSON robusto con fallback su regex ```json ... ```
+
+          Principio non-negoziabile (coerente con ARIA):
+            la "confidence" NON e' mai auto-riportata dal modello. Viene derivata
+            deterministicamente confrontando la quote_originale dichiarata dal
+            modello con il testo sorgente realmente scrapato (fuzzy match).
+
+          GESTIONE LIMITI ENTERPRISE (v2):
+            1. Token bucket per-chiave: il limite dichiarato e' TPM 65K. Ogni
+               GeminiKeyPool.acquire() stima i token del payload e attende finche'
+               non c'e' budget sufficiente nel bucket della chiave corrente, con
+               un margine di sicurezza (75% del limite dichiarato) perche' la stima
+               token e' approssimata (~4 char/token) e non il vero tokenizer.
+            2. Multi-key round-robin con cooldown: se una chiave sforra comunque
+               (risposta 1011 / "exceeded your current quota"), viene marcata in
+               cooldown per COOLDOWN_SECONDS e il pool passa automaticamente alla
+               chiave successiva disponibile. Funziona anche con una sola chiave:
+               in quel caso il "pool" ha un solo elemento e la chiave va semplicemente
+               in attesa che il proprio bucket si ricarichi.
+            3. Scrittura incrementale JSONL: ogni nugget estratto viene appeso
+               immediatamente su disco (una riga = un oggetto JSON completo), NON
+               accumulato solo in RAM. Se il processo viene interrotto (timeout job,
+               kill, crash), tutto cio' che era stato scritto fino a quel momento
+               resta valido e recuperabile.
+          """
+
+          import json
+          import re
+          import os
+          import time
+          import asyncio
+          import difflib
+
+          from google import genai
+
+          MODEL_NAME = "gemini-3.1-flash-live-preview"
+
+          CONFIG_LIVE = {
+              "response_modalities": ["AUDIO"],
+              "output_audio_transcription": {}
+          }
+
+          NUGGET_TIMEOUT_SECONDS = 40.0
+
+          # Limite dichiarato dal piano: TPM 65.000. Usiamo un margine di sicurezza
+          # perche' la stima token e' approssimata (char/4), non il tokenizer reale.
+          TPM_LIMIT_DICHIARATO = 65_000
+          TPM_SAFETY_MARGIN = 0.75
+          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)  # 48.750
+
+          # Quanto tempo una chiave resta "in cooldown" dopo aver sforato il limite
+          # (segnale ricevuto direttamente dall'errore 1011 di Gemini, non dedotto)
+          COOLDOWN_SECONDS = 65.0
+
+          # Segnali testuali che identificano un errore di quota/rate-limit nella
+          # risposta d'errore della Live API (messaggio WebSocket 1011)
+          QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
+
+          NUGGET_PROMPT_TEMPLATE = """
+          Sei un estrattore di fatti (nugget) ad alta precisione per un sistema editoriale
+          di ricerca. Il tuo compito e' leggere il TESTO SORGENTE fornito ed estrarre
+          SOLO informazioni fattuali, dati concreti o affermazioni verificabili che
+          potrebbero essere utili per un articolo editoriale sul TARGET TOPIC indicato.
+
+          REGOLE:
+          1. Estrai SOLO fatti realmente presenti nel testo. Non inventare, non
+             dedurre, non completare informazioni mancanti.
+          2. Per ogni nugget, riporta in "quote_originale" la frase o porzione di
+             testo ESATTA (verbatim, non parafrasata) da cui hai estratto il fatto.
+             Questo campo verra' verificato programmaticamente contro il testo
+             sorgente: se non corrisponde, il nugget verra' scartato.
+          3. Classifica ogni nugget in una "category" tra: prezzo, orario, evento,
+             storia, geografia, recensione, dato_statistico, contatto, altro.
+          4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
+             array vuoto [].
+          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
+             generico privo di dati concreti.
+
+          Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
+          [
+            {{"fact": "...", "category": "...", "quote_originale": "..."}}
+          ]
+          Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
+
+          TARGET TOPIC:
+          {topic}
+
+          URL SORGENTE:
+          {source_url}
+
+          TESTO SORGENTE:
+          {testo}
+          """
+
+
+          def _stima_token(testo):
+              """Stima approssimata dei token (~4 caratteri/token per testo misto
+              italiano/inglese). Deliberatamente prudente: meglio sovrastimare che
+              sforare il limite reale."""
+              if not testo:
+                  return 0
+              return max(1, len(testo) // 4)
+
+
+          class TokenBucket:
+              """Token bucket a ricarica continua per il rate limiting TPM di una
+              singola API key. Non e' un pacing a intervallo fisso: permette raffiche
+              quando il budget e' pieno e rallenta automaticamente quando si avvicina
+              al limite, aspettando solo il tempo necessario a liberare budget."""
+
+              def __init__(self, capacity_tokens, refill_period_seconds=60.0):
+                  self.capacity = capacity_tokens
+                  self.tokens = capacity_tokens
+                  self.refill_period = refill_period_seconds
+                  self.refill_rate = capacity_tokens / refill_period_seconds  # token/secondo
+                  self.last_refill = time.monotonic()
+                  self._lock = asyncio.Lock()
+
+              def _refill(self):
+                  now = time.monotonic()
+                  elapsed = now - self.last_refill
+                  if elapsed > 0:
+                      self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+                      self.last_refill = now
+
+              async def acquire(self, needed_tokens, label=""):
+                  """Attende finche' non c'e' budget sufficiente, poi lo consuma."""
+                  needed_tokens = min(needed_tokens, self.capacity)  # non bloccare mai indefinitamente
+                  async with self._lock:
+                      while True:
+                          self._refill()
+                          if self.tokens >= needed_tokens:
+                              self.tokens -= needed_tokens
+                              return
+                          deficit = needed_tokens - self.tokens
+                          wait_seconds = deficit / self.refill_rate
+                          wait_seconds = min(wait_seconds, 20.0)  # non aspettare mai troppo in un colpo solo
+                          print(f"{label}[TPM-BUCKET] Budget insufficiente "
+                                f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
+                                flush=True)
+                          await asyncio.sleep(wait_seconds)
+
+
+          class GeminiKeyPool:
+              """Gestisce una o piu' API key Gemini con round-robin, token bucket
+              indipendente per chiave, e cooldown automatico sulle chiavi che
+              sforano il limite. Funziona in modo trasparente anche con una sola
+              chiave configurata."""
+
+              def __init__(self, api_keys):
+                  api_keys = [k for k in api_keys if k]
+                  if not api_keys:
+                      raise ValueError("Nessuna API key Gemini fornita")
+
+                  self.entries = []
+                  for key in api_keys:
+                      self.entries.append({
+                          "key": key,
+                          "client": genai.Client(api_key=key),
+                          "bucket": TokenBucket(TPM_BUDGET),
+                          "cooldown_until": 0.0,
+                      })
+                  self._idx = 0
+                  self._lock = asyncio.Lock()
+
+              async def _pick_entry(self, label=""):
+                  """Sceglie la prossima chiave disponibile (non in cooldown) in
+                  round-robin. Se tutte sono in cooldown, aspetta quella che si
+                  libera per prima."""
+                  async with self._lock:
+                      n = len(self.entries)
+                      while True:
+                          now = time.monotonic()
+                          candidati = [(i, e) for i, e in enumerate(self.entries) if e["cooldown_until"] <= now]
+                          if candidati:
+                              for _ in range(n):
+                                  self._idx = (self._idx + 1) % n
+                                  entry = self.entries[self._idx]
+                                  if entry["cooldown_until"] <= now:
+                                      return entry
+                          prossima_liberazione = min(e["cooldown_until"] for e in self.entries)
+                          attesa = max(0.5, prossima_liberazione - now)
+                          print(f"{label}[KEY-POOL] Tutte le chiavi in cooldown, attendo {attesa:.1f}s...",
+                                flush=True)
+                          await asyncio.sleep(min(attesa, 15.0))
+
+              def _mark_cooldown(self, entry, label=""):
+                  entry["cooldown_until"] = time.monotonic() + COOLDOWN_SECONDS
+                  print(f"{label}[KEY-POOL] Chiave in cooldown per {COOLDOWN_SECONDS:.0f}s "
+                        f"(quota TPM superata)", flush=True)
+
+              async def esegui_con_pool(self, payload, timeout_seconds, label=""):
+                  """Sceglie una chiave disponibile, attende budget TPM sufficiente
+                  sul suo bucket, esegue la chiamata Live. Un SOLO tentativo su UNA
+                  chiave: la logica di retry su piu' chiavi vive nel chiamante
+                  (estrai_nuggets), non qui."""
+
+                  entry = await self._pick_entry(label)
+                  stima = _stima_token(payload)
+                  await entry["bucket"].acquire(stima, label=label)
+
+                  accumulated_text = ""
+                  try:
+                      async def run_session():
+                          nonlocal accumulated_text
+                          async with entry["client"].aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
+                              await session.send_realtime_input(text=payload)
+                              async for response in session.receive():
+                                  if response.server_content and response.server_content.output_transcription:
+                                      if response.server_content.output_transcription.text:
+                                          accumulated_text += response.server_content.output_transcription.text
+                                  if response.server_content and response.server_content.turn_complete:
+                                      break
+
+                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
+                      return accumulated_text.strip(), None
+
+                  except (asyncio.TimeoutError, TimeoutError):
+                      return None, "timeout"
+                  except Exception as e:
+                      err_str = str(e).lower()
+                      if any(marker in err_str for marker in QUOTA_ERROR_MARKERS):
+                          self._mark_cooldown(entry, label=label)
+                          return None, "quota"
+                      return None, f"errore: {e}"
+
+
+          def _estrai_json_da_risposta(raw_text):
+              if not raw_text:
+                  return None
+              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
+              json_str = match.group(1) if match else raw_text
+              try:
+                  parsed = json.loads(json_str)
+                  if isinstance(parsed, list):
+                      return parsed
+              except Exception:
+                  pass
+              return None
+
+
+          def _calcola_confidence(quote_originale, testo_sorgente):
+              """Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello."""
+              if not quote_originale or not testo_sorgente:
+                  return "low"
+
+              quote_norm = re.sub(r'\s+', ' ', quote_originale).strip().lower()
+              testo_norm = re.sub(r'\s+', ' ', testo_sorgente).strip().lower()
+
+              if not quote_norm:
+                  return "low"
+
+              if quote_norm in testo_norm:
+                  return "high"
+
+              finestra = len(quote_norm)
+              if finestra < 8 or len(testo_norm) < finestra:
+                  best_ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm).ratio()
+              else:
+                  best_ratio = 0.0
+                  step = max(1, finestra // 2)
+                  for i in range(0, len(testo_norm) - finestra + 1, step):
+                      frammento = testo_norm[i:i + finestra]
+                      ratio = difflib.SequenceMatcher(None, quote_norm, frammento).ratio()
+                      if ratio > best_ratio:
+                          best_ratio = ratio
+                      if best_ratio > 0.95:
+                          break
+
+              if best_ratio >= 0.85:
+                  return "high"
+              elif best_ratio >= 0.60:
+                  return "medium"
+              else:
+                  return "low"
+
+
+          def scrivi_nuggets_jsonl(nuggets, jsonl_path):
+              """Scrittura incrementale: ogni nugget e' una riga JSON append-only.
+              Se il file non esiste viene creato. Nessuna riscrittura del file intero:
+              ogni chiamata aggiunge solo le righe nuove."""
+              if not nuggets:
+                  return
+              with open(jsonl_path, "a", encoding="utf-8") as f:
+                  for n in nuggets:
+                      f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+
+          async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
+                                    node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
+                                    max_key_attempts=None):
+              """
+              Estrae nugget strutturati da un singolo testo gia' scrapato, tramite
+              Gemini Live, usando il pool di chiavi con token bucket TPM.
+
+              Se una chiave sforra la quota, riprova automaticamente su un'altra
+              chiave del pool (fino a max_key_attempts, default = numero di chiavi
+              nel pool). Non solleva mai eccezioni verso il chiamante.
+
+              Ritorna: lista di dict nugget con schema
+                {fact, source_url, category, confidence, quote_originale}
+              oppure None in caso di fallimento totale (tutte le chiavi esaurite/timeout).
+              """
+              if not testo_markdown or len(testo_markdown.strip()) < 50:
+                  return []
+
+              label = f"[NODO {node_id}] " if node_id is not None else ""
+              payload = NUGGET_PROMPT_TEMPLATE.format(
+                  topic=topic,
+                  source_url=source_url,
+                  testo=testo_markdown
+              )
+
+              if max_key_attempts is None:
+                  max_key_attempts = len(key_pool.entries)
+
+              ultimo_motivo = None
+              for tentativo in range(max_key_attempts):
+                  accumulated_text, errore = await key_pool.esegui_con_pool(payload, timeout_seconds, label=label)
+
+                  if errore is None:
+                      parsed = _estrai_json_da_risposta(accumulated_text)
+                      if parsed is None:
+                          print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
+                                f"Output grezzo: {accumulated_text[:80]}...", flush=True)
+                          return None
+
+                      nuggets = []
+                      for item in parsed:
+                          if not isinstance(item, dict):
+                              continue
+                          fact = str(item.get("fact", "")).strip()
+                          quote = str(item.get("quote_originale", "")).strip()
+                          category = str(item.get("category", "altro")).strip() or "altro"
+                          if not fact:
+                              continue
+
+                          confidence = _calcola_confidence(quote, testo_markdown)
+                          nuggets.append({
+                              "fact": fact,
+                              "source_url": source_url,
+                              "category": category,
+                              "confidence": confidence,
+                              "quote_originale": quote
+                          })
+
+                      print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
+                      return nuggets
+
+                  elif errore == "quota":
+                      ultimo_motivo = "quota"
+                      print(f"{label}[NUGGET] Quota superata su {source_url}, "
+                            f"provo con un'altra chiave ({tentativo + 1}/{max_key_attempts})...", flush=True)
+                      continue
+
+                  elif errore == "timeout":
+                      print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}.", flush=True)
+                      return None
+
+                  else:
+                      print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
+                      return None
+
+              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
+                    f"(ultimo motivo: {ultimo_motivo})", flush=True)
+              return None
+          EOF
+
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, async + nugget extraction)
+        run: |
+          cat << 'EOF' > m2_step1.py
+          import time
+          import sys
+          import random
+          import os
+          import json
+          import asyncio
+          from curl_cffi import requests as curl_requests
+          from extraction_utils import html_to_clean_markdown
+          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          # Numero massimo di chiamate Gemini Live in volo contemporaneamente PER NODO.
+          # Il vero limite di velocita' e' gestito dal token bucket TPM dentro
+          # GeminiKeyPool: questo semaforo serve solo a non aprire un numero
+          # spropositato di WebSocket paralleli (che sarebbero comunque messi in coda
+          # dal bucket, ma e' piu' pulito limitarli anche a livello di concorrenza).
+          NUGGET_CONCURRENCY = 5
+
+          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step1.jsonl"
+          # Lock per serializzare le scritture JSONL tra i task concorrenti dello
+          # stesso nodo (append su file e' quasi sempre atomico su Linux per righe
+          # brevi, ma il lock elimina ogni ambiguita' senza costare quasi nulla).
+          _jsonl_lock = asyncio.Lock()
+
+
+          def carica_gemini_api_keys():
+              """Legge GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ...
+              Funziona anche con una sola chiave configurata."""
+              keys = []
+              primary = os.environ.get("GEMINI_API_KEY")
+              if primary:
+                  keys.append(primary)
+              i = 2
+              while True:
+                  k = os.environ.get(f"GEMINI_API_KEY_{i}")
+                  if not k:
+                      break
+                  keys.append(k)
+                  i += 1
+              return keys
+
+
+          async def verify_proxy_active(port, max_retries=5, delay=5):
+              test_session = curl_requests.AsyncSession(impersonate="chrome120")
+              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              for _ in range(max_retries):
+                  try:
+                      resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200:
+                          await test_session.close()
+                          return True
+                  except Exception:
+                      pass
+                  await asyncio.sleep(delay)
+              await test_session.close()
+              return False
+
+
+          def validate_html(html, url, status_code):
+              if status_code >= 400:
+                  return False, f"Blocco HTTP {status_code}"
+              if not html or len(html.strip()) < 300:
+                  return False, "HTML vuoto"
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return True, ""
+
+              low_html = html.lower()
+              blocking_indicators = [
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
+                  "just a moment", "security verification", "please enable js", "enable javascript",
+                  "are you a robot", "please wait for verification", "we've detected unusual activity",
+                  "if you are not redirected", "unusual traffic from your computer network",
+                  "checking your browser", "prove your humanity", "captcha verification",
+                  "please enter in the characters you see below", "access to this page is forbidden",
+                  "error 1020", "you have been blocked", "pardon our interruption",
+                  "se non vieni reindirizzato", "se hai problemi ad accedere",
+                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
+              ]
+
+              for ind in blocking_indicators:
+                  if ind in low_html:
+                      return False, f"WAF/Captcha rilevato: {ind}"
+              return True, ""
+
+
+          async def salva_nuggets(nuggets):
+              """Scrittura incrementale immediata su disco (JSONL), protetta da lock
+              per evitare interleaving tra task concorrenti dello stesso nodo."""
+              if not nuggets:
+                  return
+              async with _jsonl_lock:
+                  scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+
+
+          async def main():
+              if not await verify_proxy_active(ACTIVE_PORT):
+                  sys.exit(0)
+
+              queue_file = f"/tmp/step1_queue_{node_id}.json"
+              if not os.path.exists(queue_file):
+                  sys.exit(0)
+
+              with open(queue_file, "r") as f:
+                  targets = json.load(f)
+
+              api_keys = carica_gemini_api_keys()
+              key_pool = GeminiKeyPool(api_keys) if api_keys else None
+              if key_pool:
+                  print(f"[NODO {node_id}] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
+              else:
+                  print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
+
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+
+              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
+              failed_targets = []
+              nugget_retry_pool = []  # (url, testo_markdown) andati in timeout/errore: un solo retry a fine nodo
+
+              session = curl_requests.AsyncSession(impersonate="chrome120")
+              session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+              session.headers.update({
+                  "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+              })
+
+              nugget_tasks = []
+
+              async def lancia_nugget_task(url, testo_markdown):
+                  """Task fire-and-forget: il loop di scraping prosegue subito sul
+                  target successivo mentre Gemini processa questo in background.
+                  Il risultato viene scritto su disco NON APPENA arriva (mai solo
+                  accumulato in RAM), cosi' un'interruzione improvvisa del job non
+                  perde il lavoro gia' completato."""
+                  if key_pool is None:
+                      return
+
+                  async def _run():
+                      async with nugget_semaphore:
+                          esito = await estrai_nuggets(
+                              key_pool=key_pool,
+                              source_url=url,
+                              testo_markdown=testo_markdown,
+                              topic=TARGET_TOPIC,
+                              node_id=node_id
+                          )
+                      if esito is None:
+                          nugget_retry_pool.append((url, testo_markdown))
+                      else:
+                          await salva_nuggets(esito)
+
+                  nugget_tasks.append(asyncio.create_task(_run()))
+
+              for url in targets:
+                  print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+                  try:
+                      resp = await session.get(url, timeout=12)
+                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+
+                      if is_ok:
+                          if any(site in url for site in DIAGNOSTIC_SITES):
+                              from bs4 import BeautifulSoup
+                              soup = BeautifulSoup(resp.text, 'html.parser')
+                              text = soup.get_text(separator=' ', strip=True)
+                          else:
+                              text = html_to_clean_markdown(resp.text, url)
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                          print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
+
+                          if not any(site in url for site in DIAGNOSTIC_SITES):
+                              await lancia_nugget_task(url, text)
+                      else:
+                          print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
+                          failed_targets.append(url)
+                  except Exception:
+                      print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                      failed_targets.append(url)
+
+                  await asyncio.sleep(random.uniform(1.0, 2.0))
+
+              await session.close()
+
+              # Salva SUBITO il testo grezzo e i target falliti: questo non dipende
+              # dalle chiamate nugget ancora in corso, quindi va scritto a prescindere.
+              with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
+                  f.write(results)
+              with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
+                  json.dump(failed_targets, f)
+
+              if nugget_tasks:
+                  print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
+                  await asyncio.gather(*nugget_tasks, return_exceptions=True)
+
+              if nugget_retry_pool and key_pool is not None:
+                  print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
+                  retry_tasks = []
+                  for url, testo_markdown in nugget_retry_pool:
+                      async def _retry(url=url, testo_markdown=testo_markdown):
+                          async with nugget_semaphore:
+                              esito = await estrai_nuggets(
+                                  key_pool=key_pool,
+                                  source_url=url,
+                                  testo_markdown=testo_markdown,
+                                  topic=TARGET_TOPIC,
+                                  node_id=node_id
+                              )
+                          if esito:
+                              await salva_nuggets(esito)
+                          else:
+                              print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
+                      retry_tasks.append(asyncio.create_task(_retry()))
+                  await asyncio.gather(*retry_tasks, return_exceptions=True)
+
+              print(f"[NODO {node_id}] STEP 1 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+
+      - name: Esecuzione Scraping Parallelo - STEP 1
+        run: |
+          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
+          
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+      - name: Refresh IP Container per lo STEP 2
+        run: |
+          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          sleep 6
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        run: |
+          cat << 'EOF' > m2_step2_setup.py
+          import json
+          import os
+
+          merged_failed = []
+          for i in range(1, 7):
+              filename = f"failed_node_{i}.json"
+              if os.path.exists(filename):
+                  with open(filename, "r", encoding="utf-8") as f:
+                      try: merged_failed.extend(json.load(f))
+                      except Exception: pass
+          
+          unique_failed = list(dict.fromkeys(merged_failed))
+          
+          for i in range(1, 7):
+              chunk = unique_failed[i-1::6]
+              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+                  
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          EOF
+          python -u m2_step2_setup.py
+
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato + nugget extraction)
+        run: |
+          cat << 'EOF' > m2_step2.py
+          import asyncio
+          import time
+          import sys
+          import random
+          import os
+          import json
+          from urllib.parse import urlparse, parse_qs
+          from cloakbrowser import launch_persistent_context_async
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests as curl_requests
+          from extraction_utils import html_to_clean_markdown
+          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+          node_id = int(sys.argv[1])
+          INITIAL_PORT = 40000 + node_id
+
+          NUGGET_CONCURRENCY = 5
+          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+
+          NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step2.jsonl"
+          _jsonl_lock = asyncio.Lock()
+
+          # Stessi indicatori usati in Step 1: la validazione va fatta sull'HTML
+          # grezzo (o su get_text semplice), MAI sul markdown gia' ripulito da
+          # html_to_clean_markdown, perche' lo stripping di nav/footer/header/form
+          # e la rimozione dei link non validi alterano la lunghezza e il contenuto
+          # del testo, producendo falsi positivi di "blocco" su pagine che in realta'
+          # sono state scaricate correttamente.
+          BLOCKING_INDICATORS = [
+              "just a moment", "are you a robot", "prove your humanity",
+              "captcha verification", "please enter in the characters you see below",
+              "access is forbidden", "access to this page is forbidden", "challenge-platform",
+              "we've detected unusual activity", "checking your browser",
+              "security verification", "unusual traffic from your computer network"
+          ]
+
+
+          def carica_gemini_api_keys():
+              keys = []
+              primary = os.environ.get("GEMINI_API_KEY")
+              if primary:
+                  keys.append(primary)
+              i = 2
+              while True:
+                  k = os.environ.get(f"GEMINI_API_KEY_{i}")
+                  if not k:
+                      break
+                  keys.append(k)
+                  i += 1
+              return keys
+
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p', 'find_desc']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
+
+          async def salva_nuggets(nuggets):
+              if not nuggets:
+                  return
+              async with _jsonl_lock:
+                  scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+
+
+          async def verify_proxy_active(port, max_retries=6, delay=5):
+              """
+              Stessa identica logica del check gia' presente in m2_step1.py.
+              Nella pipeline stabile questo controllo mancava in Step 2, ma il
+              timing tutto sincrono lo rendeva innocuo: il ritardo introdotto dal
+              check bloccante in Step 1 (piu' i 6s di sleep fisso dopo il restart
+              dei container) copriva quasi sempre la latenza di avvio di WARP.
+              Con Step 1 reso asincrono e concorrente quel margine di sicurezza
+              implicito e' sparito: senza questo check, CloakBrowser puo' provare
+              ad aprire Chromium mentre il tunnel SOCKS5 del container non e'
+              ancora up, causando ERR_PROXY_CONNECTION_FAILED al primo goto e la
+              conseguente perdita silenziosa del nodo (nessun output, nessun
+              errore "gestito": il processo muore prima del loop sui target).
+              """
+              test_session = curl_requests.AsyncSession(impersonate="chrome120")
+              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              for tentativo in range(max_retries):
+                  try:
+                      resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200:
+                          await test_session.close()
+                          return True
+                  except Exception:
+                      pass
+                  print(f"[NODO {node_id}] Proxy non ancora pronto sulla porta {port}, "
+                        f"tentativo {tentativo + 1}/{max_retries}...", flush=True)
+                  await asyncio.sleep(delay)
+              await test_session.close()
+              return False
+
+
+          def validate_html(html, url, status_code):
+              """
+              Validazione WAF/captcha identica nello spirito a quella di Step 1,
+              ma eseguita sull'HTML grezzo scaricato dal browser (via page.content()),
+              PRIMA di qualunque pulizia o conversione a markdown. La conversione a
+              markdown resta un post-processing esclusivamente per l'output finale
+              e non deve mai influenzare la decisione di successo/fallimento.
+              """
+              if status_code is not None and status_code >= 400:
+                  return False, f"Blocco HTTP {status_code}"
+              if not html or len(html.strip()) < 300:
+                  return False, "HTML vuoto"
+
+              soup = BeautifulSoup(html, "html.parser")
+              text_grezzo = soup.get_text(separator=' ', strip=True)
+
+              if len(text_grezzo) <= 150:
+                  return False, "Contenuto insufficiente"
+
+              low_text = text_grezzo.lower()
+              for ind in BLOCKING_INDICATORS:
+                  if ind in low_text:
+                      return False, f"WAF/Captcha rilevato: {ind}"
+
+              return True, ""
+
+
+          async def main():
+              queue_file = f"/tmp/step2_queue_{node_id}.json"
+              if not os.path.exists(queue_file):
+                  return
+
+              with open(queue_file, "r") as f:
+                  targets = json.load(f)
+
+              if not targets:
+                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                      f.write("")
+                  return
+
+              # --- FIX 1: health-check del proxy prima di avviare il browser ---
+              if not await verify_proxy_active(INITIAL_PORT):
+                  print(f"[NODO {node_id}] Proxy MAI diventato attivo sulla porta {INITIAL_PORT}. "
+                        f"Nodo abortito, i target restano falliti.", flush=True)
+                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: proxy non disponibile, "
+                               f"nodo abortito prima di iniziare\n{'#'*60}\n")
+                  return
+
+              api_keys = carica_gemini_api_keys()
+              key_pool = GeminiKeyPool(api_keys) if api_keys else None
+              if key_pool:
+                  print(f"[NODO {node_id}] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
+              else:
+                  print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
+
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+              nugget_retry_pool = []
+              nugget_tasks = []
+
+              async def lancia_nugget_task(url, testo_markdown):
+                  if key_pool is None:
+                      return
+
+                  async def _run():
+                      async with nugget_semaphore:
+                          esito = await estrai_nuggets(
+                              key_pool=key_pool,
+                              source_url=url,
+                              testo_markdown=testo_markdown,
+                              topic=TARGET_TOPIC,
+                              node_id=node_id
+                          )
+                      if esito is None:
+                          nugget_retry_pool.append((url, testo_markdown))
+                      else:
+                          await salva_nuggets(esito)
+
+                  nugget_tasks.append(asyncio.create_task(_run()))
+
+              home_dir = os.path.expanduser("~")
+              profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
+              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+
+              base_args = [
+                  "--no-sandbox",
+                  "--disable-dev-shm-usage",
+                  f"--fingerprint={random.randint(100000, 999999)}",
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
+              ]
+
+              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+
+              context = None
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
+              try:
+                  # --- FIX 2: try/finally attorno a tutto il ciclo di vita del browser ---
+                  # Se qualsiasi cosa fallisce dopo l'apertura del context (incluso il
+                  # primissimo goto di warmup), il context viene comunque chiuso in modo
+                  # esplicito prima che asyncio.run() chiuda il loop. Prima, un errore
+                  # qui faceva "return" immediato lasciando Chromium e le sue pipe aperte,
+                  # causando il "RuntimeError: Event loop is closed" nel __del__ del
+                  # subprocess transport quando il garbage collector interveniva dopo
+                  # la chiusura del loop.
+                  try:
+                      context = await launch_persistent_context_async(
+                          profile_dir,
+                          headless=False,
+                          humanize=True,
+                          human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
+                          proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                          geoip=True,
+                          viewport={"width": 1920, "height": 1080},
+                          args=base_args
+                      )
+                      page = await context.new_page()
+
+                      await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
+                      await asyncio.sleep(2)
+                      await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
+                      await asyncio.sleep(2)
+
+                  except Exception as e:
+                      print(f"[NODO {node_id}] Errore critico avvio Browser: {e}", flush=True)
+                      with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                          f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: errore critico avvio browser: {e}\n{'#'*60}\n")
+                      return
+
+                  for url in targets:
+                      print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
+                      try:
+                          query_to_search = get_query_from_url(url)
+
+                          if "bing.com" in url:
+                              await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.5, 4.0))
+                              try:
+                                  search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                  await search_box.fill(query_to_search)
+                                  await page.keyboard.press("Enter")
+                              except Exception:
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
+                          elif "startpage.com" in url:
+                              await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.0, 3.5))
+                              try:
+                                  search_box = page.locator("input#q").first
+                                  await search_box.fill(query_to_search)
+                                  await page.keyboard.press("Enter")
+                              except Exception:
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
+                          elif "html.duckduckgo.com" in url:
+                              await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.0, 3.5))
+                              try:
+                                  search_box = page.locator("input[name=q]").first
+                                  await search_box.fill(query_to_search)
+                                  await page.keyboard.press("Enter")
+                              except Exception:
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
+                          else:
+                              await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+
+                          try:
+                              await page.wait_for_load_state("networkidle", timeout=12000)
+                          except Exception:
+                              pass
+
+                          await asyncio.sleep(6)
+
+                          await page.keyboard.press("PageDown")
+                          await asyncio.sleep(1)
+                          await page.keyboard.press("PageDown")
+                          await asyncio.sleep(2)
+
+                          raw_html = await page.content()
+                          current_url = page.url
+
+                          # --- FIX 3: validazione sull'HTML grezzo, non sul markdown ---
+                          is_ok, err_msg = validate_html(raw_html, current_url, None)
+
+                          if is_ok:
+                              text_for_output = html_to_clean_markdown(raw_html, current_url)
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
+                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+
+                              await lancia_nugget_task(url, text_for_output)
+                          else:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({err_msg})\n"
+                              print(f"[NODO {node_id}] -> Fallito: {err_msg}", flush=True)
+
+                      except Exception as e:
+                          print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+
+                      await asyncio.sleep(random.uniform(4.0, 7.0))
+
+                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                      f.write(results)
+
+                  if nugget_tasks:
+                      print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
+                      await asyncio.gather(*nugget_tasks, return_exceptions=True)
+
+                  if nugget_retry_pool and key_pool is not None:
+                      print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
+                      retry_tasks = []
+                      for url, testo_markdown in nugget_retry_pool:
+                          async def _retry(url=url, testo_markdown=testo_markdown):
+                              async with nugget_semaphore:
+                                  esito = await estrai_nuggets(
+                                      key_pool=key_pool,
+                                      source_url=url,
+                                      testo_markdown=testo_markdown,
+                                      topic=TARGET_TOPIC,
+                                      node_id=node_id
+                                  )
+                              if esito:
+                                  await salva_nuggets(esito)
+                              else:
+                                  print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
+                          retry_tasks.append(asyncio.create_task(_retry()))
+                      await asyncio.gather(*retry_tasks, return_exceptions=True)
+
+                  print(f"[NODO {node_id}] STEP 2 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
+
+              finally:
+                  # Chiusura esplicita e garantita del context, qualunque cosa succeda
+                  # sopra (successo, eccezione, return anticipato). Questo e' il pezzo
+                  # che mancava ed e' la causa diretta del RuntimeError sul loop chiuso.
+                  if context is not None:
+                      try:
+                          await context.close()
+                      except Exception:
+                          pass
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+
+      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
+        if: always()
+        run: |
+          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
+          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
+          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
+          TAIL_PID=$!
+          
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+          
+          for i in {1..6}; do
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
+          done
+
+          touch output_node_1_step1.txt output_node_1_step2.txt \
+                output_node_2_step1.txt output_node_2_step2.txt \
+                output_node_3_step1.txt output_node_3_step2.txt \
+                output_node_4_step1.txt output_node_4_step2.txt \
+                output_node_5_step1.txt output_node_5_step2.txt \
+                output_node_6_step1.txt output_node_6_step2.txt
+
+          cat output_node_1_step1.txt output_node_1_step2.txt \
+              output_node_2_step1.txt output_node_2_step2.txt \
+              output_node_3_step1.txt output_node_3_step2.txt \
+              output_node_4_step1.txt output_node_4_step2.txt \
+              output_node_5_step1.txt output_node_5_step2.txt \
+              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
+
+      - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
+        if: always()
+        run: |
+          cat << 'EOF' > merge_nuggets.py
+          import json
+          import os
+          import glob
+
+          # Cerca TUTTI i file nuggets_node_*_step*.jsonl presenti nella working
+          # directory, indipendentemente da quanti nodi/step siano effettivamente
+          # arrivati alla fine. Questo rende il merge resiliente anche a
+          # interruzioni parziali del job: se il job muore a meta', questo script
+          # recupera comunque tutto cio' che era stato scritto fino a quel momento.
+          jsonl_files = sorted(glob.glob("nuggets_node_*_step*.jsonl"))
+
+          merged_nuggets = []
+          per_node_stats = {}
+
+          for filename in jsonl_files:
+              count = 0
+              corrotte = 0
+              try:
+                  with open(filename, "r", encoding="utf-8") as f:
+                      for riga in f:
+                          riga = riga.strip()
+                          if not riga:
+                              continue
+                          try:
+                              nugget = json.loads(riga)
+                              merged_nuggets.append(nugget)
+                              count += 1
+                          except json.JSONDecodeError:
+                              # Riga scritta a meta' (es. processo interrotto durante
+                              # il flush): la scartiamo senza far fallire tutto il merge.
+                              corrotte += 1
+              except Exception as e:
+                  print(f"Errore lettura {filename}: {e}", flush=True)
+
+              label = filename.replace("nuggets_node_", "").replace(".jsonl", "")
+              per_node_stats[label] = count
+              if corrotte:
+                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
+
+          # Deduplica su (fact, source_url) normalizzati
+          seen = set()
+          nuggets_deduplicati = []
+          for n in merged_nuggets:
+              fact_norm = (n.get("fact") or "").strip().lower()
+              url_norm = (n.get("source_url") or "").strip().lower()
+              key = (fact_norm, url_norm)
+              if key in seen:
+                  continue
+              seen.add(key)
+              nuggets_deduplicati.append(n)
+
+          confidence_counts = {"high": 0, "medium": 0, "low": 0}
+          for n in nuggets_deduplicati:
+              c = n.get("confidence", "low")
+              if c in confidence_counts:
+                  confidence_counts[c] += 1
+
+          output_finale = {
+              "stats": {
+                  "file_jsonl_trovati": len(jsonl_files),
+                  "totale_nugget_grezzi": len(merged_nuggets),
+                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
+                  "per_nodo": per_node_stats,
+                  "per_confidence": confidence_counts
+              },
+              "nuggets": nuggets_deduplicati
+          }
+
+          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+              json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+                f"(da {len(merged_nuggets)} grezzi, {len(jsonl_files)} file letti) "
+                f"salvati in nuggets_finale.json", flush=True)
+          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+          EOF
+          python -u merge_nuggets.py
+
+      - name: Upload Artifact Macchina 2 (Testo Grezzo)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
+
+      - name: Upload Artifact Nugget (JSON Strutturato)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuggets_Macchina2
+          path: nuggets_finale.json
