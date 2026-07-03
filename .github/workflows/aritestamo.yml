@@ -87,7 +87,7 @@ jobs:
                           await asyncio.sleep(max(wait_seconds, 0.1))
 
           # ---------------------------------------------------------
-          # 2. Client API con Grounding e Self-Correction
+          # 2. Client API con Grounding Disattivabile e Self-Correction
           # ---------------------------------------------------------
           class GemmaAnalysisClient:
               def __init__(self, api_key: str, max_rpm: int = MAX_RPM_ANALYSIS):
@@ -98,7 +98,8 @@ jobs:
 
               async def generate_grounded_json(self, prompt: str, label: str = "",
                                                 expect_list: bool = False,
-                                                timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS):
+                                                timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS,
+                                                use_grounding: bool = True):
                   last_raw_text = None
                   current_prompt = prompt
 
@@ -107,7 +108,7 @@ jobs:
 
                       try:
                           response = await asyncio.wait_for(
-                              self._call_model(current_prompt),
+                              self._call_model(current_prompt, use_grounding=use_grounding),
                               timeout=timeout_seconds
                           )
                       except (asyncio.TimeoutError, TimeoutError):
@@ -137,10 +138,13 @@ jobs:
 
                   return None, last_raw_text, False
 
-              async def _call_model(self, prompt: str):
-                  grounding_tool = types.Tool(google_search=types.GoogleSearch())
+              async def _call_model(self, prompt: str, use_grounding: bool = True):
+                  tools = []
+                  if use_grounding:
+                      tools.append(types.Tool(google_search=types.GoogleSearch()))
+
                   config = types.GenerateContentConfig(
-                      tools=[grounding_tool],
+                      tools=tools if tools else None,
                       temperature=0.0,
                   )
 
@@ -200,7 +204,7 @@ jobs:
               return parsed
 
           # ---------------------------------------------------------
-          # 3. Fase 1: Clustering Agnostico e Riduzione Deterministica
+          # 3. Fase 1: Clustering Agnostico e Riduzione Deterministica (Grounding Spento)
           # ---------------------------------------------------------
           CLUSTERING_PROMPT_TEMPLATE = """Sei un analista editoriale specializzato in organizzazione di informazioni fattuali per articoli di viaggio/turismo/cultura, in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Il tuo compito e' puramente organizzativo: NON devi riscrivere, correggere o verificare i fatti in questa fase.
 
@@ -242,15 +246,15 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_prompt(nuggets_indicizzati)
               )
 
+              # use_grounding=False per evitare che l'API tenti ricerche web complesse su prompt giganti
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
-                  prompt, label=label, expect_list=False
+                  prompt, label=label, expect_list=False, use_grounding=False
               )
 
               if parsed is None:
                   print(f"{label}Clustering fallito (nessuna risposta), uso fallback per-categoria.", flush=True)
                   return _fallback_clustering_per_categoria(nuggets)
 
-              # Gestione tollerante di ritorni strutturati come liste flat o oggetti avvolti
               if isinstance(parsed, list):
                   macro_aree_raw = parsed
               elif isinstance(parsed, dict) and "macro_aree" in parsed:
@@ -299,7 +303,6 @@ jobs:
               if len(macro_aree) <= max_macro_aree:
                   return macro_aree
 
-              # Accorpamento deterministico dei raggruppamenti minori per evitare chiamate AI in eccesso
               macro_aree_ordinate = sorted(macro_aree, key=lambda a: len(a["nuggets"]))
               residuale_nome = "Altre informazioni"
               residuale_nuggets = []
@@ -322,7 +325,7 @@ jobs:
               return risultato
 
           # ---------------------------------------------------------
-          # 4. Fase 2: Riconciliazione Macro-Aree
+          # 4. Fase 2: Riconciliazione Macro-Aree (Grounding Attivo)
           # ---------------------------------------------------------
           RECONCILIATION_PROMPT_TEMPLATE = """Sei un fact-checker editoriale senior. Ti occupi di riconciliare informazioni raccolte da piu' fonti web su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Hai accesso allo strumento di ricerca Google per verificare dati incerti o contraddittori: usalo ogni volta che serve dirimere un conflitto numerico o fattuale, o per capire quale sia la fonte ufficiale di un dato.
 
@@ -354,7 +357,7 @@ jobs:
                 "source_urls": ["https://...", "https://..."],
                 "conflitto_irrisolto": false,
                 "valori_alternativi": [],
-                "note_risoluzione": "nota su come e' stato risolto un eventuale conflitto"
+                "note_resoluzione": "nota su come e' stato risolto un eventuale conflitto"
               }}
             ],
             "verified_facts": [
@@ -387,8 +390,9 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_reconcile(nuggets)
               )
 
+              # Riconciliazione puntuale con ricerca web (use_grounding=True)
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
-                  prompt, label=label, expect_list=False
+                  prompt, label=label, expect_list=False, use_grounding=True
               )
 
               if parsed is None or not isinstance(parsed, dict):
@@ -612,10 +616,11 @@ jobs:
                       fatti_verificati.append(fatto_verificato)
                       if fatto_verificato.get("verification_status") == "unverified":
                           totale_non_verificati += 1
+                          clean_fact = str(fatto_verificato.get("fact", "")).replace("|", "&#124;")
                           needs_human_review.append({
                               "tipo": "fatto_consolidato",
                               "macro_area": area.get("macro_area"),
-                              "fact": fatto_verificato.get("fact"),
+                              "fact": clean_fact,
                               "source_urls": fatto_verificato.get("source_urls", []),
                               "verification_details": fatto_verificato.get("verification_details"),
                           })
@@ -628,17 +633,19 @@ jobs:
                       vf_verificati.append(vf_verificato)
                       if vf_verificato.get("verification_status") == "unverified":
                           totale_non_verificati += 1
+                          clean_campo = str(vf_verificato.get("campo", "")).replace("|", "&#124;")
+                          clean_valore = str(vf_verificato.get("valore", "")).replace("|", "&#124;")
                           needs_human_review.append({
                               "tipo": "verified_fact",
                               "macro_area": area.get("macro_area"),
-                              "campo": vf_verificato.get("campo"),
-                              "valore": vf_verificato.get("valore"),
+                              "campo": clean_campo,
+                              "valore": clean_valore,
                               "fonte_ufficiale_url": vf_verificato.get("fonte_ufficiale_url"),
                               "verification_details": vf_verificato.get("verification_details"),
                           })
                   area["verified_facts"] = vf_verificati
 
-                  # Mappatura sicura dagli ID locali a quelli globali (evita TypeError durante indicizzazione liste)
+                  # Mappatura globale sicura e robusta contro gli errori di tipo ( TypeError / Index Error )
                   for fatto in area.get("fatti_consolidati", []):
                       global_ids = []
                       for lid in fatto.get("source_nugget_ids", []):
@@ -648,7 +655,14 @@ jobs:
                                   global_ids.append(local_nuggets[lid_int].get("_global_id"))
                           except (TypeError, ValueError):
                               continue
-                      fatto["source_nugget_ids"] = global_ids
+                      # Rimuove duplicati preservando l'ordine
+                      seen = set()
+                      unique_global_ids = []
+                      for g_id in global_ids:
+                          if g_id not in seen:
+                              seen.add(g_id)
+                              unique_global_ids.append(g_id)
+                      fatto["source_nugget_ids"] = unique_global_ids
 
                   for vf in area.get("verified_facts", []):
                       global_ids = []
@@ -659,7 +673,13 @@ jobs:
                                   global_ids.append(local_nuggets[lid_int].get("_global_id"))
                           except (TypeError, ValueError):
                               continue
-                      vf["source_nugget_ids"] = global_ids
+                      seen = set()
+                      unique_global_ids = []
+                      for g_id in global_ids:
+                          if g_id not in seen:
+                              seen.add(g_id)
+                              unique_global_ids.append(g_id)
+                      vf["source_nugget_ids"] = unique_global_ids
 
                   area.pop("_local_nuggets", None)
 
