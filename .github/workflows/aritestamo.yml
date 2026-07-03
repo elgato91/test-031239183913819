@@ -19,7 +19,6 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
-      ANALYSIS_MODEL_NAME: "gemma-4-26b-a4b-it"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -49,12 +48,10 @@ jobs:
           from google.genai import types
 
           MAX_MACRO_AREE = 15
-          PRIMARY_MODEL = os.environ.get("ANALYSIS_MODEL_NAME", "gemma-4-26b-a4b-it")
-          FALLBACK_MODEL = "gemma-4-31b-it"
-          
+          ANALYSIS_MODEL_NAME = "gemini-3.1-flash-live-preview"
           MAX_RPM_ANALYSIS = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
           ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
-          MAX_RETRY_TRANSIENT = 4  # 4 tentativi con backoff ed eventuale pass a 31b
+          MAX_RETRY_TRANSIENT = 4  # 4 tentativi asincroni di sicurezza
 
           # Parametri di tolleranza per il controllo anti-allucinazione deterministico
           NUMERIC_TOLERANCE_PCT = 0.02
@@ -89,9 +86,9 @@ jobs:
                           await asyncio.sleep(max(wait_seconds, 0.1))
 
           # ---------------------------------------------------------
-          # 2. Client API con Grounding, Backoff e Failover su 31B
+          # 2. Client API tramite Gemini Live API (Asincrono e Stabile)
           # ---------------------------------------------------------
-          class GemmaAnalysisClient:
+          class GeminiLiveAnalysisClient:
               def __init__(self, api_key: str, max_rpm: int = MAX_RPM_ANALYSIS):
                   if not api_key:
                       raise ValueError("API key mancante per il modello di analisi")
@@ -103,41 +100,50 @@ jobs:
                                                 timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS,
                                                 use_grounding: bool = True):
                   current_prompt = prompt
-                  current_model = PRIMARY_MODEL
+                  if system_instruction:
+                      current_prompt = f"INSTRUCTIONS / SYSTEM ROLE:\n{system_instruction}\n\nTASK CONTENT:\n{prompt}"
 
                   for tentativo in range(MAX_RETRY_TRANSIENT):
                       await self.limiter.acquire(label=label)
 
                       if tentativo > 0:
                           backoff = 2 ** tentativo
-                          print(f"{label}[GEMMA] Errore riscontrato al tentativo {tentativo}. Attesa backoff di {backoff}s...", flush=True)
+                          print(f"{label}[LIVE] Disservizio rilevato. Attesa backoff di {backoff}s prima del tentativo {tentativo + 1}...", flush=True)
                           await asyncio.sleep(backoff)
-                          # Passaggio forzato al modello 31B dopo il primo fallimento
-                          current_model = FALLBACK_MODEL
-                          print(f"{label}[GEMMA] Attivazione Failover: pass a {current_model}...", flush=True)
 
-                      print(f"{label}[GEMMA] Esecuzione su {current_model} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})...", flush=True)
+                      print(f"{label}[LIVE] Chiamata asincrona a Live API ({ANALYSIS_MODEL_NAME}) - tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT}...", flush=True)
 
+                      accumulated_text = ""
                       try:
-                          response = await asyncio.wait_for(
-                              self._call_model(current_prompt, system_instruction, use_grounding=use_grounding, model_name=current_model),
-                              timeout=timeout_seconds
-                          )
+                          async def run_session():
+                              nonlocal accumulated_text
+                              config_live = {
+                                  "response_modalities": ["AUDIO"],
+                                  "output_audio_transcription": {}
+                              }
+                              async with self.client.aio.live.connect(model=ANALYSIS_MODEL_NAME, config=config_live) as session:
+                                  await session.send_realtime_input(text=current_prompt)
+                                  async for response in session.receive():
+                                      if response.server_content and response.server_content.output_transcription:
+                                          if response.server_content.output_transcription.text:
+                                              accumulated_text += response.server_content.output_transcription.text
+                                      if response.server_content and response.server_content.turn_complete:
+                                          break
+
+                          await asyncio.wait_for(run_session(), timeout=timeout_seconds)
                       except (asyncio.TimeoutError, TimeoutError):
-                          print(f"{label}[GEMMA] Timeout ({current_model}) dopo {timeout_seconds}s (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
+                          print(f"{label}[LIVE] Timeout dopo {timeout_seconds}s (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
                           continue
                       except Exception as e:
-                          print(f"{label}[GEMMA] Errore chiamata modello ({current_model}): {e} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
+                          print(f"{label}[LIVE] Errore di sessione Live API: {e} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
                           continue
 
-                      raw_text = response.get("text", "")
-                      grounding_used = response.get("grounding_used", False)
-
+                      raw_text = accumulated_text.strip()
                       parsed = _estrai_json(raw_text, expect_list=expect_list)
                       if parsed is not None:
-                          return parsed, raw_text, grounding_used
+                          return parsed, raw_text, False
 
-                      print(f"{label}[GEMMA] Parsing JSON fallito (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT}). Richiedo correzione formato...", flush=True)
+                      print(f"{label}[LIVE] Parsing JSON fallito (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT}). Richiedo correzione formato...", flush=True)
                       current_prompt = (
                           prompt
                           + "\n\nATTENZIONE: la tua risposta precedente non era un JSON valido "
@@ -147,51 +153,6 @@ jobs:
                       )
 
                   return None, None, False
-
-              async def _call_model(self, prompt: str, system_instruction: str = "", use_grounding: bool = True, model_name: str = "gemma-4-26b-a4b-it"):
-                  tools = []
-                  if use_grounding:
-                      tools.append(types.Tool(google_search=types.GoogleSearch()))
-
-                  # Fonde le istruzioni all'inizio della stringa del prompt per bypassare il bug 500 dell'SDK
-                  full_contents = prompt
-                  if system_instruction:
-                      full_contents = f"INSTRUCTIONS / SYSTEM ROLE:\n{system_instruction}\n\nTASK CONTENT:\n{prompt}"
-
-                  config = types.GenerateContentConfig(
-                      tools=tools if tools else None,
-                      temperature=0.0,
-                  )
-
-                  def _sync_call():
-                      return self.client.models.generate_content(
-                          model=model_name,
-                          contents=full_contents,
-                          config=config,
-                      )
-
-                  result = await asyncio.to_thread(_sync_call)
-
-                  text = ""
-                  if result.candidates:
-                      candidate = result.candidates[0]
-                      if candidate.content and candidate.content.parts:
-                          for part in candidate.content.parts:
-                              if getattr(part, "text", None):
-                                  text += part.text
-
-                  grounding_used = False
-                  try:
-                      if result.candidates and result.candidates[0].grounding_metadata:
-                          gm = result.candidates[0].grounding_metadata
-                          grounding_used = bool(
-                              getattr(gm, "grounding_chunks", None) or
-                              getattr(gm, "web_search_queries", None)
-                          )
-                  except Exception:
-                      pass
-
-                  return {"text": text.strip(), "grounding_used": grounding_used}
 
           def _estrai_json(raw_text, expect_list: bool = False):
               if not raw_text:
@@ -219,14 +180,14 @@ jobs:
               return parsed
 
           # ---------------------------------------------------------
-          # 3. Fase 1: Clustering Agnostico e Riduzione Deterministica (Grounding Spento)
+          # 3. Fase 1: Clustering Agnostico e Riduzione Deterministica
           # ---------------------------------------------------------
           CLUSTERING_SYSTEM_INSTRUCTION = "Sei un analista editoriale specializzato in organizzazione di informazioni fattuali per articoli di viaggio/turismo/cultura, in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Il tuo compito e' puramente organizzativo: NON devi riscrivere, correggere o verificare i fatti in questa fase."
 
           CLUSTERING_PROMPT_TEMPLATE = """Riceverai un elenco numerato di "nugget" (fatti grezzi estratti da fonti web), ciascuno con un id univoco, il testo del fatto e la categoria assegnata in fase di estrazione.
 
           COMPITO:
-          Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspetto logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
+          Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspect logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
 
           VINCOLI RIGIDI:
           1. Il numero totale di macro-aree NON puo' superare {max_macro_aree}. Se il contenuto e' molto vario, accorpa i temi minori in macro-aree piu' ampie piuttosto che superare il limite.
@@ -261,7 +222,6 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_prompt(nuggets_indicizzati)
               )
 
-              # use_grounding=False e prompt fusion garantiscono stabilità strutturale
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
                   prompt=prompt, system_instruction=CLUSTERING_SYSTEM_INSTRUCTION,
                   label=label, expect_list=False, use_grounding=False
@@ -341,7 +301,7 @@ jobs:
               return risultato
 
           # ---------------------------------------------------------
-          # 4. Fase 2: Riconciliazione Macro-Aree (Grounding Attivo)
+          # 4. Fase 2: Riconciliazione Macro-Aree
           # ---------------------------------------------------------
           RECONCILIATION_SYSTEM_INSTRUCTION = "Sei un fact-checker editoriale senior. Ti occupi di riconciliare informazioni raccolte da piu' fonti web su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Hai accesso allo strumento di ricerca Google per verificare dati incerti o contraddittori: usalo ogni volta che serve dirimere un conflitto numerico o fattuale, o per capire quale sia la fonte ufficiale di un dato."
 
@@ -406,7 +366,6 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_reconcile(nuggets)
               )
 
-              # Riconciliazione puntuale con grounding abilitato
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
                   prompt=prompt, system_instruction=RECONCILIATION_SYSTEM_INSTRUCTION,
                   label=label, expect_list=False, use_grounding=True
@@ -537,7 +496,7 @@ jobs:
                   fatto_consolidato["verification_status"] = "unverified"
                   fatto_consolidato["unverified"] = True
                   dettagli["motivo"] = "Nessun id di riferimento o quote originali mancanti."
-                  fatto_consolidato["verification_details"] = dettagli
+                  fatto_consolidato["verification_details"] =原 dettagli
                   return fatto_consolidato
 
               similarity = _testo_supportato_fuzzy(testo_fatto, testi_sorgente)
@@ -598,9 +557,9 @@ jobs:
               dettagli["similarity_score"] = round(similarity, 3)
 
               numeri_valore = _estrai_numeri(valore)
-              numeri_sorgente = _estrai_numeri(testi_sorgente)
+              numbers_sorgente = _estrai_numeri(testi_sorgente)
               for numero in numeri_valore:
-                  if not _numero_supportato(numero, numeri_sorgente):
+                  if not _numero_supportato(numero, numbers_sorgente):
                       dettagli["numeri_non_supportati"].append(numero)
 
               is_verified = (not dettagli["numeri_non_supportati"]) and (similarity >= SIMILARITY_THRESHOLD or not numeri_valore)
@@ -662,7 +621,7 @@ jobs:
                           })
                   area["verified_facts"] = vf_verificati
 
-                  # Mappatura globale sicura
+                  # Mappatura globale indici sicura
                   for fatto in area.get("fatti_consolidati", []):
                       global_ids = []
                       for lid in fatto.get("source_nugget_ids", []):
@@ -755,10 +714,10 @@ jobs:
                   print("[ORCHESTRATOR] ERRORE: Chiavi API non configurate.")
                   sys.exit(1)
 
-              gemma_client = GemmaAnalysisClient(api_key=api_keys[0], max_rpm=15)
+              analysis_client = GeminiLiveAnalysisClient(api_key=api_keys[0], max_rpm=15)
 
               print("[ORCHESTRATOR] Fase 1: Clustering dinamico agnostico...", flush=True)
-              macro_aree = await clusterizza_nuggets(gemma_client, nuggets_grezzi)
+              macro_aree = await clusterizza_nuggets(analysis_client, nuggets_grezzi)
               print(f"[ORCHESTRATOR] Create {len(macro_aree)} macro-aree.", flush=True)
 
               print("[ORCHESTRATOR] Fase 2: Riconciliazione ad alta precisione con grounding...", flush=True)
@@ -766,7 +725,7 @@ jobs:
               for area in macro_aree:
                   label = f"[{area['nome_macro_area']}] "
                   risultato = await riconcilia_macro_area(
-                      gemma_client, area["nome_macro_area"], area["nuggets"], label=label
+                      analysis_client, area["nome_macro_area"], area["nuggets"], label=label
                   )
                   macro_aree_riconciliate.append(risultato)
 
@@ -801,7 +760,7 @@ jobs:
               summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
               if summary_file:
                   with open(summary_file, "a", encoding="utf-8") as sf:
-                      sf.write("### 🏛️ Report di Consolidamento Agnostico Gemma 4\n\n")
+                      sf.write("### 🏛️ Report di Consolidamento Agnostico Gemini Live\n\n")
                       sf.write("| Metrica | Valore |\n")
                       sf.write("| --- | --- |\n")
                       sf.write(f"| Nugget Grezzi Analizzati | {len(nuggets_grezzi)} |\n")
