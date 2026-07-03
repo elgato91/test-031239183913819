@@ -165,7 +165,7 @@ jobs:
               "https://esperienzaveraorvieto.com",
               "https://etruschi.name/orvieto/tempio_belvedere_it.html",
               "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
-              "https://exploring-umbria.com/en/discover-orvieto/discover-orvieto/tempio-del-belvedere-and-fanum-voltumnae",
+              "https://exploring-umbria.com/en/discover-orvieto/discover-orvieto/tempio-tempio-del-belvedere-and-fanum-voltumnae",
               "https://exploring-umbria.com/en/discover-orvieto/eating-in-orvieto",
               "https://exploring-umbria.com/en/the-ceramics-in-umbria/orvieto",
               "https://exploring-umbria.com/la-ceramica-in-umbria/la-ceramica-di-orvieto",
@@ -371,7 +371,7 @@ jobs:
               "https://orvietoviva.com/en/category/orvieto-ceramic-shops",
               "https://orvietoviva.com/en/ceramic-orvieto",
               "https://orvietoviva.com/en/do-in-orvieto",
-              "https://orvietoviva.com/en/etruscan-temple",
+              "https://orvietoviva.com/en/etruscan-tempio",
               "https://orvietoviva.com/en/events-in-orvieto",
               "https://orvietoviva.com/en/frequently-asked-questions-about-visiting-orvieto",
               "https://orvietoviva.com/en/getting-moving-orvieto",
@@ -498,7 +498,7 @@ jobs:
               "https://tendenzediviaggio.it/weekend-a-orvieto-cosa-vedere-e-quanto-costa-un-soggiorno-nella-perla-dellumbria",
               "https://theculturetrip.com/europe/italy/articles/the-top-5-things-to-do-and-see-in-orvieto",
               "https://theculturetrip.com/europe/italy/orvieto/articles/the-10-best-restaurants-in-orvieto",
-              "https://theculturetrip.com/italy/articles/the-10-best-restaurants-in-orvieto",
+              "https://theitalyedit.com/italy/articles/the-10-best-restaurants-in-orvieto",
               "https://theflashpacker.net/things-to-do-in-orvieto-italy-guide",
               "https://thegeographicalcure.com/post/guide-orvieto-cathedral",
               "https://thegeographicalcure.com/post/one-day-in-orvieto",
@@ -548,7 +548,7 @@ jobs:
               "https://umbriaecultura.it/luca-signorelli-cappella-san-brizio-orvieto",
               "https://umbriaonline.com/ceramica-orvieto.phtml",
               "https://umbriasi.it/pozzo-di-san-patrizio",
-              "https://umbriatourism.it/en/w/archaeological-area-of-the-temple-of-belvedere",
+              "https://umbriatourism.it/en/w/archaeological-area-of-the-tempio-of-belvedere",
               "https://umbriatourism.it/en/w/claudio-faina-museum-and-civic-archaeological-museum-orvieto",
               "https://umbriatourism.it/en/w/st-patrick-s-well",
               "https://umbriatourism.it/en/w/the-ceramics-of-orvieto",
@@ -797,18 +797,35 @@ jobs:
               output_audio_transcription per ottenere testo dalla sessione Live
             - timeout di sicurezza con asyncio.wait_for
             - parsing JSON robusto con fallback su regex ```json ... ```
-            - nessuna eccezione propagata verso il chiamante: ogni fallimento
-              ritorna None, mai un'eccezione non gestita
 
           Principio non-negoziabile (coerente con ARIA):
             la "confidence" NON e' mai auto-riportata dal modello. Viene derivata
             deterministicamente confrontando la quote_originale dichiarata dal
-            modello con il testo sorgente realmente scrapato (fuzzy match), esattamente
-            come il fuzzy recovery gia' usato in url_screener.py con difflib.
+            modello con il testo sorgente realmente scrapato (fuzzy match).
+
+          GESTIONE LIMITI ENTERPRISE (v2):
+            1. Token bucket per-chiave: il limite dichiarato e' TPM 65K. Ogni
+               GeminiKeyPool.acquire() stima i token del payload e attende finche'
+               non c'e' budget sufficiente nel bucket della chiave corrente, con
+               un margine di sicurezza (75% del limite dichiarato) perche' la stima
+               token e' approssimata (~4 char/token) e non il vero tokenizer.
+            2. Multi-key round-robin con cooldown: se una chiave sforra comunque
+               (risposta 1011 / "exceeded your current quota"), viene marcata in
+               cooldown per COOLDOWN_SECONDS e il pool passa automaticamente alla
+               chiave successiva disponibile. Funziona anche con una sola chiave:
+               in quel caso il "pool" ha un solo elemento e la chiave va semplicemente
+               in attesa che il proprio bucket si ricarichi.
+            3. Scrittura incrementale JSONL: ogni nugget estratto viene appeso
+               immediatamente su disco (una riga = un oggetto JSON completo), NON
+               accumulato solo in RAM. Se il processo viene interrotto (timeout job,
+               kill, crash), tutto cio' che era stato scritto fino a quel momento
+               resta valido e recuperabile.
           """
 
           import json
           import re
+          import os
+          import time
           import asyncio
           import difflib
 
@@ -823,6 +840,20 @@ jobs:
 
           # Timeout di sicurezza per singola chiamata Live (per-target, non per-chunk)
           NUGGET_TIMEOUT_SECONDS = 40.0
+
+          # Limite dichiarato dal piano: TPM 65.000. Usiamo un margine di sicurezza
+          # perche' la stima token e' approssimata (char/4), non il tokenizer reale.
+          TPM_LIMIT_DICHIARATO = 65_000
+          TPM_SAFETY_MARGIN = 0.75
+          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)  # 48.750
+
+          # Quanto tempo una chiave resta "in cooldown" dopo aver sforato il limite
+          # (segnale ricevuto direttamente dall'errore 1011 di Gemini, non dedotto)
+          COOLDOWN_SECONDS = 65.0
+
+          # Segnali testuali che identificano un errore di quota/rate-limit nella
+          # risposta d'errore della Live API (messaggio WebSocket 1011)
+          QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
 
           NUGGET_PROMPT_TEMPLATE = """
           Sei un estrattore di fatti (nugget) ad alta precisione per un sistema editoriale
@@ -861,9 +892,139 @@ jobs:
           """
 
 
+          def _stima_token(testo):
+              """Stima approssimata dei token (~4 caratteri/token per testo misto
+              italiano/inglese). Deliberatamente prudente: meglio sovrastimare che
+              sforare il limite reale."""
+              if not testo:
+                  return 0
+              return max(1, len(testo) // 4)
+
+
+          class TokenBucket:
+              """Token bucket a ricarica continua per il rate limiting TPM di una
+              singola API key. Non e' un pacing a intervallo fisso: permette raffiche
+              quando il budget e' pieno e rallenta automaticamente quando si avvicina
+              al limite, aspettando solo il tempo necessario a liberare budget."""
+
+              def __init__(self, capacity_tokens, refill_period_seconds=60.0):
+                  self.capacity = capacity_tokens
+                  self.tokens = capacity_tokens
+                  self.refill_period = refill_period_seconds
+                  self.refill_rate = capacity_tokens / refill_period_seconds  # token/secondo
+                  self.last_refill = time.monotonic()
+                  self._lock = asyncio.Lock()
+
+              def _refill(self):
+                  now = time.monotonic()
+                  elapsed = now - self.last_refill
+                  if elapsed > 0:
+                      self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+                      self.last_refill = now
+
+              async def acquire(self, needed_tokens, label=""):
+                  """Attende finche' non c'e' budget sufficiente, poi lo consuma."""
+                  needed_tokens = min(needed_tokens, self.capacity)  # non bloccare mai indefinitamente
+                  async with self._lock:
+                      while True:
+                          self._refill()
+                          if self.tokens >= needed_tokens:
+                              self.tokens -= needed_tokens
+                              return
+                          deficit = needed_tokens - self.tokens
+                          wait_seconds = deficit / self.refill_rate
+                          wait_seconds = min(wait_seconds, 20.0)  # non aspettare mai troppo in un colpo solo
+                          print(f"{label}[TPM-BUCKET] Budget insufficiente "
+                                f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
+                                flush=True)
+                          await asyncio.sleep(wait_seconds)
+
+
+          class GeminiKeyPool:
+              """Gestisce una o piu' API key Gemini con round-robin, token bucket
+              indipendente per chiave, e cooldown automatico sulle chiavi che
+              sforano il limite. Funziona in modo trasparente anche con una sola
+              chiave configurata."""
+
+              def __init__(self, api_keys):
+                  api_keys = [k for k in api_keys if k]
+                  if not api_keys:
+                      raise ValueError("Nessuna API key Gemini fornita")
+
+                  self.entries = []
+                  for key in api_keys:
+                      self.entries.append({
+                          "key": key,
+                          "client": genai.Client(api_key=key),
+                          "bucket": TokenBucket(TPM_BUDGET),
+                          "cooldown_until": 0.0,
+                      })
+                  self._idx = 0
+                  self._lock = asyncio.Lock()
+
+              async def _pick_entry(self, label=""):
+                  """Sceglie la prossima chiave disponibile (non in cooldown) in
+                  round-robin. Se tutte sono in cooldown, aspetta quella che si
+                  libera per prima."""
+                  async with self._lock:
+                      n = len(self.entries)
+                      while True:
+                          now = time.monotonic()
+                          candidati = [(i, e) for i, e in enumerate(self.entries) if e["cooldown_until"] <= now]
+                          if candidati:
+                              for _ in range(n):
+                                  self._idx = (self._idx + 1) % n
+                                  entry = self.entries[self._idx]
+                                  if entry["cooldown_until"] <= now:
+                                      return entry
+                          prossima_liberazione = min(e["cooldown_until"] for e in self.entries)
+                          attesa = max(0.5, prossima_liberazione - now)
+                          print(f"{label}[KEY-POOL] Tutte le chiavi in cooldown, attendo {attesa:.1f}s...",
+                                flush=True)
+                          await asyncio.sleep(min(attesa, 15.0))
+
+              def _mark_cooldown(self, entry, label=""):
+                  entry["cooldown_until"] = time.monotonic() + COOLDOWN_SECONDS
+                  print(f"{label}[KEY-POOL] Chiave in cooldown per {COOLDOWN_SECONDS:.0f}s "
+                        f"(quota TPM superata)", flush=True)
+
+              async def esegui_con_pool(self, payload, timeout_seconds, label=""):
+                  """Sceglie una chiave disponibile, attende budget TPM sufficiente
+                  sul suo bucket, esegue la chiamata Live. Un SOLO tentativo su UNA
+                  chiave: la logica di retry su piu' chiavi vive nel chiamante
+                  (estrai_nuggets), non qui."""
+
+                  entry = await self._pick_entry(label)
+                  stima = _stima_token(payload)
+                  await entry["bucket"].acquire(stima, label=label)
+
+                  accumulated_text = ""
+                  try:
+                      async def run_session():
+                          nonlocal accumulated_text
+                          async with entry["client"].aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
+                              await session.send_realtime_input(text=payload)
+                              async for response in session.receive():
+                                  if response.server_content and response.server_content.output_transcription:
+                                      if response.server_content.output_transcription.text:
+                                          accumulated_text += response.server_content.output_transcription.text
+                                  if response.server_content and response.server_content.turn_complete:
+                                      break
+
+                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
+                      return accumulated_text.strip(), None
+
+                  except (asyncio.TimeoutError, TimeoutError):
+                      return None, "timeout"
+                  except Exception as e:
+                      err_str = str(e).lower()
+                      if any(marker in err_str for marker in QUOTA_ERROR_MARKERS):
+                          self._mark_cooldown(entry, label=label)
+                          return None, "quota"
+                      return None, f"errore: {e}"
+
+
           def _estrai_json_da_risposta(raw_text):
-              """Estrae l'array JSON dalla risposta grezza, con fallback su regex.
-              Identico approccio a url_screener.py."""
               if not raw_text:
                   return None
               match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
@@ -878,13 +1039,7 @@ jobs:
 
 
           def _calcola_confidence(quote_originale, testo_sorgente):
-              """
-              Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello.
-
-              - high: la quote e' rintracciabile pressoche' verbatim nel testo sorgente
-              - medium: match parziale/fuzzy sopra soglia minima
-              - low: quote non riscontrabile nel testo sorgente (possibile allucinazione)
-              """
+              """Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello."""
               if not quote_originale or not testo_sorgente:
                   return "low"
 
@@ -894,15 +1049,11 @@ jobs:
               if not quote_norm:
                   return "low"
 
-              # Match verbatim diretto (case-insensitive, whitespace-normalizzato)
               if quote_norm in testo_norm:
                   return "high"
 
-              # Fuzzy match: cerca la sottostringa piu' simile nel testo sorgente
-              # usando una finestra scorrevole di dimensione comparabile alla quote
               finestra = len(quote_norm)
               if finestra < 8 or len(testo_norm) < finestra:
-                  # Quote troppo corta o testo troppo piccolo per un confronto affidabile
                   best_ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm).ratio()
               else:
                   best_ratio = 0.0
@@ -923,17 +1074,31 @@ jobs:
                   return "low"
 
 
-          async def estrai_nuggets(client, semaphore, source_url, testo_markdown, topic,
-                                    node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS):
+          def scrivi_nuggets_jsonl(nuggets, jsonl_path):
+              """Scrittura incrementale: ogni nugget e' una riga JSON append-only.
+              Se il file non esiste viene creato. Nessuna riscrittura del file intero:
+              ogni chiamata aggiunge solo le righe nuove."""
+              if not nuggets:
+                  return
+              with open(jsonl_path, "a", encoding="utf-8") as f:
+                  for n in nuggets:
+                      f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+
+          async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
+                                    node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
+                                    max_key_attempts=None):
               """
               Estrae nugget strutturati da un singolo testo gia' scrapato, tramite
-              Gemini Live. Non solleva mai eccezioni verso il chiamante: in caso di
-              errore o timeout ritorna None, e il chiamante decide come gestire il
-              retry (in Step 1/2: rimessa in coda per un secondo tentativo a fine nodo).
+              Gemini Live, usando il pool di chiavi con token bucket TPM.
+
+              Se una chiave sforra la quota, riprova automaticamente su un'altra
+              chiave del pool (fino a max_key_attempts, default = numero di chiavi
+              nel pool). Non solleva mai eccezioni verso il chiamante.
 
               Ritorna: lista di dict nugget con schema
                 {fact, source_url, category, confidence, quote_originale}
-              oppure None in caso di fallimento totale della chiamata.
+              oppure None in caso di fallimento totale (tutte le chiavi esaurite/timeout).
               """
               if not testo_markdown or len(testo_markdown.strip()) < 50:
                   return []
@@ -945,58 +1110,59 @@ jobs:
                   testo=testo_markdown
               )
 
-              async with semaphore:
-                  accumulated_text = ""
-                  try:
-                      async def run_session():
-                          nonlocal accumulated_text
-                          async with client.aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
-                              await session.send_realtime_input(text=payload)
-                              async for response in session.receive():
-                                  if response.server_content and response.server_content.output_transcription:
-                                      if response.server_content.output_transcription.text:
-                                          accumulated_text += response.server_content.output_transcription.text
-                                  if response.server_content and response.server_content.turn_complete:
-                                      break
+              if max_key_attempts is None:
+                  max_key_attempts = len(key_pool.entries)
 
-                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
+              ultimo_motivo = None
+              for tentativo in range(max_key_attempts):
+                  accumulated_text, errore = await key_pool.esegui_con_pool(payload, timeout_seconds, label=label)
 
-                  except (asyncio.TimeoutError, TimeoutError):
-                      print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}. "
-                            f"Verra' ritentato a fine nodo.", flush=True)
-                      return None
-                  except Exception as e:
-                      print(f"{label}[NUGGET] Errore chiamata Live su {source_url}: {e}", flush=True)
-                      return None
+                  if errore is None:
+                      parsed = _estrai_json_da_risposta(accumulated_text)
+                      if parsed is None:
+                          print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
+                                f"Output grezzo: {accumulated_text[:80]}...", flush=True)
+                          return None
 
-              parsed = _estrai_json_da_risposta(accumulated_text.strip())
-              if parsed is None:
-                  print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
-                        f"Output grezzo: {accumulated_text[:80]}...", flush=True)
-                  return None
+                      nuggets = []
+                      for item in parsed:
+                          if not isinstance(item, dict):
+                              continue
+                          fact = str(item.get("fact", "")).strip()
+                          quote = str(item.get("quote_originale", "")).strip()
+                          category = str(item.get("category", "altro")).strip() or "altro"
+                          if not fact:
+                              continue
 
-              nuggets = []
-              for item in parsed:
-                  if not isinstance(item, dict):
+                          confidence = _calcola_confidence(quote, testo_markdown)
+                          nuggets.append({
+                              "fact": fact,
+                              "source_url": source_url,
+                              "category": category,
+                              "confidence": confidence,
+                              "quote_originale": quote
+                          })
+
+                      print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
+                      return nuggets
+
+                  elif errore == "quota":
+                      ultimo_motivo = "quota"
+                      print(f"{label}[NUGGET] Quota superata su {source_url}, "
+                            f"provo con un'altra chiave ({tentativo + 1}/{max_key_attempts})...", flush=True)
                       continue
-                  fact = str(item.get("fact", "")).strip()
-                  quote = str(item.get("quote_originale", "")).strip()
-                  category = str(item.get("category", "altro")).strip() or "altro"
-                  if not fact:
-                      continue
 
-                  confidence = _calcola_confidence(quote, testo_markdown)
+                  elif errore == "timeout":
+                      print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}.", flush=True)
+                      return None
 
-                  nuggets.append({
-                      "fact": fact,
-                      "source_url": source_url,
-                      "category": category,
-                      "confidence": confidence,
-                      "quote_originale": quote
-                  })
+                  else:
+                      print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
+                      return None
 
-              print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
-              return nuggets
+              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
+                    f"(ultimo motivo: {ultimo_motivo})", flush=True)
+              return None
           EOF
 
       - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, async + nugget extraction)
@@ -1010,16 +1176,9 @@ jobs:
           import asyncio
           from curl_cffi import requests as curl_requests
           from extraction_utils import html_to_clean_markdown
-          from nugget_extractor import estrai_nuggets
-          from google import genai
+          from nugget_extractor import estrai_nuggets, GeminiKeyPool, scrivi_nuggets_jsonl
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-
-          # Numero massimo di sessioni Gemini Live concorrenti PER NODO.
-          # Tenuto deliberatamente basso: ogni sessione apre un WebSocket separato,
-          # e 6 nodi girano in parallelo a livello di job (6 x NUGGET_CONCURRENCY
-          # connessioni totali nel picco).
-          NUGGET_CONCURRENCY = 5
 
           TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
 
@@ -1083,15 +1242,13 @@ jobs:
               with open(queue_file, "r") as f:
                   targets = json.load(f)
 
-              api_key = os.environ.get("GEMINI_API_KEY")
-              gemini_client = genai.Client(api_key=api_key) if api_key else None
-              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+              api_key_env = os.environ.get("GEMINI_API_KEY", "")
+              api_keys = [k.strip() for k in api_key_env.split(",") if k.strip()]
+              gemini_key_pool = GeminiKeyPool(api_keys) if api_keys else None
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
               failed_targets = []
               all_nuggets = []
-              # target il cui SCRAPING e' riuscito ma la cui NUGGET EXTRACTION e' fallita
-              # per timeout/errore: vengono ritentati una sola volta a fine nodo.
               nugget_retry_pool = []  # lista di tuple (url, testo_markdown)
 
               session = curl_requests.AsyncSession(impersonate="chrome120")
@@ -1106,23 +1263,23 @@ jobs:
               async def lancia_nugget_task(url, testo_markdown):
                   """Crea un task fire-and-forget per l'estrazione nugget, cosi' il
                   loop di scraping puo' proseguire subito sul target successivo."""
-                  if gemini_client is None:
+                  if gemini_key_pool is None:
                       return
 
                   async def _run():
                       esito = await estrai_nuggets(
-                          client=gemini_client,
-                          semaphore=nugget_semaphore,
+                          key_pool=gemini_key_pool,
                           source_url=url,
                           testo_markdown=testo_markdown,
                           topic=TARGET_TOPIC,
                           node_id=node_id
                       )
                       if esito is None:
-                          # Timeout o errore: candidato al retry a fine nodo
                           nugget_retry_pool.append((url, testo_markdown))
                       else:
                           all_nuggets.extend(esito)
+                          # Scrittura incrementale immediata su disco
+                          scrivi_nuggets_jsonl(esito, f"nuggets_node_{node_id}_step1.jsonl")
 
                   task = asyncio.create_task(_run())
                   nugget_tasks.append(task)
@@ -1143,8 +1300,6 @@ jobs:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
 
-                          # Lancia l'estrazione nugget in background SENZA attendere:
-                          # il loop prosegue subito sul prossimo target.
                           if not any(site in url for site in DIAGNOSTIC_SITES):
                               await lancia_nugget_task(url, text)
                       else:
@@ -1158,20 +1313,18 @@ jobs:
 
               await session.close()
 
-              # Attende il completamento di tutte le chiamate nugget lanciate in background
               if nugget_tasks:
                   print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
                   await asyncio.gather(*nugget_tasks, return_exceptions=True)
 
               # Secondo (e ultimo) tentativo per i target andati in timeout/errore
-              if nugget_retry_pool and gemini_client is not None:
+              if nugget_retry_pool and gemini_key_pool is not None:
                   print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
                   retry_tasks = []
                   for url, testo_markdown in nugget_retry_pool:
                       async def _retry(url=url, testo_markdown=testo_markdown):
                           esito = await estrai_nuggets(
-                              client=gemini_client,
-                              semaphore=nugget_semaphore,
+                              key_pool=gemini_key_pool,
                               source_url=url,
                               testo_markdown=testo_markdown,
                               topic=TARGET_TOPIC,
@@ -1179,6 +1332,7 @@ jobs:
                           )
                           if esito:
                               all_nuggets.extend(esito)
+                              scrivi_nuggets_jsonl(esito, f"nuggets_node_{node_id}_step1.jsonl")
                           else:
                               print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
                       retry_tasks.append(asyncio.create_task(_retry()))
@@ -1258,14 +1412,12 @@ jobs:
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from extraction_utils import html_to_clean_markdown
-          from nugget_extractor import estrai_nuggets
-          from google import genai
+          from nugget_extractor import estrai_nuggets, GeminiKeyPool, scrivi_nuggets_jsonl
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
 
-          NUGGET_CONCURRENCY = 5
           TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
 
           def get_query_from_url(url, default="migliore carbonara roma"):
@@ -1287,21 +1439,21 @@ jobs:
                   with open(f"nuggets_node_{node_id}_step2.json", "w", encoding="utf-8") as f: json.dump([], f)
                   return
 
-              api_key = os.environ.get("GEMINI_API_KEY")
-              gemini_client = genai.Client(api_key=api_key) if api_key else None
-              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+              api_key_env = os.environ.get("GEMINI_API_KEY", "")
+              api_keys = [k.strip() for k in api_key_env.split(",") if k.strip()]
+              gemini_key_pool = GeminiKeyPool(api_keys) if api_keys else None
+
               all_nuggets = []
               nugget_retry_pool = []  # (url, testo) andati in timeout/errore: un solo retry a fine nodo
               nugget_tasks = []
 
               async def lancia_nugget_task(url, testo_markdown):
-                  if gemini_client is None:
+                  if gemini_key_pool is None:
                       return
 
                   async def _run():
                       esito = await estrai_nuggets(
-                          client=gemini_client,
-                          semaphore=nugget_semaphore,
+                          key_pool=gemini_key_pool,
                           source_url=url,
                           testo_markdown=testo_markdown,
                           topic=TARGET_TOPIC,
@@ -1311,6 +1463,8 @@ jobs:
                           nugget_retry_pool.append((url, testo_markdown))
                       else:
                           all_nuggets.extend(esito)
+                          # Scrittura incrementale immediata su disco
+                          scrivi_nuggets_jsonl(esito, f"nuggets_node_{node_id}_step2.jsonl")
 
                   nugget_tasks.append(asyncio.create_task(_run()))
 
@@ -1318,7 +1472,6 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -1328,7 +1481,6 @@ jobs:
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
-                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
@@ -1341,7 +1493,6 @@ jobs:
                   )
                   page = await context.new_page()
                   
-                  # WARMUP Integrato - Creazione di cronologia valida
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
                   await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
@@ -1358,7 +1509,6 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -1389,27 +1539,22 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
                       await asyncio.sleep(6) 
                       
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
                       
-                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       current_url = page.url
 
                       text_for_check = html_to_clean_markdown(raw_html, current_url)
                       text_lower_for_check = text_for_check.lower()
                       
-                      # Rilevamento passivo WAF/Captcha
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -1422,7 +1567,6 @@ jobs:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_check}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
 
-                          # Nugget extraction in background, non blocca il loop
                           await lancia_nugget_task(url, text_for_check)
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
@@ -1441,14 +1585,13 @@ jobs:
                   print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
                   await asyncio.gather(*nugget_tasks, return_exceptions=True)
 
-              if nugget_retry_pool and gemini_client is not None:
+              if nugget_retry_pool and gemini_key_pool is not None:
                   print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
                   retry_tasks = []
                   for url, testo_markdown in nugget_retry_pool:
                       async def _retry(url=url, testo_markdown=testo_markdown):
                           esito = await estrai_nuggets(
-                              client=gemini_client,
-                              semaphore=nugget_semaphore,
+                              key_pool=gemini_key_pool,
                               source_url=url,
                               testo_markdown=testo_markdown,
                               topic=TARGET_TOPIC,
@@ -1456,6 +1599,7 @@ jobs:
                           )
                           if esito:
                               all_nuggets.extend(esito)
+                              scrivi_nuggets_jsonl(esito, f"nuggets_node_{node_id}_step2.jsonl")
                           else:
                               print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
                       retry_tasks.append(asyncio.create_task(_retry()))
@@ -1521,16 +1665,37 @@ jobs:
 
           for i in range(1, TOTAL_NODES + 1):
               for step in ["step1", "step2"]:
-                  filename = f"nuggets_node_{i}_{step}.json"
-                  if os.path.exists(filename):
+                  jsonl_filename = f"nuggets_node_{i}_{step}.jsonl"
+                  json_filename = f"nuggets_node_{i}_{step}.json"
+                  
+                  nuggets = []
+                  # Priorità assoluta al caricamento incrementale da JSONL (fault-tolerant)
+                  if os.path.exists(jsonl_filename):
                       try:
-                          with open(filename, "r", encoding="utf-8") as f:
-                              nuggets = json.load(f)
-                              if isinstance(nuggets, list):
-                                  merged_nuggets.extend(nuggets)
-                                  per_node_stats[f"node_{i}_{step}"] = len(nuggets)
+                          with open(jsonl_filename, "r", encoding="utf-8") as f:
+                              for line in f:
+                                  line = line.strip()
+                                  if line:
+                                      try:
+                                          nuggets.append(json.loads(line))
+                                      except Exception:
+                                          pass
+                          per_node_stats[f"node_{i}_{step}"] = len(nuggets)
+                          merged_nuggets.extend(nuggets)
+                          continue  # Evita di caricare il file .json se il .jsonl esiste ed è valido
                       except Exception as e:
-                          print(f"Errore lettura {filename}: {e}", flush=True)
+                          print(f"Errore lettura JSONL {jsonl_filename}: {e}", flush=True)
+
+                  # Fallback sul dump JSON classico
+                  if os.path.exists(json_filename):
+                      try:
+                          with open(json_filename, "r", encoding="utf-8") as f:
+                              data = json.load(f)
+                              if isinstance(data, list):
+                                  merged_nuggets.extend(data)
+                                  per_node_stats[f"node_{i}_{step}"] = len(data)
+                      except Exception as e:
+                          print(f"Errore lettura {json_filename}: {e}", flush=True)
                           per_node_stats[f"node_{i}_{step}"] = 0
 
           # Deduplica su (fact, source_url) normalizzati: evita nugget duplicati
