@@ -49,10 +49,12 @@ jobs:
           from google.genai import types
 
           MAX_MACRO_AREE = 15
-          ANALYSIS_MODEL_NAME = os.environ.get("ANALYSIS_MODEL_NAME", "gemma-4-26b-a4b-it")
+          PRIMARY_MODEL = os.environ.get("ANALYSIS_MODEL_NAME", "gemma-4-26b-a4b-it")
+          FALLBACK_MODEL = "gemma-4-31b-it"
+          
           MAX_RPM_ANALYSIS = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
           ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
-          MAX_RETRY_TRANSIENT = 4  # Portato a 4 con backoff esponenziale per garantire resilienza totale
+          MAX_RETRY_TRANSIENT = 4  # 4 tentativi con backoff ed eventuale pass a 31b
 
           # Parametri di tolleranza per il controllo anti-allucinazione deterministico
           NUMERIC_TOLERANCE_PCT = 0.02
@@ -87,7 +89,7 @@ jobs:
                           await asyncio.sleep(max(wait_seconds, 0.1))
 
           # ---------------------------------------------------------
-          # 2. Client API con Grounding Disattivabile e Bypass Bug 500
+          # 2. Client API con Grounding, Backoff e Failover su 31B
           # ---------------------------------------------------------
           class GemmaAnalysisClient:
               def __init__(self, api_key: str, max_rpm: int = MAX_RPM_ANALYSIS):
@@ -101,26 +103,31 @@ jobs:
                                                 timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS,
                                                 use_grounding: bool = True):
                   current_prompt = prompt
+                  current_model = PRIMARY_MODEL
 
                   for tentativo in range(MAX_RETRY_TRANSIENT):
                       await self.limiter.acquire(label=label)
 
-                      # Calcolo del backoff in caso di disservizio transitorio del server Google
                       if tentativo > 0:
                           backoff = 2 ** tentativo
-                          print(f"{label}[GEMMA] Errore riscontrato. Attesa backoff di {backoff}s prima del tentativo {tentativo + 1}...", flush=True)
+                          print(f"{label}[GEMMA] Errore riscontrato al tentativo {tentativo}. Attesa backoff di {backoff}s...", flush=True)
                           await asyncio.sleep(backoff)
+                          # Passaggio forzato al modello 31B dopo il primo fallimento
+                          current_model = FALLBACK_MODEL
+                          print(f"{label}[GEMMA] Attivazione Failover: pass a {current_model}...", flush=True)
+
+                      print(f"{label}[GEMMA] Esecuzione su {current_model} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})...", flush=True)
 
                       try:
                           response = await asyncio.wait_for(
-                              self._call_model(current_prompt, system_instruction, use_grounding=use_grounding),
+                              self._call_model(current_prompt, system_instruction, use_grounding=use_grounding, model_name=current_model),
                               timeout=timeout_seconds
                           )
                       except (asyncio.TimeoutError, TimeoutError):
-                          print(f"{label}[GEMMA] Timeout dopo {timeout_seconds}s (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
+                          print(f"{label}[GEMMA] Timeout ({current_model}) dopo {timeout_seconds}s (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
                           continue
                       except Exception as e:
-                          print(f"{label}[GEMMA] Errore chiamata modello: {e} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
+                          print(f"{label}[GEMMA] Errore chiamata modello ({current_model}): {e} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
                           continue
 
                       raw_text = response.get("text", "")
@@ -141,13 +148,12 @@ jobs:
 
                   return None, None, False
 
-              async def _call_model(self, prompt: str, system_instruction: str = "", use_grounding: bool = True):
+              async def _call_model(self, prompt: str, system_instruction: str = "", use_grounding: bool = True, model_name: str = "gemma-4-26b-a4b-it"):
                   tools = []
                   if use_grounding:
                       tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-                  # Integra le istruzioni direttamente all'interno dei contenuti del prompt.
-                  # Questo evita l'uso di system_instruction in config, che attiva il bug 500 dell'adapter.
+                  # Fonde le istruzioni all'inizio della stringa del prompt per bypassare il bug 500 dell'SDK
                   full_contents = prompt
                   if system_instruction:
                       full_contents = f"INSTRUCTIONS / SYSTEM ROLE:\n{system_instruction}\n\nTASK CONTENT:\n{prompt}"
@@ -159,7 +165,7 @@ jobs:
 
                   def _sync_call():
                       return self.client.models.generate_content(
-                          model=ANALYSIS_MODEL_NAME,
+                          model=model_name,
                           contents=full_contents,
                           config=config,
                       )
@@ -255,7 +261,7 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_prompt(nuggets_indicizzati)
               )
 
-              # use_grounding=False e prompt fusion per una stabilità assoluta
+              # use_grounding=False e prompt fusion garantiscono stabilità strutturale
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
                   prompt=prompt, system_instruction=CLUSTERING_SYSTEM_INSTRUCTION,
                   label=label, expect_list=False, use_grounding=False
@@ -400,7 +406,7 @@ jobs:
                   nuggets_list=_formatta_nuggets_per_reconcile(nuggets)
               )
 
-              # Riconciliazione asettica con grounding attivo e istruzioni integrate
+              # Riconciliazione puntuale con grounding abilitato
               parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
                   prompt=prompt, system_instruction=RECONCILIATION_SYSTEM_INSTRUCTION,
                   label=label, expect_list=False, use_grounding=True
@@ -656,7 +662,7 @@ jobs:
                           })
                   area["verified_facts"] = vf_verificati
 
-                  # Conversione ed elaborazione robusta degli ID locali (risolve i TypeError in Python)
+                  # Mappatura globale sicura
                   for fatto in area.get("fatti_consolidati", []):
                       global_ids = []
                       for lid in fatto.get("source_nugget_ids", []):
