@@ -8,6 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
+      GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
       TARGET_TOPIC: "Orvieto"
     steps:
 
@@ -68,18 +72,10 @@ jobs:
               "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
               "https://accessibilitacentristorici.it/ztl/umbria/parcheggio_orvieto.html",
               "https://acooknotmad.com/2016/11/we-love-orvieto.html",
-              "https://activetourism.it/viaggi/viaggi-in-programma/la-via-francigena-da-orvieto-e-roma",
-              "https://adagioumbro.it/it/cosa-vedere-orvieto",
-              "https://adventurebackpack.com/orvieto-itinerary",
-              "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
               "https://adventuresinitaly.ca/2025/07/31/museums-of-orvieto",
               "https://airguide.info/the-5-best-restaurants-in-orvieto-italy",
               "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
               "https://alltrails.com/it-it/italy/umbria/orvieto",
-              "https://altoadige.it/viaggiart/a-san-valentino-un-cammino-degli-innamorati-nella-orvieto-nascosta-bb8fj850",
-              "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
-              "https://amicinvacanza.it/orvieto-con-bambini",
-              "https://arezzonotizie.it/blog/arezzo-costume-e-societa/cappella-san-brizio-signorelli.html",
               "https://artribune.com/arti-visive/archeologia-arte-antica/2023/09/restauro-duomo-orvieto",
               "https://artsupp.com/it/orvieto/musei/museo-faina",
               "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
@@ -113,10 +109,6 @@ jobs:
               "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
               "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
               "https://consigliviaggio.it/italia/orvieto-in-1-giorno-itinerario.html",
-              "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
-              "https://coopculture.it/en/poi/pozzo-di-san-patrizio",
-              "https://corbula.it/itinerari-e-luoghi/cosa-vedere-a-orvieto",
-              "https://corrierenerd.it/pozzo-di-san-patrizio",
               "https://cosafarei.it/orvieto",
               "https://cuisinevoila.com/orvieto-fine-dining",
               "https://cuisinevoila.com/orvieto-local-cuisine",
@@ -131,25 +123,15 @@ jobs:
               "https://destinazioneorvieto.com/arte-cultura/museo-etrusco-claudio-faina",
               "https://destinazioneorvieto.com/arte-cultura/pozzo-della-cava",
               "https://destinazioneorvieto.com/categoria-acquistare/ceramiche-e-affreschi",
-              "https://diventaunviaggiatore.it/cosa-vedere-a-orvieto-e-cosa-fare-nei-dintorni",
-              "https://domenicafiore.com/orvieto/what-to-see",
-              "https://doveparcheggiare.com/a-orvieto",
-              "https://dreamplanexperience.com/day-trip-to-orvieto-from-rome",
-              "https://dreavel.com/ita/4/attivita/175/orvieto-orvieto-underground",
               "https://duomodiorvieto.eu/duomo-di-orvieto/la-facciata",
               "https://duomodiorvieto.eu/en/claudio-faina-etruscan-museum",
               "https://duomodiorvieto.it",
               "https://duomodiorvieto.it/duomo-di-orvieto/la-cappella-di-san-brizio",
               "https://duomodiorvieto.it/duomo-di-orvieto/la-facciata",
-              "https://duomodiorvieto.it/en",
-              "https://duomodiorvieto.it/en/claudio-faina-etruscan-museum",
-              "https://duomodiorvieto.it/en/duomo-di-orvieto/the-chapel-of-san-brizio",
               "https://duomodiorvieto.it/en/duomo-of-orvieto",
               "https://duomodiorvieto.it/en/duomo-of-orvieto/the-chapel-of-the-corporal",
               "https://duomodiorvieto.it/en/tickets",
               "https://duomodiorvieto.it/en/visit/plan-your-visit",
-              "https://duomodiorvieto.it/museo-etrusco-claudio-faina",
-              "https://duomodiorvieto.it/opera-del-duomo/la-storia",
               "https://duomoorvieto.it/duomo-di-orvieto",
               "https://duomoorvieto.it/duomo-di-orvieto/la-cappella-di-san-brizio",
               "https://duomoorvieto.it/visita/organizza-la-visita",
@@ -162,34 +144,14 @@ jobs:
               "https://emotionrit.it/2018/07/umbria-orvieto-in-un-giorno-cosa-vedere-e-cosa-non-perdere.html",
               "https://en.parkopedia.com/parking/orvieto",
               "https://en.parkopedia.it/parking/carpark/piazza_cahen/05018/orvieto",
-              "https://esperienzaveraorvieto.com",
               "https://etruschi.name/orvieto/tempio_belvedere_it.html",
               "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
-              "https://exploring-umbria.com/en/discover-orvieto/discover-orvieto/tempio-tempio-del-belvedere-and-fanum-voltumnae",
+              "https://exploring-umbria.com/en/discover-orvieto/discover-orvieto/tempio-del-belvedere-and-fanum-voltumnae",
               "https://exploring-umbria.com/en/discover-orvieto/eating-in-orvieto",
-              "https://exploring-umbria.com/en/the-ceramics-in-umbria/orvieto",
-              "https://exploring-umbria.com/la-ceramica-in-umbria/la-ceramica-di-orvieto",
-              "https://exploring-umbria.com/scopri-orvieto-la-citta-narrante/prodotti-tipici-di-orvieto",
-              "https://famigliainfuga.com/visitare-orvieto-in-1-giorno-cosa-vedere",
-              "https://familygo.eu/vacanze-con-bambini/destinazioni/europa/italia/umbria/orvieto",
-              "https://familygo.eu/vacanze-con-bambini/viaggi/orvieto/orvieto-con-bambini-cosa-vedere",
-              "https://familygo.eu/vacanze-con-bambini/viaggi/orvieto/orvieto-underground-con-bambini-citta-sotterranea",
-              "https://festivation.com/orvieto-local-traditions",
-              "https://festivation.com/orvieto-traditional-food-guide",
               "https://finestrainformativa.com/biblioteca/articolo/read/19816-dove-si-parcheggia-ad-orvieto",
               "https://finestresullarte.info/en/works-and-artists/dante-and-orvieto-from-luca-signorelli-to-federico-zuccari",
               "https://finestresullarte.info/opere-e-artisti/luca-signorelli-affreschi-cappella-di-san-brizio-duomo-orvieto",
               "https://finestresullarte.info/viaggi/orvieto-cosa-vedere-10-luoghi-da-non-perdere",
-              "https://flashpackingitaly.com/day-trip-from-rome-to-orvieto-by-train",
-              "https://followingtherivera.com/1-day-in-orvieto-italy",
-              "https://foodeviaggi.it/visitare-orvieto-in-poche-ore-il-meglio-da-non-perdere",
-              "https://freedome.it/attivita/degustazione-vini-visita-cantina-storica-orvieto",
-              "https://fulltravel.it/localita/orvieto",
-              "https://gamberorosso.it/notizie/rubriche/itinerari/i-migliori-ristoranti-di-orvieto-dove-mangiare-in-citta",
-              "https://getnofilter.com/en/spot/resti-del-tempio-etrusco-del-belvedere-in-orvieto-italy",
-              "https://gigigriffis.com/ask-a-local-what-should-i-do-see-and-eat-in-orvieto-italy",
-              "https://glimpses-of-the-world.com/2023/02/19/orvieto-things-to-do",
-              "https://goticomania.it/gotico-italiano/duomo-di-orvieto.html",
               "https://gpsmycity.com/attractions/museo-claudio-faina-(claudio-faina-museum)-62657.html",
               "https://grownuptravels.com/best-things-to-do-in-orvieto-italy",
               "https://guidaturisticaorvieto.it",
@@ -200,9 +162,6 @@ jobs:
               "https://guide.michelin.com/ca/en/umbria/orvieto/restaurants",
               "https://guide.michelin.com/ch/it/umbria/orvieto/ristoranti",
               "https://guide.michelin.com/en/it/umbria/orvieto/restaurants",
-              "https://guide.michelin.com/us/en/umbria/orvieto/restaurants",
-              "https://haltadefinizione.com/en/viewer/work/san-brizio-chapel-luca-signorelli",
-              "https://haltadefinizione.com/visualizzatore/opera/cappella-di-san-brizio-luca-signorelli",
               "https://handluggageonly.co.uk/orvieto-the-most-dramatic-city-in-europe",
               "https://hellotaste.it/vino/cantine/umbria/terni/orvieto",
               "https://hermesmagazine.it/article/experience/cose-fare-vedere-orvieto",
@@ -214,15 +173,6 @@ jobs:
               "https://ilgiornale.it/news/litalia-scoprire/orvieto-storia-pozzo-san-patrizio-2011961.html",
               "https://ilmessaggero.it/umbria/orvieto_duomo_signorelli_digitalizzato_affreschi-7561788.html",
               "https://ilmondodifra.com/dove-mangiare-a-orvieto-umbria",
-              "https://ilturista.info/da-vedere/duomo-orvieto-storia-facciata-affreschi-interno",
-              "https://in3giorni.com/faq/come-raggiungere-il-centro-di-orvieto-dalla-stazione",
-              "https://in3giorni.com/faq/dove-parcheggiare-gratuitamente-a-orvieto",
-              "https://in3giorni.com/faq/dove-parcheggiare-gratuitamente-ad-orvieto",
-              "https://in3giorni.com/faq/dove-parcheggiare-orvieto-gratis",
-              "https://in3giorni.com/faq/dove-posso-parcheggiare-gratuitamente-ad-orvieto",
-              "https://in3giorni.com/faq/dove-posso-trovare-parcheggi-gratuiti-ad-orvieto",
-              "https://in3giorni.com/faq/quanto-dura-la-visita-di-orvieto-sotterranea",
-              "https://informagiovani-italia.com/dove_mangiare_orvieto.htm",
               "https://inviaggio.touringclub.it/consigli-di-viaggio/cosa-vedere-a-orvieto-su-e-giu-dalla-rupe-di-tufo",
               "https://inviaggioconmadi.it/cosa-vedere-a-orvieto-in-un-giorno",
               "https://invitationtotuscany.com/guide/italy/umbria/terni/a-day-in-orvieto",
@@ -232,14 +182,6 @@ jobs:
               "https://italia-italy.org/G148-1-turismo-umbria/cosa-vedere-dintorni-orvieto",
               "https://italia-italy.org/G148-1-turismo-umbria/luoghi-di-interesse-dintorni-orvieto",
               "https://italia-italy.org/en/G148-1-turismo-umbria/cosa-vedere-dintorni-orvieto",
-              "https://italia-italy.org/en/G148-turismo-umbria-cosa-vedere-vicino-orvieto",
-              "https://italia-italy.org/loc43833-musei-orvieto-museo-faina",
-              "https://italia-italy.org/umbria-turismo-G148-orvieto",
-              "https://italia.it/en/umbria/orvieto/cultural-places/orvieto-underground",
-              "https://italia.it/it/umbria/orvieto/luoghi-della-cultura/pozzo-di-san-patrizio",
-              "https://italiainblu.it/orvieto.html",
-              "https://italianwinetour.info/cinque-cantine-che-possono-cambiare-la-storia-di-orvieto",
-              "https://italiavai.com/umbria/10-cosa-vedere-orvierto.htm",
               "https://italiavibes.com/blog/a-photographers-guide-to-orvieto-best-viewpoints-golden-hour-tips-and-composition-secrets-for-capturing-the-city-and-surrounding-landscape",
               "https://italiavibes.com/blog/inside-orvietos-duomo-a-visitors-guide-to-the-cathedrals-art-architecture-and-the-chapel-of-san-brizio",
               "https://italiavibes.com/blog/orvieto-on-a-plate-a-food-lovers-guide-to-markets-trattorias-and-traditional-umbrian-dishes",
@@ -247,80 +189,16 @@ jobs:
               "https://italyfinds.com/one-day-in-orvieto-itinerary",
               "https://italyformovies.it/location/detail/18452",
               "https://italyguides.it/en/umbria/orvieto",
-              "https://italyguides.it/en/umbria/orvieto/pozzo-di-san-patrizio",
-              "https://italyguides.it/it/umbria/orvieto/torre-del-moro",
-              "https://italynotes.com/stories/duomo-di-orvieto",
-              "https://italyonair.com/luoghi/borghi/orvieto-cosa-vedere.html",
-              "https://italyonair.com/luoghi/monumenti-e-attrazioni/pozzo-san-patrizio-orvieto-guida.html",
-              "https://italyreview.com/orvieto.html",
-              "https://italyscapes.com/places/umbria/orvieto/towers/torre-del-moro",
-              "https://italytripper.com/en/place/orvieto-cathedral-gothic-masterpiece",
-              "https://italytripper.com/en/place/orvieto-cathedral-gothic-masterpiece-2",
-              "https://italytripper.com/it/place/duomo-di-orvieto-capolavoro-gotico",
-              "https://italywineries.it/cantine-ad-orvieto",
-              "https://italywineries.it/degustazioni-vini-orvieto",
-              "https://italyyoudontexpect.com/dove-parcheggiare-a-orvieto",
-              "https://itimaker.com/blog/best-restaurants-in-orvieto",
-              "https://itimaker.com/blog/pozzo-di-san-patrizio-orvieto",
-              "https://itinerarieluoghi.it/dintorni-di-orvieto-tre-luoghi-da-non-perdere",
-              "https://itravelforthestars.com/orvieto-travel-guide",
-              "https://journeystoitaly.com/discover-st-patricks-well-in-orvieto",
-              "https://keytoumbria.com/Orvieto/Museo_Claudio_Faina.html",
-              "https://kidpass.it/orvieto-con-i-bambini-la-nostra-giornata-in-umbria-in-famiglia",
-              "https://knownode.blog/perfect-day-orvieto-walking-map",
-              "https://komoot.com/guide/607912/attractions-around-orvieto",
-              "https://komoot.com/it-it/guide/607906/fantastici-trekking-e-escursioni-nei-dintorni-di-orvieto",
-              "https://komoot.com/it-it/guide/607912/cosa-da-vedere-e-attrazioni-nei-dintorni-di-orvieto",
-              "https://lebellezzedellostivale.com/weekend-a-orvieto-cosa-fare-in-due-giorni",
-              "https://lecosmopolite.it/cose-da-vedere-a-orvieto-in-un-giorno",
-              "https://lecosmopolite.it/pozzo-di-san-patrizio-a-orvieto",
-              "https://lessormorgan.com/2018/09/29/why-orvieto-is-a-small-town-in-italy-is-worth-a-visit",
-              "https://lifepart2andbeyond.com/orvieto-day-trip-from-rome",
-              "https://lifestylemadeinitaly.it/cosa-vedere-ad-orvieto-e-dintorni",
-              "https://liveorvieto.com/blog/monumenti/orvieto-underground",
-              "https://liveorvieto.com/blog/monumenti/pozzo-di-san-patrizio",
               "https://liveorvieto.com/blog/monumenti/tempio-del-belvedere",
               "https://liveorvieto.com/blog/proposte_di_viaggio/dentro-la-rupe",
               "https://liveorvieto.com/calendario-eventi",
               "https://liveorvieto.com/en/blog/monumenti/la-torre-del-moro",
               "https://liveorvieto.com/en/blog/monumenti/museo-civico-ed-etrusco-claudio-faina",
-              "https://liveorvieto.com/en/blog/monumenti/pozzo-di-san-patrizio",
-              "https://liveorvieto.com/en/blog/monumenti/tempio-del-belvedere",
-              "https://liveorvieto.com/informazioni-utili",
-              "https://liveorvieto.com/la-tradizione-artigiana",
-              "https://livetheworld.com/activities/italy/duomo-di-orvieto",
-              "https://locandaorvieto.it",
-              "https://locandaorvieto.it/en",
-              "https://locandaorvieto.it/en/piatti-tipici-di-orvieto",
-              "https://lonelyplanet.com/destinations/italy/umbria-and-le-marche/orvieto",
-              "https://lonelyplanetitalia.it/articoli/idee-per-il-weekend/visitare-orvieto",
-              "https://lorenzotaccioli.it/orvieto-in-un-giorno-cosa-vedere",
-              "https://love-umbria.com/tour/orvieto-walking-tour",
-              "https://lunediacolazione.it/2024/10/12/visitare-orvieto-in-un-giorno-itinerario-a-piedi",
-              "https://madonnadellatte.it/it/visite-e-degustazioni",
-              "https://mamalovesitaly.com/one-day-in-orvieto-italy",
-              "https://mediasetinfinity.mediaset.it/video/freedomoltreilconfine/orvieto-il-pozzo-di-san-patrizio_F310071101008C14",
-              "https://meteweekend.it/luoghi/orvieto-in-un-weekend",
-              "https://minimalglobetrotter.com/2026/02/10/san-valentino-a-orvieto-un-cammino-damore",
-              "https://mominitaly.com/orvieto-with-kids",
-              "https://mosaicus.com/terni/visite-guidate-terni/orvieto-sotterranea",
-              "https://msn.com/it-it/viaggi/notizie/scoprire-il-fascino-primaverile-di-orvieto-in-tre-giorni/ar-AA1VRAbc",
-              "https://museofaina.it",
               "https://museofaina.it/chi-siamo-fondazione-museo-claudio-faina",
               "https://museofaina.it/collezione-museo-faina",
               "https://museofaina.it/collezione-museo-faina/gioielli-e-monete",
               "https://museofaina.it/collezione-museo-faina/il-museo-dei-ragazzi",
               "https://museofaina.it/collezione-museo-faina/museo-civico-archeologico",
-              "https://museofaina.it/collezione-museo-faina/museo-etrusco-claudio-faina",
-              "https://museofaina.it/contatti-dove-siamo",
-              "https://museofaina.it/news-fondazione-museo-faina",
-              "https://museofaina.it/palazzo-faina",
-              "https://museofaina.it/partnership",
-              "https://myadventuresacrosstheworld.com/orvieto-italy-things-to-do",
-              "https://mydailyartdisplay.uk/tag/orvieto-cathedral",
-              "https://mytravelaffairs.com/destinations/orvieto-what-see-where-eat-and-what-do-evening",
-              "https://nationaltraveller.com/orvieto-what-to-see-where-to-eat-and-what-to-do-in-the-evening",
-              "https://offseasontrip.it/orvieto-cosa-vedere-tutti-i-consigli",
               "https://oggidoveandiamo.com/cosa-vedere-a-orvieto",
               "https://omniadigitale.it/leggenda-e-storia-del-pozzo-di-san-patrizio-a-orvieto",
               "https://omniaforitaly.org/en/cards/st-patrick-s-well-skip-the-line-entrance",
@@ -345,132 +223,19 @@ jobs:
               "https://orvietounderground.it",
               "https://orvietounderground.it/contattiinfo",
               "https://orvietounderground.it/en/contactsinfo",
-              "https://orvietounderground.it/en/home",
-              "https://orvietounderground.it/en/the-discovery",
-              "https://orvietoviva.com",
-              "https://orvietoviva.com/arrivare-e-muoversi-ad-orvieto",
-              "https://orvietoviva.com/artigianato-orvieto",
-              "https://orvietoviva.com/attivita-ed-escursioni",
-              "https://orvietoviva.com/bar-montanucci",
-              "https://orvietoviva.com/category/artigianato-ceramica-orvieto",
-              "https://orvietoviva.com/category/degustazioni-cantine",
-              "https://orvietoviva.com/conoscere-orvieto",
-              "https://orvietoviva.com/cosa-fare-a-orvieto",
-              "https://orvietoviva.com/cosa-vedere-orvieto",
-              "https://orvietoviva.com/cucina-tipica-orvietana",
-              "https://orvietoviva.com/degustazioni-in-cantina",
-              "https://orvietoviva.com/domande-frequenti-per-visitare-orvieto",
-              "https://orvietoviva.com/dormire-orvieto",
-              "https://orvietoviva.com/dove-mangiare-orvieto",
-              "https://orvietoviva.com/duomo-orvieto",
-              "https://orvietoviva.com/en",
-              "https://orvietoviva.com/en/about-orvieto",
-              "https://orvietoviva.com/en/accommodations-orvieto",
-              "https://orvietoviva.com/en/around-orvieto",
-              "https://orvietoviva.com/en/bar-montanucci-orvieto",
-              "https://orvietoviva.com/en/category/orvieto-ceramic-shops",
-              "https://orvietoviva.com/en/ceramic-orvieto",
-              "https://orvietoviva.com/en/do-in-orvieto",
-              "https://orvietoviva.com/en/etruscan-tempio",
-              "https://orvietoviva.com/en/events-in-orvieto",
-              "https://orvietoviva.com/en/frequently-asked-questions-about-visiting-orvieto",
-              "https://orvietoviva.com/en/getting-moving-orvieto",
-              "https://orvietoviva.com/en/guided-tour-duomo-masterpieces",
-              "https://orvietoviva.com/en/museo-faina-orvieto",
-              "https://orvietoviva.com/en/orvieto-artisan-traditions",
-              "https://orvietoviva.com/en/orvieto-history",
-              "https://orvietoviva.com/en/orvieto-main-sights",
-              "https://orvietoviva.com/en/orvieto-parking",
-              "https://orvietoviva.com/en/orvieto-restaurants",
-              "https://orvietoviva.com/en/orvieto-restaurants-trattorias",
-              "https://orvietoviva.com/en/orvieto-shopping",
-              "https://orvietoviva.com/en/orvieto-typical-foods",
-              "https://orvietoviva.com/en/orvieto-underground",
-              "https://orvietoviva.com/en/orvieto-what-to-see",
-              "https://orvietoviva.com/en/pastry-shops-orvieto",
-              "https://orvietoviva.com/en/pozzo-di-san-patrizio",
-              "https://orvietoviva.com/en/the-duomo-of-orvieto",
-              "https://orvietoviva.com/en/the-underworld-of-orvieto",
-              "https://orvietoviva.com/en/torre-del-moro",
-              "https://orvietoviva.com/en/traditional-cuisine-of-orvieto",
-              "https://orvietoviva.com/eventi-e-feste-ad-orvieto",
-              "https://orvietoviva.com/eventi-orvieto",
-              "https://orvietoviva.com/funicolare-e-bus-orvieto",
-              "https://orvietoviva.com/gelaterie-orvieto",
-              "https://orvietoviva.com/itinerari-a-piedi-orvieto",
-              "https://orvietoviva.com/itinerari-auto-orvieto",
-              "https://orvietoviva.com/itinerari-per-famiglie-ad-orvieto-e-dintorni",
-              "https://orvietoviva.com/la-bottega-del-pozzo",
-              "https://orvietoviva.com/mappa-orvieto",
               "https://orvietoviva.com/musei-archeologici-civico-e-faina",
               "https://orvietoviva.com/negozi-orvieto",
-              "https://orvietoviva.com/orvieto-con-bambini",
-              "https://orvietoviva.com/orvieto-natura",
-              "https://orvietoviva.com/orvieto-underground",
               "https://orvietoviva.com/parcheggi-ad-orvieto",
-              "https://orvietoviva.com/pozzo-della-cava",
-              "https://orvietoviva.com/pozzo-di-san-patrizio",
-              "https://orvietoviva.com/ristoranti-orvieto",
-              "https://orvietoviva.com/storia-orvieto",
-              "https://orvietoviva.com/tempio-del-belvedere",
-              "https://orvietoviva.com/territorio",
-              "https://orvietoviva.com/torre-del-moro",
-              "https://orvietoviva.com/tour-guidato-orvieto-nascosta",
-              "https://orvietoviva.com/tour-sottosuolo-di-orvieto",
-              "https://orvietoviva.com/tours-orvieto",
-              "https://orvietoviva.com/turismo-orvieto",
-              "https://ostedelreorvieto.com",
-              "https://osteriadelgrilloorvieto.it",
-              "https://ourescapeclause.com/things-to-do-in-orvieto-italy",
-              "https://paesidelgusto.it/e-la-porta-sevvero-una-regione-di-gusto-5-indirizzi-dove-mangiare-a-orvieto",
-              "https://palazzone.com/degustazioni-palazzone",
-              "https://palazzopetrvs.com/attivita",
-              "https://palazzopiccolomini.it/orvieto-e-dintorni-5-tappe-imperdibili-da-scoprire",
-              "https://parkme.com/orvieto-it-parking",
-              "https://parkopedia.it/parcheggi/stazione/orvieto",
-              "https://passaportodifamiglia.com/en/italy/umbria-en/visit-pozzo-san-patrizio-children",
-              "https://passaportodifamiglia.com/italia/umbria/visita-citta-orvieto-dintorni-bambini",
-              "https://passaportodifamiglia.com/italia/umbria/visita-pozzo-cava-bambini",
-              "https://picturethispost.com/orvieto-underground-dovecote-central",
               "https://pimpmytrip.it/cosa-vedere-a-orvieto",
-              "https://poracciintour.com/cosa-vedere-a-orvieto-in-un-giorno",
-              "https://postcard.inc/places/torre-del-moro-orvieto-orvieto-Q118-9w54Ci",
-              "https://pottypadre.com/luca-signorelli-the-chapel-of-san-brizio-orvieto",
-              "https://powertraveller.com/orvieto-guided-walking-tour-of-underground-orvieto",
               "https://pozzodellacava.it",
               "https://pozzodellacava.it/bottega/il-laboratorio",
               "https://pozzodisanpatrizio.it",
               "https://pozzodisanpatrizio.it/en/home-english",
               "https://pozzodisanpatrizio.it/en/hours-tickets-st-patricks-well",
               "https://pozzodisanpatrizio.it/la-storia-del-pozzo-di-san-patrizio",
-              "https://pretapartirconchiara.com/itinerario-a-piedi-per-orvieto-cosa-vedere-in-un-giorno",
-              "https://progettosigillo.it/cosa-vedere-a-orvieto-scopri-i-tesori-nascosti-di-una-citta-incantata",
-              "https://prontivaligiaevia.com/2020/11/06/orvieto-cosa-vedere-con-i-bambini-in-poche-ore",
-              "https://quantomanca.com/orvieto-cosa-vedere-con-i-bambini",
-              "https://realumbria.it/26/01/2023/il-pozzo-di-san-patrizio-simboli-e-visioni",
-              "https://recordrentacar.com/en/what-see-orvieto",
-              "https://reneedevoemertz.com/visual-writer/2020/4/28/the-great-indoors-duomo-di-orvieto",
-              "https://restaurantguru.it/pastry-Orvieto-m32",
-              "https://ricksteves.com/europe/italy/orvieto",
-              "https://ricksteves.com/watch-read-listen/read/articles/orvieto-what-an-italian-hill-town-should-be",
-              "https://ristorante-maurizio.com/en/the-restaurant",
-              "https://rivogliolabarbie.com/2023/04/23/centro-storico-orvieto-cosa-vedere-in-un-giorno",
-              "https://roadmindtrip.com/cosa-vedere-a-orvieto-guida-per-un-weekend",
-              "https://roadscholar.org/blog/discover-orvieto-etruscan-caves-of-italy",
-              "https://roamaround.app/itinerary/orvieto/1-days/64bb7bac4a3eb4bb6a379920",
-              "https://roccantica.it/places/detail/resti-del-tempio-etrusco-del-belvedere/umbria/orvieto/museum/ChIJ3dSxV6rNLhMR8SwFu-LgmeI",
-              "https://romaweekend.it/articoli/orvieto-cosa-vedere-dove-mangiare",
-              "https://saliinvetta.com/culture-e-tradizioni/2484-la-leggenda-del-pozzo-di-san-patrizio",
-              "https://saltinourhair.com/italy/orvieto",
-              "https://sangeminitravelhub.com/cosa-vedere-orvieto-in-un-giorno",
-              "https://santamariadegliancillotti.com/it/blog/cosa-vedere-a-orvieto-un-viaggio-tra-le-meraviglie-della-citta-293",
-              "https://santamariadegliancillotti.com/it/blog/il-duomo-di-orvieto-storia-arte-e-spiritualita-319",
               "https://saturdaysinrome.com/blog/where-to-eat-in-orvieto",
               "https://savoringitaly.com/orvieto-italy",
               "https://scoprilumbria.com/visita-le-citta-umbre/orvieto.html",
-              "https://secretlocale.com/hidden-orvieto-restaurants-locals",
-              "https://secretlocale.com/orvieto-best-quiet-cafes",
-              "https://secretlocale.com/orvieto-hidden-artisan-shops",
               "https://secretlocale.com/orvieto-historic-caves-tour-booking",
               "https://secretlocale.com/orvieto-locals-favorite-spots",
               "https://secretumbria.it/cosa-vedere-in-umbria/orvieto",
@@ -478,46 +243,19 @@ jobs:
               "https://secretumbria.it/en/moros-tower-palace-of-the-seven-peoples-palace",
               "https://secretumbria.it/en/orvieto-underground",
               "https://secretumbria.it/en/the-well-of-saint-patrick",
-              "https://secretumbria.it/orvieto-sotterranea",
-              "https://secretumbria.it/pozzo-san-patrizio-orvieto",
-              "https://secretumbria.it/torre-moro-palazzo-sette-popolo-orvieto",
-              "https://secretumbria.it/tour-a-piedi-di-orvieto",
-              "https://shop.cantineneri.it/prodotto/lungo-la-via-francigena",
               "https://siviaggia.it/idee-di-viaggio/cosa-vedere-orvieto-uno-borghi-belli-umbria/189055",
               "https://siviaggia.it/idee-di-viaggio/duomo-orvieto/539263",
               "https://siviaggia.it/informazioni-utili/cosa-conviene-comprare-a-orvieto/155537",
               "https://slowfoodtravelers.com/city-guides/orvieto",
               "https://slowtraveltours.com/blog/food-tour-of-orvieto",
-              "https://souvenirdiviaggio.it/cosa-vedere-a-orvieto-in-un-giorno-itinerario",
-              "https://spa-advisor.it/orvieto-cosa-vedere",
-              "https://sportoutdoor24.it/viaggi/italia/pozzo-di-san-patrizio-orvieto",
-              "https://storieurbane.it/il-pozzo-di-san-patrizio-tra-storia-mistero-e-ingegneria",
-              "https://strictlyitaly.com/things-to-do-in-orvieto-italy",
               "https://suitcaseescapes.com/things-to-do-orvieto-italy",
               "https://sviaggiare.it/umbria/orvieto-cose-da-vedere",
-              "https://tendenzediviaggio.it/weekend-a-orvieto-cosa-vedere-e-quanto-costa-un-soggiorno-nella-perla-dellumbria",
-              "https://theculturetrip.com/europe/italy/articles/the-top-5-things-to-do-and-see-in-orvieto",
-              "https://theculturetrip.com/europe/italy/orvieto/articles/the-10-best-restaurants-in-orvieto",
-              "https://theitalyedit.com/italy/articles/the-10-best-restaurants-in-orvieto",
-              "https://theflashpacker.net/things-to-do-in-orvieto-italy-guide",
-              "https://thegeographicalcure.com/post/guide-orvieto-cathedral",
+              "https://tendenzediviaggio.it/weekend-a-orvieto-cosa-vedere-e-quanto-costa-un-soggiorno-nella-perla-dellumbria",l",
               "https://thegeographicalcure.com/post/one-day-in-orvieto",
               "https://thegeographicalcure.com/post/san-brizio-chapel-orvieto",
               "https://theguardian.com/travel/2023/may/14/the-captivating-hilltop-city-of-orvieto",
               "https://theitalyedit.com/36-hours-in-orvieto-umbria",
               "https://thetouristchecklist.com/things-to-do-in-orvieto",
-              "https://thewanderlustrose.com/a-complete-guide-to-orvieto-the-hidden-gem-of-italy",
-              "https://thewanderlustrose.com/how-to-visit-orvieto-italy-on-a-budget",
-              "https://thewomtravel.com/italy/umbria/st-patrick-well.html",
-              "https://thewonderinglotuslifestyle.com/visiting-orvieto-in-one-day",
-              "https://tipicamenteumbria.it/ad-orvieto-la-ceramica-si-veste-di-storia",
-              "https://tipintravel.com/orvieto-cose-da-vedere",
-              "https://tiraccontounviaggio.it/cosa-vedere-a-orvieto-in-un-giorno-itinerario-e-luoghi-principali-da-visitare",
-              "https://to-tuscany.com/travel-guide/towns-villages/orvieto",
-              "https://tourismattractions.net/italy/best-orvieto-viewpoints",
-              "https://touristainitalia.com/2020/10/26/orvieto-un-trekking-cittadino-nella-citta-alta-e-strana",
-              "https://touristattractions.travel/it/s/italy/orvieto/online-guide",
-              "https://trattoriadelmoro.info",
               "https://trattoriadelmoro.info/en",
               "https://travel.thewom.it/italia/umbria/pozzo-di-san-patrizio.html",
               "https://travel365.it/orvieto-cosa-vedere.htm",
@@ -525,12 +263,6 @@ jobs:
               "https://travelife.it/cosa-vedere-ad-orvieto",
               "https://travelingintuscany.com/art/lucasignorelli/sanbriziochapel.htm",
               "https://travelmag.com/restaurants-bars-orvieto-italy",
-              "https://travelsewhere.net/sightseeing-orvieto-italy",
-              "https://traveltoitalyguide.com/whats-near-orvieto",
-              "https://travelworld.it/visitare-orvieto-2-giorni-per-scoprire-la-perla-dellumbria",
-              "https://trevaligie.com/orvieto-cosa-vedere-in-1-giorno",
-              "https://tripbase.com/destinations/orvieto-italy/food",
-              "https://trips2italy.com/umbria/orvieto/food-wine-t2i",
               "https://turistipercaso.it/consigli-e-itinerari-di-viaggio/orvieto",
               "https://turistipercaso.it/destinazioni/62-metri-nel-cuore-della-terra-con-una-doppia-elica-geniale-il-pozzo-magico-dove-non-ci-si-incontra-mai.html",
               "https://tuscanynowandmore.com/discover-italy/historic-cities/visit-orvieto-travel-guide",
@@ -540,24 +272,12 @@ jobs:
               "https://umbriaabove.com/parking-and-getting-around-in-orvieto-umbria",
               "https://umbriaabove.com/visitor-perspective-by-palazzo-misciattelli-6-the-pozzo-della-cava",
               "https://umbriabimbo.it/tag/cosa-fare-con-bambini-ad-orvieto",
-              "https://umbriabimbo.it/visitare-orvieto-bambini-guida-pratica-veloce-famiglia",
               "https://umbriaconme.com/en/news/orvieto-s-cathedral-and-the-chapel-of-saint-brizio_21.html",
-              "https://umbriaconme.com/it/tours/esperienze-cosa-fare-in-umbria_31/tour-di-orvieto-underground-e-aperitivo-di-fronte-al-duomo_253.html",
-              "https://umbriaconme.com/it/tours/guide-turistiche-e-visite-guidate-in-umbria_1/guida-turistica-orvieto_19.html",
-              "https://umbriaconme.com/it/tours/guide-turistiche-e-visite-guidate-in-umbria_1/visitare-orvieto-con-la-guida_19.html",
               "https://umbriaecultura.it/luca-signorelli-cappella-san-brizio-orvieto",
               "https://umbriaonline.com/ceramica-orvieto.phtml",
               "https://umbriasi.it/pozzo-di-san-patrizio",
-              "https://umbriatourism.it/en/w/archaeological-area-of-the-tempio-of-belvedere",
+              "https://umbriatourism.it/en/w/archaeological-area-of-the-temple-of-belvedere",
               "https://umbriatourism.it/en/w/claudio-faina-museum-and-civic-archaeological-museum-orvieto",
-              "https://umbriatourism.it/en/w/st-patrick-s-well",
-              "https://umbriatourism.it/en/w/the-ceramics-of-orvieto",
-              "https://umbriatourism.it/en/w/the-chapel-of-saint-brizio-inside-orvieto-s-duomo",
-              "https://umbriatourism.it/it/w/duomo-di-santa-maria-assunta-in-cielo-it",
-              "https://umbriatourism.it/it/w/la-ceramica-di-orvieto",
-              "https://umbriatourism.it/it/w/museo-claudio-faina-e-museo-civico-orvieto",
-              "https://umbriatourism.it/it/w/orvieto-underground",
-              "https://umbriatourism.it/it/w/pozzo-di-san-patrizio",
               "https://unafotografainviaggio.com/italia-orvieto",
               "https://viadifrancesco.it/en/web/umbria/w/the-chapel-of-saint-brizio-inside-orvieto-s-duomo",
               "https://viaggi.corriere.it/europa/italia/cards/orvieto",
@@ -578,14 +298,6 @@ jobs:
               "https://viaggiomag.it/italia/pozzo-di-san-patrizio-orvieto-storia-leggenda",
               "https://vivielasciaviaggiare.com/2023/11/14/cosa-vedere-un-giorno-orvieto",
               "https://voloscontato.it/ristoranti/orvieto-dove-mangiare-bene-spendendo-poco.php",
-              "https://walksofitaly.com/blog/things-to-do/is-orvieto-worth-visiting",
-              "https://wandereatandtell.com/2020/07/10/orvieto-street-art-food-and-wine",
-              "https://wanderlog.com/it/list/geoCategory/105091/le-migliori-cose-da-fare-e-attrazioni-a-orvieto",
-              "https://wildtrips.net/citta/Orvieto-Italia-cosa-visitare.htm",
-              "https://winalist.com/blog/italy-wine-region/umbria/orvieto-things-to-do",
-              "https://winetourism.com/it/cantine-in-orvieto-classico",
-              "https://wonderlustwanderings.com/2018/08/02/a-guide-to-orvieto-italy",
-              "https://world-tourism.org/orvieto-2-hour-cathedral-and-underground-tour",
               "https://wsj.com/arts-culture/fine-art/luca-signorelli-san-brizio-chapel-orvieto-cathedral-italy-renaissance-792ef710",
               "https://yogawinetravel.com/visit-orvieto-in-italy-the-perfect-day-trip-if-you-want-to-avoid-romes-tourist-crowds"
           ]
@@ -602,21 +314,6 @@ jobs:
       - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
         run: |
           cat << 'EOF' > extraction_utils.py
-          """
-          Modulo condiviso tra Step 1 e Step 2.
-          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
-          retry, validazione WAF o altra logica di scraping.
-
-          Pulizia link basata esclusivamente su urllib (libreria standard, nessuna
-          dipendenza aggiuntiva):
-            1. Relativi -> assoluti (urljoin)
-            2. Rimozione parametri di tracciamento dalla query string
-            3. Rimozione ancore interne pure (#frammento sulla stessa pagina)
-            4. Rimozione link a social/junk noti
-            5. Rimozione link che puntano alla pagina stessa (self-link)
-          Il testo pulito viene poi convertito in Markdown con markdownify,
-          mantenendo i link superstiti nel formato [Testo](URL).
-          """
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -638,7 +335,6 @@ jobs:
           }
 
           # Domini social/junk: i link verso questi domini vengono despogliati
-          # (restano come testo semplice, non come link markdown)
           JUNK_LINK_DOMAINS = (
               "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
               "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
@@ -673,11 +369,6 @@ jobs:
 
 
           def clean_link_href(raw_href, page_url):
-              """
-              Ritorna l'URL assoluto e ripulito, oppure None se il link va
-              despogliato (ancora interna, self-link, social/junk, vuoto,
-              javascript:, mailto: senza indirizzo valido).
-              """
               if not raw_href:
                   return None
 
@@ -687,7 +378,6 @@ jobs:
               if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
                   return None
 
-              # Assolutizza (gestisce anche i protocol-relative //host/path)
               try:
                   absolute = urljoin(page_url, raw_href)
               except Exception:
@@ -704,7 +394,7 @@ jobs:
               if parts.scheme == "mailto":
                   return None
 
-              # Ancora pura sulla stessa pagina (stesso path, solo #frammento)
+              # Ancora pura sulla stessa pagina
               page_parts = urlsplit(page_url)
               same_path = (parts.netloc == page_parts.netloc and
                            parts.path.rstrip("/") == page_parts.path.rstrip("/"))
@@ -719,14 +409,10 @@ jobs:
               # Pulizia query string dai parametri di tracciamento
               cleaned_query = _clean_query(parts.query)
 
-              # Ricostruzione URL: rimuove sempre il fragment (ancore interne)
-              # a meno che non punti a una pagina diversa con un frammento
-              # significativo (raro nei casi editoriali, quindi lo scartiamo
-              # comunque per pulizia).
               rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
                                      cleaned_query, ""))
 
-              # Self-link: stesso URL (dopo pulizia) della pagina sorgente
+              # Self-link
               page_rebuilt_parts = urlsplit(page_url)
               page_cleaned_query = _clean_query(page_rebuilt_parts.query)
               page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
@@ -743,16 +429,10 @@ jobs:
 
 
           def _strip_anchor_tag(a_tag):
-              """Sostituisce un <a> con il suo solo testo, senza rimuoverlo dal DOM."""
               a_tag.replace_with(a_tag.get_text())
 
 
           def html_to_clean_markdown(html, page_url):
-              """
-              Pipeline unica: rimuove tag strutturali, pulisce i link chirurgicamente
-              con urllib, converte in Markdown con markdownify.
-              Ritorna il markdown completo (nessun troncamento).
-              """
               soup = BeautifulSoup(html, "html.parser")
 
               for tag_name in STRUCTURAL_TAGS_TO_STRIP:
@@ -766,7 +446,6 @@ jobs:
                       _strip_anchor_tag(a_tag)
                   else:
                       a_tag["href"] = cleaned
-                      # Rimuove eventuali attributi di tracciamento superflui
                       for attr in list(a_tag.attrs):
                           if attr not in ("href", "title"):
                               del a_tag[attr]
@@ -778,7 +457,6 @@ jobs:
                   strip=["img"],
               )
 
-              # Collassa 3+ righe vuote consecutive in 2, pulisce i bordi
               markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
               markdown_text = markdown_text.strip()
 
@@ -838,7 +516,6 @@ jobs:
               "output_audio_transcription": {}
           }
 
-          # Timeout di sicurezza per singola chiamata Live (per-target, non per-chunk)
           NUGGET_TIMEOUT_SECONDS = 40.0
 
           # Limite dichiarato dal piano: TPM 65.000. Usiamo un margine di sicurezza
@@ -848,11 +525,9 @@ jobs:
           TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)  # 48.750
 
           # Quanto tempo una chiave resta "in cooldown" dopo aver sforato il limite
-          # (segnale ricevuto direttamente dall'errore 1011 di Gemini, non dedotto)
           COOLDOWN_SECONDS = 65.0
 
-          # Segnali testuali che identificano un errore di quota/rate-limit nella
-          # risposta d'errore della Live API (messaggio WebSocket 1011)
+          # Segnali testuali che identificano un errore di quota/rate-limit nella Live API
           QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
 
           NUGGET_PROMPT_TEMPLATE = """
@@ -893,25 +568,20 @@ jobs:
 
 
           def _stima_token(testo):
-              """Stima approssimata dei token (~4 caratteri/token per testo misto
-              italiano/inglese). Deliberatamente prudente: meglio sovrastimare che
-              sforare il limite reale."""
+              """Stima approssimata dei token (~4 caratteri/token)."""
               if not testo:
                   return 0
               return max(1, len(testo) // 4)
 
 
           class TokenBucket:
-              """Token bucket a ricarica continua per il rate limiting TPM di una
-              singola API key. Non e' un pacing a intervallo fisso: permette raffiche
-              quando il budget e' pieno e rallenta automaticamente quando si avvicina
-              al limite, aspettando solo il tempo necessario a liberare budget."""
+              """Token bucket a ricarica continua per il rate limiting TPM di una singola API key."""
 
               def __init__(self, capacity_tokens, refill_period_seconds=60.0):
                   self.capacity = capacity_tokens
                   self.tokens = capacity_tokens
                   self.refill_period = refill_period_seconds
-                  self.refill_rate = capacity_tokens / refill_period_seconds  # token/secondo
+                  self.refill_rate = capacity_tokens / refill_period_seconds
                   self.last_refill = time.monotonic()
                   self._lock = asyncio.Lock()
 
@@ -923,8 +593,7 @@ jobs:
                       self.last_refill = now
 
               async def acquire(self, needed_tokens, label=""):
-                  """Attende finche' non c'e' budget sufficiente, poi lo consuma."""
-                  needed_tokens = min(needed_tokens, self.capacity)  # non bloccare mai indefinitamente
+                  needed_tokens = min(needed_tokens, self.capacity)
                   async with self._lock:
                       while True:
                           self._refill()
@@ -933,7 +602,7 @@ jobs:
                               return
                           deficit = needed_tokens - self.tokens
                           wait_seconds = deficit / self.refill_rate
-                          wait_seconds = min(wait_seconds, 20.0)  # non aspettare mai troppo in un colpo solo
+                          wait_seconds = min(wait_seconds, 20.0)
                           print(f"{label}[TPM-BUCKET] Budget insufficiente "
                                 f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
                                 flush=True)
@@ -941,10 +610,7 @@ jobs:
 
 
           class GeminiKeyPool:
-              """Gestisce una o piu' API key Gemini con round-robin, token bucket
-              indipendente per chiave, e cooldown automatico sulle chiavi che
-              sforano il limite. Funziona in modo trasparente anche con una sola
-              chiave configurata."""
+              """Gestisce una o piu' API key Gemini con round-robin e bucket TPM indipendenti."""
 
               def __init__(self, api_keys):
                   api_keys = [k for k in api_keys if k]
@@ -963,9 +629,6 @@ jobs:
                   self._lock = asyncio.Lock()
 
               async def _pick_entry(self, label=""):
-                  """Sceglie la prossima chiave disponibile (non in cooldown) in
-                  round-robin. Se tutte sono in cooldown, aspetta quella che si
-                  libera per prima."""
                   async with self._lock:
                       n = len(self.entries)
                       while True:
@@ -980,7 +643,7 @@ jobs:
                           prossima_liberazione = min(e["cooldown_until"] for e in self.entries)
                           attesa = max(0.5, prossima_liberazione - now)
                           print(f"{label}[KEY-POOL] Tutte le chiavi in cooldown, attendo {attesa:.1f}s...",
-                                flush=True)
+                                f"prossimo sblocco tra poco", flush=True)
                           await asyncio.sleep(min(attesa, 15.0))
 
               def _mark_cooldown(self, entry, label=""):
@@ -989,11 +652,6 @@ jobs:
                         f"(quota TPM superata)", flush=True)
 
               async def esegui_con_pool(self, payload, timeout_seconds, label=""):
-                  """Sceglie una chiave disponibile, attende budget TPM sufficiente
-                  sul suo bucket, esegue la chiamata Live. Un SOLO tentativo su UNA
-                  chiave: la logica di retry su piu' chiavi vive nel chiamante
-                  (estrai_nuggets), non qui."""
-
                   entry = await self._pick_entry(label)
                   stima = _stima_token(payload)
                   await entry["bucket"].acquire(stima, label=label)
@@ -1039,7 +697,6 @@ jobs:
 
 
           def _calcola_confidence(quote_originale, testo_sorgente):
-              """Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello."""
               if not quote_originale or not testo_sorgente:
                   return "low"
 
@@ -1075,9 +732,6 @@ jobs:
 
 
           def scrivi_nuggets_jsonl(nuggets, jsonl_path):
-              """Scrittura incrementale: ogni nugget e' una riga JSON append-only.
-              Se il file non esiste viene creato. Nessuna riscrittura del file intero:
-              ogni chiamata aggiunge solo le righe nuove."""
               if not nuggets:
                   return
               with open(jsonl_path, "a", encoding="utf-8") as f:
@@ -1088,18 +742,6 @@ jobs:
           async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
                                     node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
                                     max_key_attempts=None):
-              """
-              Estrae nugget strutturati da un singolo testo gia' scrapato, tramite
-              Gemini Live, usando il pool di chiavi con token bucket TPM.
-
-              Se una chiave sforra la quota, riprova automaticamente su un'altra
-              chiave del pool (fino a max_key_attempts, default = numero di chiavi
-              nel pool). Non solleva mai eccezioni verso il chiamante.
-
-              Ritorna: lista di dict nugget con schema
-                {fact, source_url, category, confidence, quote_originale}
-              oppure None in caso di fallimento totale (tutte le chiavi esaurite/timeout).
-              """
               if not testo_markdown or len(testo_markdown.strip()) < 50:
                   return []
 
@@ -1135,6 +777,7 @@ jobs:
                               continue
 
                           confidence = _calcola_confidence(quote, testo_markdown)
+
                           nuggets.append({
                               "fact": fact,
                               "source_url": source_url,
@@ -1242,8 +885,20 @@ jobs:
               with open(queue_file, "r") as f:
                   targets = json.load(f)
 
-              api_key_env = os.environ.get("GEMINI_API_KEY", "")
-              api_keys = [k.strip() for k in api_key_env.split(",") if k.strip()]
+              # Rilevamento automatico di tutte le chiavi messe a disposizione nell'env
+              api_keys = []
+              primary = os.environ.get("GEMINI_API_KEY", "").strip()
+              if primary:
+                  api_keys.append(primary)
+              
+              idx = 2
+              while True:
+                  key_env = os.environ.get(f"GEMINI_API_KEY_{idx}", "").strip()
+                  if not key_env:
+                      break
+                  api_keys.append(key_env)
+                  idx += 1
+
               gemini_key_pool = GeminiKeyPool(api_keys) if api_keys else None
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
@@ -1261,8 +916,6 @@ jobs:
               nugget_tasks = []
 
               async def lancia_nugget_task(url, testo_markdown):
-                  """Crea un task fire-and-forget per l'estrazione nugget, cosi' il
-                  loop di scraping puo' proseguire subito sul target successivo."""
                   if gemini_key_pool is None:
                       return
 
@@ -1278,7 +931,6 @@ jobs:
                           nugget_retry_pool.append((url, testo_markdown))
                       else:
                           all_nuggets.extend(esito)
-                          # Scrittura incrementale immediata su disco
                           scrivi_nuggets_jsonl(esito, f"nuggets_node_{node_id}_step1.jsonl")
 
                   task = asyncio.create_task(_run())
@@ -1439,8 +1091,20 @@ jobs:
                   with open(f"nuggets_node_{node_id}_step2.json", "w", encoding="utf-8") as f: json.dump([], f)
                   return
 
-              api_key_env = os.environ.get("GEMINI_API_KEY", "")
-              api_keys = [k.strip() for k in api_key_env.split(",") if k.strip()]
+              # Rilevamento automatico di tutte le chiavi messe a disposizione nell'env
+              api_keys = []
+              primary = os.environ.get("GEMINI_API_KEY", "").strip()
+              if primary:
+                  api_keys.append(primary)
+              
+              idx = 2
+              while True:
+                  key_env = os.environ.get(f"GEMINI_API_KEY_{idx}", "").strip()
+                  if not key_env:
+                      break
+                  api_keys.append(key_env)
+                  idx += 1
+
               gemini_key_pool = GeminiKeyPool(api_keys) if api_keys else None
 
               all_nuggets = []
@@ -1463,7 +1127,6 @@ jobs:
                           nugget_retry_pool.append((url, testo_markdown))
                       else:
                           all_nuggets.extend(esito)
-                          # Scrittura incrementale immediata su disco
                           scrivi_nuggets_jsonl(esito, f"nuggets_node_{node_id}_step2.jsonl")
 
                   nugget_tasks.append(asyncio.create_task(_run()))
@@ -1669,7 +1332,8 @@ jobs:
                   json_filename = f"nuggets_node_{i}_{step}.json"
                   
                   nuggets = []
-                  # Priorità assoluta al caricamento incrementale da JSONL (fault-tolerant)
+                  
+                  # Priorità al caricamento incrementale (JSONL) per massimizzare il recupero anti-perdita
                   if os.path.exists(jsonl_filename):
                       try:
                           with open(jsonl_filename, "r", encoding="utf-8") as f:
@@ -1682,11 +1346,11 @@ jobs:
                                           pass
                           per_node_stats[f"node_{i}_{step}"] = len(nuggets)
                           merged_nuggets.extend(nuggets)
-                          continue  # Evita di caricare il file .json se il .jsonl esiste ed è valido
+                          continue
                       except Exception as e:
                           print(f"Errore lettura JSONL {jsonl_filename}: {e}", flush=True)
 
-                  # Fallback sul dump JSON classico
+                  # Fallback su JSON classico se il JSONL non esiste
                   if os.path.exists(json_filename):
                       try:
                           with open(json_filename, "r", encoding="utf-8") as f:
@@ -1698,8 +1362,7 @@ jobs:
                           print(f"Errore lettura {json_filename}: {e}", flush=True)
                           per_node_stats[f"node_{i}_{step}"] = 0
 
-          # Deduplica su (fact, source_url) normalizzati: evita nugget duplicati
-          # quando lo stesso fatto appare identico da estrazioni diverse.
+          # Deduplica finale su (fact, source_url)
           seen = set()
           nuggets_deduplicati = []
           for n in merged_nuggets:
@@ -1711,7 +1374,6 @@ jobs:
               seen.add(key)
               nuggets_deduplicati.append(n)
 
-          # Conteggio per livello di confidence, utile per audit rapido
           confidence_counts = {"high": 0, "medium": 0, "low": 0}
           for n in nuggets_deduplicati:
               c = n.get("confidence", "low")
