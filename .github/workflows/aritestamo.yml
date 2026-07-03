@@ -1,838 +1,1319 @@
-name: Clean and Consolidate Nuggets (Enterprise Agnostic)
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
 on:
   workflow_dispatch:
-    inputs:
-      input_file:
-        description: 'Nome del file JSON di input'
-        required: false
-        default: 'nuggets_finale.json'
-  push:
-    paths:
-      - 'nuggets_input.json'
-      - 'nuggets_finale.json'
 
 jobs:
-  reconcile_and_verify:
+  machine2_cdp_insocket:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      TARGET_TOPIC: "Orvieto"
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
 
-      - name: Configurazione Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Installazione Dipendenze
+      - name: Installazione Font di Sistema
         run: |
-          pip install google-genai pydantic
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
 
-      - name: Creazione Codice Pipeline
+      - name: Installazione Dipendenze Scraper
         run: |
-          cat << 'EOF' > deep_research_consolidator.py
-          import os
-          import sys
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
+          playwright install-deps chromium
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Setup Container WARP (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 0.5
+          done
+          
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 6
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+        run: |
+          cat << 'EOF' > m2_step1_setup.py
           import json
+          TARGETS = [
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+          
+          # Suddivisione matematica statica (Chunking) per performance ottimali
+          for i in range(1, 7):
+              chunk = TARGETS[i-1::6]
+              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+          print("Code distribuite Step 1 generate con successo.")
+          EOF
+          python -u m2_step1_setup.py
+
+      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
+        run: |
+          cat << 'EOF' > extraction_utils.py
+          """
+          Modulo condiviso tra Step 1 e Step 2.
+          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
+          retry, validazione WAF o altra logica di scraping.
+
+          Pulizia link basata esclusivamente su urllib (libreria standard, nessuna
+          dipendenza aggiuntiva):
+            1. Relativi -> assoluti (urljoin)
+            2. Rimozione parametri di tracciamento dalla query string
+            3. Rimozione ancore interne pure (#frammento sulla stessa pagina)
+            4. Rimozione link a social/junk noti
+            5. Rimozione link che puntano alla pagina stessa (self-link)
+          Il testo pulito viene poi convertito in Markdown con markdownify,
+          mantenendo i link superstiti nel formato [Testo](URL).
+          """
           import re
-          import time
-          import asyncio
-          import argparse
-          import difflib
-          from collections import deque
-          from google import genai
-          from google.genai import types
+          from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
-          MAX_MACRO_AREE = 15
-          ANALYSIS_MODEL_NAME = "gemini-3.1-flash-live-preview"
-          MAX_RPM_ANALYSIS = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
-          ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
-          MAX_RETRY_TRANSIENT = 4
+          from bs4 import BeautifulSoup
+          from markdownify import markdownify as md_convert
 
-          # Parametri di tolleranza per il controllo anti-allucinazione deterministico
-          NUMERIC_TOLERANCE_PCT = 0.02
-          SIMILARITY_THRESHOLD = 0.60
-          NUMBER_REGEX = re.compile(r"\d[\d.,]*\d|\d")
+          # Tag strutturali che non portano contenuto editoriale utile
+          STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
+                                      "form", "noscript", "iframe", "svg"]
 
-          # ---------------------------------------------------------
-          # 1. Rate Limiter Deterministico (Sliding Window)
-          # ---------------------------------------------------------
-          class RPMLimiter:
-              def __init__(self, max_rpm: int):
-                  if max_rpm <= 0:
-                      raise ValueError("max_rpm deve essere > 0")
-                  self.max_rpm = max_rpm
-                  self._timestamps = deque()
-                  self._lock = asyncio.Lock()
+          # Parametri di query da rimuovere sempre (tracciamento marketing/analytics)
+          TRACKING_PARAMS_PREFIXES = ("utm_",)
+          TRACKING_PARAMS_EXACT = {
+              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
+              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
+              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
+              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
+              "share", "share_id", "si"
+          }
 
-              async def acquire(self, label: str = ""):
-                  async with self._lock:
-                      while True:
-                          now = time.monotonic()
-                          while self._timestamps and now - self._timestamps[0] >= 60.0:
-                              self._timestamps.popleft()
+          # Domini social/junk: i link verso questi domini vengono despogliati
+          # (restano come testo semplice, non come link markdown)
+          JUNK_LINK_DOMAINS = (
+              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
+              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
+              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
+              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
+              "addtoany.com", "sharethis.com", "mailto:"
+          )
 
-                          if len(self._timestamps) < self.max_rpm:
-                              self._timestamps.append(now)
-                              return
 
-                          wait_seconds = 60.0 - (now - self._timestamps[0]) + 0.05
-                          print(f"{label}[RPM-LIMITER] Limite {self.max_rpm} RPM raggiunto, "
-                                f"attendo {wait_seconds:.1f}s...", flush=True)
-                          await asyncio.sleep(max(wait_seconds, 0.1))
-
-          # ---------------------------------------------------------
-          # 2. Client API tramite Gemini Live API (Asincrono e Stabile)
-          # ---------------------------------------------------------
-          class GeminiLiveAnalysisClient:
-              def __init__(self, api_key: str, max_rpm: int = MAX_RPM_ANALYSIS):
-                  if not api_key:
-                      raise ValueError("API key mancante per il modello di analisi")
-                  self.client = genai.Client(api_key=api_key)
-                  self.limiter = RPMLimiter(max_rpm)
-
-              async def generate_grounded_json(self, prompt: str, system_instruction: str = "", label: str = "",
-                                                expect_list: bool = False,
-                                                timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS,
-                                                use_grounding: bool = True):
-                  current_prompt = prompt
-                  if system_instruction:
-                      current_prompt = f"INSTRUCTIONS / SYSTEM ROLE:\n{system_instruction}\n\nTASK CONTENT:\n{prompt}"
-
-                  for tentativo in range(MAX_RETRY_TRANSIENT):
-                      await self.limiter.acquire(label=label)
-
-                      if tentativo > 0:
-                          backoff = 2 ** tentativo
-                          print(f"{label}[LIVE] Disservizio rilevato. Attesa backoff di {backoff}s prima del tentativo {tentativo + 1}...", flush=True)
-                          await asyncio.sleep(backoff)
-
-                      print(f"{label}[LIVE] Chiamata asincrona a Live API ({ANALYSIS_MODEL_NAME}) - tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT}...", flush=True)
-
-                      accumulated_text = ""
-                      try:
-                          async def run_session():
-                              nonlocal accumulated_text
-                              config_live = {
-                                  "response_modalities": ["AUDIO"],
-                                  "output_audio_transcription": {}
-                              }
-                              async with self.client.aio.live.connect(model=ANALYSIS_MODEL_NAME, config=config_live) as session:
-                                  await session.send_realtime_input(text=current_prompt)
-                                  async for response in session.receive():
-                                      if response.server_content and response.server_content.output_transcription:
-                                          if response.server_content.output_transcription.text:
-                                              accumulated_text += response.server_content.output_transcription.text
-                                      if response.server_content and response.server_content.turn_complete:
-                                          break
-
-                          await asyncio.wait_for(run_session(), timeout=timeout_seconds)
-                      except (asyncio.TimeoutError, TimeoutError):
-                          print(f"{label}[LIVE] Timeout dopo {timeout_seconds}s (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
-                          continue
-                      except Exception as e:
-                          print(f"{label}[LIVE] Errore di sessione Live API: {e} (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
-                          continue
-
-                      raw_text = accumulated_text.strip()
-                      parsed = _estrai_json(raw_text, expect_list=expect_list)
-                      if parsed is not None:
-                          return parsed, raw_text, False
-
-                      print(f"{label}[LIVE] Parsing JSON fallito (tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT}). Richiedo correzione formato...", flush=True)
-                      current_prompt = (
-                          prompt
-                          + "\n\nATTENZIONE: la tua risposta precedente non era un JSON valido "
-                            "o non rispettava lo schema richiesto. Rispondi ESCLUSIVAMENTE con "
-                            "il JSON richiesto, senza alcun testo di commento, senza markdown "
-                            "fences se non i delimitatori ```json ... ``` richiesti."
-                      )
-
-                  return None, None, False
-
-          def _estrai_json(raw_text, expect_list: bool = False):
-              if not raw_text:
-                  return None
-
-              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
-              json_str = match.group(1) if match else raw_text.strip()
-
-              try:
-                  parsed = json.loads(json_str)
-              except Exception:
-                  alt_match = re.search(r'(\{.*\}|\[.*\])', raw_text, re.DOTALL)
-                  if not alt_match:
-                      return None
-                  try:
-                      parsed = json.loads(alt_match.group(1))
-                  except Exception:
-                      return None
-
-              if expect_list and not isinstance(parsed, list):
-                  return None
-              if not expect_list and not isinstance(parsed, (dict, list)):
-                  return None
-
-              return parsed
-
-          # ---------------------------------------------------------
-          # 3. Fase 1: Clustering Agnostico e Riduzione Deterministica
-          # ---------------------------------------------------------
-          CLUSTERING_SYSTEM_INSTRUCTION = "Sei un analista editoriale specializzato in organizzazione di informazioni fattuali per articoli di viaggio/turismo/cultura, in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Il tuo compito e' puramente organizzativo: NON devi riscrivere, correggere o verificare i fatti in questa fase."
-
-          CLUSTERING_PROMPT_TEMPLATE = """Riceverai un elenco numerato di "nugget" (fatti grezzi estratti da fonti web), ciascuno con un id univoco, il testo del fatto e la categoria assegnata in fase di estrazione.
-
-          COMPITO:
-          Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspetto logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
-
-          VINCOLI RIGIDI:
-          1. Il numero totale di macro-aree NON puo' superare {max_macro_aree}. Se il contenuto e' molto vario, accorpa i temi minori in macro-aree piu' ampie piuttosto che superare il limite.
-          2. Ogni nugget deve essere assegnato a ESATTAMENTE una macro-area (nessun nugget escluso, nessun nugget duplicato tra macro-aree).
-          3. Il nome di ogni macro-area deve essere breve, descrittivo, nella lingua prevalente del contenuto.
-          4. Se alcuni nugget sono generici, non correlati o troppo eterogenei per una macro-area dedicata, raggruppali in una macro-area residuale (es. equivalente locale di "Altre informazioni").
-
-          NUGGET DA RAGGRUPPARE:
-          {nuggets_list}
-
-          Restituisci ESCLUSIVAMENTE un JSON con questo schema, racchiuso in un blocco ```json ... ```:
-          {{
-            "macro_aree": [
-              {{
-                "nome_macro_area": "...",
-                "nugget_ids": [0, 3, 7, ...]
-              }}
-            ]
-          }}
-          Non aggiungere alcun testo al di fuori del JSON."""
-
-          def _formatta_nuggets_per_prompt(nuggets_indicizzati):
-              righe = []
-              for idx, n in nuggets_indicizzati:
-                  righe.append(f"[{idx}] (categoria: {n.get('category', 'altro')}) {n.get('fact', '')}")
-              return "\n".join(righe)
-
-          async def clusterizza_nuggets(gemma_client, nuggets, label="[CLUSTERING] "):
-              nuggets_indicizzati = list(enumerate(nuggets))
-              prompt = CLUSTERING_PROMPT_TEMPLATE.format(
-                  max_macro_aree=MAX_MACRO_AREE,
-                  nuggets_list=_formatta_nuggets_per_prompt(nuggets_indicizzati)
-              )
-
-              parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
-                  prompt=prompt, system_instruction=CLUSTERING_SYSTEM_INSTRUCTION,
-                  label=label, expect_list=False, use_grounding=False
-              )
-
-              if parsed is None:
-                  print(f"{label}Clustering fallito (nessuna risposta), uso fallback per-categoria.", flush=True)
-                  return _fallback_clustering_per_categoria(nuggets)
-
-              if isinstance(parsed, list):
-                  macro_aree_raw = parsed
-              elif isinstance(parsed, dict) and "macro_aree" in parsed:
-                  macro_aree_raw = parsed["macro_aree"]
-              else:
-                  print(f"{label}Clustering fallito (formato JSON imprevisto), uso fallback per-categoria.", flush=True)
-                  return _fallback_clustering_per_categoria(nuggets)
-
-              assegnati = {}
-              for area in macro_aree_raw:
-                  nome = str(area.get("nome_macro_area", "")).strip() or "Altre informazioni"
-                  for nid in area.get("nugget_ids", []):
-                      try:
-                          nid_int = int(nid)
-                      except (TypeError, ValueError):
-                          continue
-                      if 0 <= nid_int < len(nuggets):
-                          assegnati[nid_int] = nome
-
-              mancanti = [i for i in range(len(nuggets)) if i not in assegnati]
-              if mancanti:
-                  print(f"{label}{len(mancanti)} nugget non assegnati, spostati nel bucket di fallback.", flush=True)
-                  for i in mancanti:
-                      assegnati[i] = "Altre informazioni"
-
-              macro_aree = {}
-              for idx, nome_area in assegnati.items():
-                  macro_aree.setdefault(nome_area, []).append(nuggets[idx])
-
-              risultato = [
-                  {"nome_macro_area": nome, "nuggets": lista}
-                  for nome, lista in macro_aree.items()
-              ]
-
-              return _applica_tetto_macro_aree(risultato, MAX_MACRO_AREE)
-
-          def _fallback_clustering_per_categoria(nuggets):
-              macro_aree = {}
-              for n in nuggets:
-                  cat = n.get("category", "altro") or "altro"
-                  macro_aree.setdefault(cat, []).append(n)
-              risultato = [{"nome_macro_area": nome, "nuggets": lista} for nome, lista in macro_aree.items()]
-              return _applica_tetto_macro_aree(risultato, MAX_MACRO_AREE)
-
-          def _applica_tetto_macro_aree(macro_aree, max_macro_aree):
-              if len(macro_aree) <= max_macro_aree:
-                  return macro_aree
-
-              macro_aree_ordinate = sorted(macro_aree, key=lambda a: len(a["nuggets"]))
-              residuale_nome = "Altre informazioni"
-              residuale_nuggets = []
-              risultato = []
-
-              n_da_accorpare = len(macro_aree_ordinate) - (max_macro_aree - 1)
-              for i, area in enumerate(macro_aree_ordinate):
-                  if i < n_da_accorpare:
-                      residuale_nuggets.extend(area["nuggets"])
-                  else:
-                      risultato.append(area)
-
-              if residuale_nuggets:
-                  area_esistente = next((a for a in risultato if a["nome_macro_area"] == residuale_nome), None)
-                  if area_esistente:
-                      area_esistente["nuggets"].extend(residuale_nuggets)
-                  else:
-                      risultato.append({"nome_macro_area": residuale_nome, "nuggets": residuale_nuggets})
-
-              return risultato
-
-          # ---------------------------------------------------------
-          # 4. Fase 2: Riconciliazione Macro-Aree
-          # ---------------------------------------------------------
-          RECONCILIATION_SYSTEM_INSTRUCTION = "Sei un fact-checker editoriale senior. Ti occupi di riconciliare informazioni raccolte da piu' fonti web su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Hai accesso allo strumento di ricerca Google per verificare dati incerti o contraddittori: usalo ogni volta che serve dirimere un conflitto numerico o fattuale, o per capire quale sia la fonte ufficiale di un dato."
-
-          RECONCILIATION_PROMPT_TEMPLATE = """MACRO-AREA: {nome_macro_area}
-
-          Di seguito i nugget grezzi raccolti su questo argomento, ciascuno con: id, fatto, categoria, url sorgente, e livello di confidence assegnato in fase di estrazione.
-
-          NUGGET GREZZI:
-          {nuggets_list}
-
-          COMPITO:
-          1. Unisci i nugget che riportano la stessa informazione in un unico "fatto consolidato". Elimina duplicati, ridondanze e informazioni superflue.
-          2. Se due o piu' nugget riportano DATI NUMERICI O FATTUALI IN CONFLITTO sullo stesso argomento, risolvi il conflitto:
-             a. Se una delle fonti e' chiaramente piu' autorevole (es. sito istituzionale/ufficiale), dai priorita' al dato di quella fonte.
-             b. Se non e' possibile determinarlo, usa lo strumento di ricerca Google (grounding) per verificare il valore corretto.
-             c. Se nemmeno il grounding risolve il conflitto con certezza, riporta il fatto come "conflitto irrisolto", elencando i valori alternativi.
-          3. Per ogni fatto CONSOLIDATO relativo a categorie ad alto valore/alta volatilita' (prezzi, orari, contatti, indirizzi), produci ANCHE una voce separata "verified_facts": deve riportare il campo, il valore corretto, l'URL ufficiale, e impostare "verificato_via_grounding" a true se reperito o corretto tramite ricerca web.
-          4. Ogni fatto consolidato in output deve riportare la lista degli id dei nugget grezzi da cui deriva (campo "source_nugget_ids") per permettere la tracciabilità.
-          5. NON INVENTARE alcun dato non presente nei nugget grezzi o non confermato da ricerca grounded reale.
-
-          Restituisci ESCLUSIVAMENTE un JSON con questo schema, in un blocco ```json ... ```:
-          {{
-            "macro_area": "{nome_macro_area}",
-            "fatti_consolidati": [
-              {{
-                "fact": "testo del fatto consolidato",
-                "category": "categoria del nugget di origine",
-                "source_nugget_ids": [0, 2, 5],
-                "source_urls": ["https://...", "https://..."],
-                "conflitto_irrisolto": false,
-                "valori_alternativi": [],
-                "note_risoluzione": "nota su come e' stato risolto un eventuale conflitto"
-              }}
-            ],
-            "verified_facts": [
-              {{
-                "campo": "es. prezzo biglietto intero / orario apertura",
-                "valore": "il valore corretto",
-                "valori_alternativi_scartati": [],
-                "fonte_ufficiale_url": "https://...",
-                "fonte_ufficiale_certa": true,
-                "verificato_via_grounding": true,
-                "source_nugget_ids": [3, 9]
-              }}
-            ]
-          }}
-          Non aggiungere alcun testo al di fuori del JSON."""
-
-          def _formatta_nuggets_per_reconcile(nuggets):
-              righe = []
-              for idx, n in enumerate(nuggets):
-                  righe.append(
-                      f"[{idx}] (categoria: {n.get('category', 'altro')}, "
-                      f"confidence: {n.get('confidence', 'n/d')}, "
-                      f"fonte: {n.get('source_url', 'n/d')}) {n.get('fact', '')}"
-                  )
-              return "\n".join(righe)
-
-          async def riconcilia_macro_area(gemma_client, nome_macro_area, nuggets, label=""):
-              prompt = RECONCILIATION_PROMPT_TEMPLATE.format(
-                  nome_macro_area=nome_macro_area,
-                  nuggets_list=_formatta_nuggets_per_reconcile(nuggets)
-              )
-
-              parsed, raw_text, grounding_used = await gemma_client.generate_grounded_json(
-                  prompt=prompt, system_instruction=RECONCILIATION_SYSTEM_INSTRUCTION,
-                  label=label, expect_list=False, use_grounding=True
-              )
-
-              if parsed is None or not isinstance(parsed, dict):
-                  print(f"{label}[RICONCILIAZIONE] Fallita o non strutturata per macro-area '{nome_macro_area}'. Fallback applicato.", flush=True)
-                  return _fallback_nessuna_riconciliazione(nome_macro_area, nuggets)
-
-              parsed.setdefault("macro_area", nome_macro_area)
-              parsed.setdefault("fatti_consolidati", [])
-              parsed.setdefault("verified_facts", [])
-              parsed["_grounding_used"] = grounding_used
-              parsed["_local_nuggets"] = nuggets
-              return parsed
-
-          def _fallback_nessuna_riconciliazione(nome_macro_area, nuggets):
-              fatti = []
-              for idx, n in enumerate(nuggets):
-                  fatti.append({
-                      "fact": n.get("fact", ""),
-                      "category": n.get("category", "altro"),
-                      "source_nugget_ids": [idx],
-                      "source_urls": [n.get("source_url", "")],
-                      "conflitto_irrisolto": False,
-                      "valori_alternativi": [],
-                      "note_risoluzione": "RICONCILIAZIONE AI FALLITA: fatto mantenuto as-is.",
-                      "_non_riconciliato": True,
-                  })
-              return {
-                  "macro_area": nome_macro_area,
-                  "fatti_consolidati": fatti,
-                  "verified_facts": [],
-                  "_grounding_used": False,
-                  "_local_nuggets": nuggets,
-              }
-
-          # ---------------------------------------------------------
-          # 5. Fase 3: Verifica Deterministica Anti-Allucinazione
-          # ---------------------------------------------------------
-          def _estrai_numeri(testo):
-              if not testo:
-                  return []
-              grezzi = NUMBER_REGEX.findall(testo)
-              numeri = []
-              for g in grezzi:
-                  pulito = g.strip(".,")
-                  if not pulito:
-                      continue
-                  normalizzato = pulito.replace(".", "").replace(",", ".") if pulito.count(",") == 1 and pulito.count(".") <= 1 else pulito.replace(",", "")
-                  try:
-                      numeri.append(float(normalizzato))
-                  except ValueError:
-                      continue
-              return numeri
-
-          def _numero_supportato(numero, numeri_sorgente):
-              for n_sorgente in numeri_sorgente:
-                  if n_sorgente == 0:
-                      if numero == 0:
-                          return True
-                      continue
-                  scostamento = abs(numero - n_sorgente) / abs(n_sorgente)
-                  if scostamento <= NUMERIC_TOLERANCE_PCT:
+          def _is_junk_domain(netloc, full_href):
+              netloc_low = netloc.lower()
+              href_low = full_href.lower()
+              for junk in JUNK_LINK_DOMAINS:
+                  if junk in netloc_low or href_low.startswith(junk):
                       return True
               return False
 
-          def _testo_supportato_fuzzy(testo, testi_sorgente_concatenati):
-              if not testo or not testi_sorgente_concatenati:
-                  return 0.0
-              testo_norm = re.sub(r"\s+", " ", testo).strip().lower()
-              sorgente_norm = re.sub(r"\s+", " ", testi_sorgente_concatenati).strip().lower()
 
-              if testo_norm in sorgente_norm:
-                  return 1.0
-
-              finestra = min(len(testo_norm), 300)
-              if finestra < 8 or len(sorgente_norm) < finestra:
-                  return difflib.SequenceMatcher(None, testo_norm, sorgente_norm).ratio()
-
-              best_ratio = 0.0
-              step = max(1, finestra // 2)
-              for i in range(0, len(sorgente_norm) - finestra + 1, step):
-                  frammento = sorgente_norm[i:i + finestra]
-                  ratio = difflib.SequenceMatcher(None, testo_norm, frammento).ratio()
-                  if ratio > best_ratio:
-                      best_ratio = ratio
-                  if best_ratio > 0.95:
-                      break
-              return best_ratio
-
-          def _raccogli_quote_originali(source_ids, id_map):
-              testi = []
-              for local_id in source_ids:
-                  try:
-                      lid = int(local_id)
-                  except (TypeError, ValueError):
+          def _clean_query(query_string):
+              if not query_string:
+                  return ""
+              pairs = parse_qsl(query_string, keep_blank_values=True)
+              cleaned_pairs = []
+              for key, value in pairs:
+                  key_low = key.lower()
+                  if key_low in TRACKING_PARAMS_EXACT:
                       continue
-                  nugget = id_map.get(lid)
-                  if nugget:
-                      if nugget.get("quote_originale"):
-                          testi.append(nugget["quote_originale"])
-                      if nugget.get("fact"):
-                          testi.append(nugget["fact"])
-              return "\n".join(testi)
+                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES):
+                      continue
+                  cleaned_pairs.append((key, value))
+              return urlencode(cleaned_pairs)
 
-          def verifica_fatto_consolidato(fatto_consolidato, id_map):
-              source_ids = fatto_consolidato.get("source_nugget_ids", [])
-              testo_fatto = fatto_consolidato.get("fact", "")
 
-              testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
+          def clean_link_href(raw_href, page_url):
+              """
+              Ritorna l'URL assoluto e ripulito, oppure None se il link va
+              despogliato (ancora interna, self-link, social/junk, vuoto,
+              javascript:, mailto: senza indirizzo valido).
+              """
+              if not raw_href:
+                  return None
 
-              dettagli = {
-                  "similarity_score": None,
-                  "numeri_non_supportati": [],
-                  "source_ids_invalidi": [],
-              }
+              raw_href = raw_href.strip()
+              if not raw_href or raw_href.startswith("javascript:"):
+                  return None
+              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
+                  return None
 
-              for sid in source_ids:
-                  try:
-                      sid_int = int(sid)
-                      if sid_int not in id_map:
-                          dettagli["source_ids_invalidi"].append(sid)
-                  except (TypeError, ValueError):
-                      dettagli["source_ids_invalidi"].append(sid)
+              # Assolutizza (gestisce anche i protocol-relative //host/path)
+              try:
+                  absolute = urljoin(page_url, raw_href)
+              except Exception:
+                  return None
 
-              if not source_ids or not testi_sorgente:
-                  fatto_consolidato["verification_status"] = "unverified"
-                  fatto_consolidato["unverified"] = True
-                  dettagli["motivo"] = "Nessun id di riferimento o quote originali mancanti."
-                  fatto_consolidato["verification_details"] = dettagli
-                  return fatto_consolidato
+              try:
+                  parts = urlsplit(absolute)
+              except Exception:
+                  return None
 
-              similarity = _testo_supportato_fuzzy(testo_fatto, testi_sorgente)
-              dettagli["similarity_score"] = round(similarity, 3)
+              if parts.scheme not in ("http", "https", "mailto"):
+                  return None
 
-              numeri_fatto = _estrai_numeri(testo_fatto)
-              numeri_sorgente = _estrai_numeri(testi_sorgente)
+              if parts.scheme == "mailto":
+                  return None
 
-              for numero in numeri_fatto:
-                  if not _numero_supportato(numero, numeri_sorgente):
-                      dettagli["numeri_non_supportati"].append(numero)
+              # Ancora pura sulla stessa pagina (stesso path, solo #frammento)
+              page_parts = urlsplit(page_url)
+              same_path = (parts.netloc == page_parts.netloc and
+                           parts.path.rstrip("/") == page_parts.path.rstrip("/"))
 
-              is_verified = (
-                  similarity >= SIMILARITY_THRESHOLD
-                  and not dettagli["numeri_non_supportati"]
-                  and not dettagli["source_ids_invalidi"]
+              if same_path and parts.fragment and not parts.query:
+                  return None
+
+              # Social / junk
+              if _is_junk_domain(parts.netloc, absolute):
+                  return None
+
+              # Pulizia query string dai parametri di tracciamento
+              cleaned_query = _clean_query(parts.query)
+
+              # Ricostruzione URL: rimuove sempre il fragment (ancore interne)
+              # a meno che non punti a una pagina diversa con un frammento
+              # significativo (raro nei casi editoriali, quindi lo scartiamo
+              # comunque per pulizia).
+              rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                     cleaned_query, ""))
+
+              # Self-link: stesso URL (dopo pulizia) della pagina sorgente
+              page_rebuilt_parts = urlsplit(page_url)
+              page_cleaned_query = _clean_query(page_rebuilt_parts.query)
+              page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
+                                          page_rebuilt_parts.netloc,
+                                          page_rebuilt_parts.path.rstrip("/"),
+                                          page_cleaned_query, ""))
+              rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc,
+                                                 parts.path.rstrip("/"),
+                                                 cleaned_query, ""))
+              if rebuilt_no_trailing == page_rebuilt:
+                  return None
+
+              return rebuilt
+
+
+          def _strip_anchor_tag(a_tag):
+              """Sostituisce un <a> con il suo solo testo, senza rimuoverlo dal DOM."""
+              a_tag.replace_with(a_tag.get_text())
+
+
+          def html_to_clean_markdown(html, page_url):
+              """
+              Pipeline unica: rimuove tag strutturali, pulisce i link chirurgicamente
+              con urllib, converte in Markdown con markdownify.
+              Ritorna il markdown completo (nessun troncamento).
+              """
+              soup = BeautifulSoup(html, "html.parser")
+
+              for tag_name in STRUCTURAL_TAGS_TO_STRIP:
+                  for tag in soup.find_all(tag_name):
+                      tag.decompose()
+
+              for a_tag in soup.find_all("a"):
+                  href = a_tag.get("href")
+                  cleaned = clean_link_href(href, page_url)
+                  if cleaned is None:
+                      _strip_anchor_tag(a_tag)
+                  else:
+                      a_tag["href"] = cleaned
+                      # Rimuove eventuali attributi di tracciamento superflui
+                      for attr in list(a_tag.attrs):
+                          if attr not in ("href", "title"):
+                              del a_tag[attr]
+
+              markdown_text = md_convert(
+                  str(soup),
+                  heading_style="ATX",
+                  bullets="-",
+                  strip=["img"],
               )
 
-              fatto_consolidato["verification_status"] = "verified" if is_verified else "unverified"
-              if not is_verified:
-                  fatto_consolidato["unverified"] = True
-              fatto_consolidato["verification_details"] = dettagli
-              return fatto_consolidato
+              # Collassa 3+ righe vuote consecutive in 2, pulisce i bordi
+              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
+              markdown_text = markdown_text.strip()
 
-          def verifica_verified_fact(verified_fact, id_map):
-              source_ids = verified_fact.get("source_nugget_ids", [])
-              valore = str(verified_fact.get("valore", ""))
-              verificato_via_grounding = bool(verified_fact.get("verificato_via_grounding", False))
-
-              testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
-
-              invalid_ids = []
-              for sid in source_ids:
-                  try:
-                      sid_int = int(sid)
-                      if sid_int not in id_map:
-                          invalid_ids.append(sid)
-                  except (TypeError, ValueError):
-                      invalid_ids.append(sid)
-
-              dettagli = {
-                  "similarity_score": None,
-                  "numeri_non_supportati": [],
-                  "source_ids_invalidi": invalid_ids,
-              }
-
-              if not testi_sorgente:
-                  if verificato_via_grounding:
-                      verified_fact["verification_status"] = "verified_external"
-                  else:
-                      verified_fact["verification_status"] = "unverified"
-                      verified_fact["unverified"] = True
-                      dettagli["motivo"] = "Nessun riferimento e nessun grounding dichiarato."
-                  verified_fact["verification_details"] = dettagli
-                  return verified_fact
-
-              similarity = _testo_supportato_fuzzy(valore, testi_sorgente)
-              dettagli["similarity_score"] = round(similarity, 3)
-
-              numeri_valore = _estrai_numeri(valore)
-              numbers_sorgente = _estrai_numeri(testi_sorgente)
-              for numero in numeri_valore:
-                  if not _numero_supportato(numero, numbers_sorgente):
-                      dettagli["numeri_non_supportati"].append(numero)
-
-              is_verified = (not dettagli["numeri_non_supportati"]) and (similarity >= SIMILARITY_THRESHOLD or not numeri_valore)
-
-              if is_verified:
-                  verified_fact["verification_status"] = "verified"
-              elif verificato_via_grounding:
-                  verified_fact["verification_status"] = "verified_external"
-              else:
-                  verified_fact["verification_status"] = "unverified"
-                  verified_fact["unverified"] = True
-
-              verified_fact["verification_details"] = dettagli
-              return verified_fact
-
-          def esegui_verifica_anti_allucinazione(macro_aree_riconciliate):
-              needs_human_review = []
-              totale_fatti = 0
-              totale_verified_facts = 0
-              totale_non_verificati = 0
-
-              for area in macro_aree_riconciliate:
-                  local_nuggets = area.get("_local_nuggets", [])
-                  id_map = {i: n for i, n in enumerate(local_nuggets)}
-
-                  fatti_verificati = []
-                  for fatto in area.get("fatti_consolidati", []):
-                      totale_fatti += 1
-                      fatto_verificato = verifica_fatto_consolidato(fatto, id_map)
-                      fatti_verificati.append(fatto_verificato)
-                      if fatto_verificato.get("verification_status") == "unverified":
-                          totale_non_verificati += 1
-                          clean_fact = str(fatto_verificato.get("fact", "")).replace("|", "&#124;")
-                          needs_human_review.append({
-                              "tipo": "fatto_consolidato",
-                              "macro_area": area.get("macro_area"),
-                              "fact": clean_fact,
-                              "source_urls": fatto_verificato.get("source_urls", []),
-                              "verification_details": fatto_verificato.get("verification_details"),
-                          })
-                  area["fatti_consolidati"] = fatti_verificati
-
-                  vf_verificati = []
-                  for vf in area.get("verified_facts", []):
-                      totale_verified_facts += 1
-                      vf_verificato = verifica_verified_fact(vf, id_map)
-                      vf_verificati.append(vf_verificato)
-                      if vf_verificato.get("verification_status") == "unverified":
-                          totale_non_verificati += 1
-                          clean_campo = str(vf_verificato.get("campo", "")).replace("|", "&#124;")
-                          clean_valore = str(vf_verificato.get("valore", "")).replace("|", "&#124;")
-                          needs_human_review.append({
-                              "tipo": "verified_fact",
-                              "macro_area": area.get("macro_area"),
-                              "campo": clean_campo,
-                              "valore": clean_valore,
-                              "fonte_ufficiale_url": vf_verificato.get("fonte_ufficiale_url"),
-                              "verification_details": vf_verificato.get("verification_details"),
-                          })
-                  area["verified_facts"] = vf_verificati
-
-                  # Mappatura globale indici sicura
-                  for fatto in area.get("fatti_consolidati", []):
-                      global_ids = []
-                      for lid in fatto.get("source_nugget_ids", []):
-                          try:
-                              lid_int = int(lid)
-                              if 0 <= lid_int < len(local_nuggets):
-                                  global_ids.append(local_nuggets[lid_int].get("_global_id"))
-                          except (TypeError, ValueError):
-                              continue
-                      seen = set()
-                      unique_global_ids = []
-                      for g_id in global_ids:
-                          if g_id not in seen:
-                              seen.add(g_id)
-                              unique_global_ids.append(g_id)
-                      fatto["source_nugget_ids"] = unique_global_ids
-
-                  for vf in area.get("verified_facts", []):
-                      global_ids = []
-                      for lid in vf.get("source_nugget_ids", []):
-                          try:
-                              lid_int = int(lid)
-                              if 0 <= lid_int < len(local_nuggets):
-                                  global_ids.append(local_nuggets[lid_int].get("_global_id"))
-                          except (TypeError, ValueError):
-                              continue
-                      seen = set()
-                      unique_global_ids = []
-                      for g_id in global_ids:
-                          if g_id not in seen:
-                              seen.add(g_id)
-                              unique_global_ids.append(g_id)
-                      vf["source_nugget_ids"] = unique_global_ids
-
-                  area.pop("_local_nuggets", None)
-
-              report = {
-                  "totale_fatti_consolidati": totale_fatti,
-                  "totale_verified_facts": totale_verified_facts,
-                  "totale_non_verificati": totale_non_verificati,
-                  "needs_human_review": needs_human_review,
-              }
-
-              return macro_aree_riconciliate, report
-
-          # ---------------------------------------------------------
-          # 6. Caricamento API Keys e Orchestrazione
-          # ---------------------------------------------------------
-          def _carica_api_keys():
-              keys = []
-              primary = os.environ.get("GEMINI_API_KEY", "").strip()
-              if primary:
-                  keys.extend([k.strip() for k in primary.split(",") if k.strip()])
-              idx = 2
-              while True:
-                  val = os.environ.get(f"GEMINI_API_KEY_{idx}", "").strip()
-                  if not val:
-                      break
-                  keys.extend([k.strip() for k in val.split(",") if k.strip()])
-                  idx += 1
-              return keys
-
-          def _carica_nuggets(input_path):
-              with open(input_path, "r", encoding="utf-8") as f:
-                  data = json.load(f)
-
-              nuggets = []
-              if isinstance(data, dict) and "nuggets" in data:
-                  nuggets = data["nuggets"]
-              elif isinstance(data, list):
-                  nuggets = data
-              else:
-                  raise ValueError("Formato di input non valido.")
-
-              for i, nugget in enumerate(nuggets):
-                  nugget["_global_id"] = i
-              return nuggets
-
-          async def esegui_pipeline(input_path, output_dir):
-              os.makedirs(output_dir, exist_ok=True)
-              nuggets_grezzi = _carica_nuggets(input_path)
-
-              if not nuggets_grezzi:
-                  print("[ORCHESTRATOR] Nessun nugget in ingresso. Generazione output vuoti.")
-                  _scrivi_output_vuoto(output_dir)
-                  return
-
-              api_keys = _carica_api_keys()
-              if not api_keys:
-                  print("[ORCHESTRATOR] ERRORE: Chiavi API non configurate.")
-                  sys.exit(1)
-
-              analysis_client = GeminiLiveAnalysisClient(api_key=api_keys[0], max_rpm=15)
-
-              print("[ORCHESTRATOR] Fase 1: Clustering dinamico agnostico...", flush=True)
-              macro_aree = await clusterizza_nuggets(analysis_client, nuggets_grezzi)
-              print(f"[ORCHESTRATOR] Create {len(macro_aree)} macro-aree.", flush=True)
-
-              print("[ORCHESTRATOR] Fase 2: Riconciliazione ad alta precisione con grounding...", flush=True)
-              macro_aree_riconciliate = []
-              for area in macro_aree:
-                  label = f"[{area['nome_macro_area']}] "
-                  risultato = await riconcilia_macro_area(
-                      analysis_client, area["nome_macro_area"], area["nuggets"], label=label
-                  )
-                  macro_aree_riconciliate.append(risultato)
-
-              print("[ORCHESTRATOR] Fase 3: Esecuzione controlli di coerenza numerica e testuale...", flush=True)
-              macro_aree_verificate, report_verifica = esegui_verifica_anti_allucinazione(macro_aree_riconciliate)
-
-              reconciled_output = {
-                  "meta": {
-                      "totale_nugget_grezzi_input": len(nuggets_grezzi),
-                      "totale_macro_aree": len(macro_aree_verificate),
-                      "tetto_macro_aree": MAX_MACRO_AREE,
-                  },
-                  "macro_aree": macro_aree_verificate,
-              }
-
-              verified_facts_flat = []
-              for area in macro_aree_verificate:
-                  for vf in area.get("verified_facts", []):
-                      vf_out = dict(vf)
-                      vf_out["macro_area"] = area.get("macro_area")
-                      verified_facts_flat.append(vf_out)
-
-              with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
-                  json.dump(reconciled_output, f, indent=2, ensure_ascii=False)
-
-              with open(os.path.join(output_dir, "verified_facts.json"), "w", encoding="utf-8") as f:
-                  json.dump({"verified_facts": verified_facts_flat}, f, indent=2, ensure_ascii=False)
-
-              with open(os.path.join(output_dir, "needs_human_review.json"), "w", encoding="utf-8") as f:
-                  json.dump({"stats": report_verifica}, f, indent=2, ensure_ascii=False)
-
-              summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
-              if summary_file:
-                  with open(summary_file, "a", encoding="utf-8") as sf:
-                      sf.write("### 🏛️ Report di Consolidamento Agnostico Gemini Live\n\n")
-                      sf.write("| Metrica | Valore |\n")
-                      sf.write("| --- | --- |\n")
-                      sf.write(f"| Nugget Grezzi Analizzati | {len(nuggets_grezzi)} |\n")
-                      sf.write(f"| Macro-aree Individuate | {len(macro_aree_verificate)} |\n")
-                      sf.write(f"| Fatti Consolidati finali | {report_verifica['totale_fatti_consolidati']} |\n")
-                      sf.write(f"| Informazioni Verificate Estratte | {report_verifica['totale_verified_facts']} |\n")
-                      sf.write(f"| Elementi per Revisione Umana (needs_human_review) | {report_verifica['totale_non_verificati']} |\n\n")
-
-                      if report_verifica['needs_human_review']:
-                          sf.write("#### 🚨 Elementi con Discrepanze Rilevate (needs_human_review)\n")
-                          sf.write("| Tipo | Macro-Area | Elemento / Fatto | Dettaglio Deviazione |\n")
-                          sf.write("| --- | --- | --- | --- |\n")
-                          for item in report_verifica['needs_human_review']:
-                              if item["tipo"] == "fatto_consolidato":
-                                  det = f"Similarity: {item['verification_details'].get('similarity_score')} &#124; Numeri non supportati: {item['verification_details'].get('numeri_non_supportati')}"
-                                  sf.write(f"| Consolidato | {item['macro_area']} | {item['fact']} | {det} |\n")
-                              else:
-                                  det = f"Similarity: {item['verification_details'].get('similarity_score')} &#124; Numeri non supportati: {item['verification_details'].get('numeri_non_supportati')}"
-                                  sf.write(f"| Verified Fact | {item['macro_area']} | `{item['campo']}`: {item['valore']} | {det} |\n")
-
-          def _scrivi_output_vuoto(output_dir):
-              with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
-                  json.dump({"meta": {"totale_nugget_grezzi_input": 0}, "macro_aree": []}, f, indent=2)
-              with open(os.path.join(output_dir, "verified_facts.json"), "w", encoding="utf-8") as f:
-                  json.dump({"verified_facts": []}, f, indent=2)
-              with open(os.path.join(output_dir, "needs_human_review.json"), "w", encoding="utf-8") as f:
-                  json.dump({"stats": {"needs_human_review": []}}, f, indent=2)
-
-          def main():
-              parser = argparse.ArgumentParser(description="Pipeline di riconciliazione nugget editoriali.")
-              parser.add_argument("--input", required=True, help="Path al file JSON con i nugget grezzi.")
-              parser.add_argument("--output-dir", default="./output", help="Directory di output.")
-              args = parser.parse_args()
-              asyncio.run(esegui_pipeline(args.input, args.output_dir))
-
-          if __name__ == "__main__":
-              main()
+              return markdown_text
           EOF
 
-      - name: Esecuzione Consolidamento Nugget
+      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
         run: |
-          INPUT_FILE="${{ github.event.inputs.input_file }}"
-          if [ -z "$INPUT_FILE" ]; then
-            INPUT_FILE="nuggets_finale.json"
-          fi
+          cat << 'EOF' > nugget_extractor.py
+          """
+          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati
+          tramite Gemini Live API (gemini-3.1-flash-live-preview).
+
+          Segue lo stesso pattern del middleware filtro URL (url_screener.py):
+            - client.aio.live.connect con response_modalities=["AUDIO"] +
+              output_audio_transcription per ottenere testo dalla sessione Live
+            - timeout di sicurezza con asyncio.wait_for
+            - parsing JSON robusto con fallback su regex ```json ... ```
+
+          Principio non-negoziabile (coerente con ARIA):
+            la "confidence" NON e' mai auto-riportata dal modello. Viene derivata
+            deterministicamente confrontando la quote_originale dichiarata dal
+            modello con il testo sorgente realmente scrapato (fuzzy match).
+
+          GESTIONE LIMITI ENTERPRISE (v2):
+            1. Token bucket per-chiave: il limite dichiarato e' TPM 65K. Ogni
+               GeminiKeyPool.acquire() stima i token del payload e attende finche'
+               non c'e' budget sufficiente nel bucket della chiave corrente, con
+               un margine di sicurezza (75% del limite dichiarato) perche' la stima
+               token e' approssimata (~4 char/token) e non il vero tokenizer.
+            2. Multi-key round-robin con cooldown: se una chiave sforra comunque
+               (risposta 1011 / "exceeded your current quota"), viene marcata in
+               cooldown per COOLDOWN_SECONDS e il pool passa automaticamente alla
+               chiave successiva disponibile. Funziona anche con una sola chiave:
+               in quel caso il "pool" ha un solo elemento e la chiave va semplicemente
+               in attesa che il proprio bucket si ricarichi.
+            3. Scrittura incrementale JSONL: ogni nugget estratto viene appeso
+               immediatamente su disco (una riga = un oggetto JSON completo), NON
+               accumulato solo in RAM. Se il processo viene interrotto (timeout job,
+               kill, crash), tutto cio' che era stato scritto fino a quel momento
+               resta valido e recuperabile.
+          """
+
+          import json
+          import re
+          import os
+          import time
+          import asyncio
+          import difflib
+
+          from google import genai
+
+          MODEL_NAME = "gemini-3.1-flash-live-preview"
+
+          CONFIG_LIVE = {
+              "response_modalities": ["AUDIO"],
+              "output_audio_transcription": {}
+          }
+
+          NUGGET_TIMEOUT_SECONDS = 40.0
+
+          # Limite dichiarato dal piano: TPM 65.000. Usiamo un margine di sicurezza
+          # perche' la stima token e' approssimata (char/4), non il tokenizer reale.
+          TPM_LIMIT_DICHIARATO = 65_000
+          TPM_SAFETY_MARGIN = 0.75
+          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)  # 48.750
+
+          # Quanto tempo una chiave resta "in cooldown" dopo aver sforato il limite
+          # (segnale ricevuto direttamente dall'errore 1011 di Gemini, non dedotto)
+          COOLDOWN_SECONDS = 65.0
+
+          # Segnali testuali che identificano un errore di quota/rate-limit nella
+          # risposta d'errore della Live API (messaggio WebSocket 1011)
+          QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
+
+          NUGGET_PROMPT_TEMPLATE = """
+          Sei un estrattore di fatti (nugget) ad alta precisione per un sistema editoriale
+          di ricerca. Il tuo compito e' leggere il TESTO SORGENTE fornito ed estrarre
+          SOLO informazioni fattuali, dati concreti o affermazioni verificabili che
+          potrebbero essere utili per un articolo editoriale sul TARGET TOPIC indicato.
+
+          REGOLE:
+          1. Estrai SOLO fatti realmente presenti nel testo. Non inventare, non
+             dedurre, non completare informazioni mancanti.
+          2. Per ogni nugget, riporta in "quote_originale" la frase o porzione di
+             testo ESATTA (verbatim, non parafrasata) da cui hai estratto il fatto.
+             Questo campo verra' verificato programmaticamente contro il testo
+             sorgente: se non corrisponde, il nugget verra' scartato.
+          3. Classifica ogni nugget in una "category" tra: prezzo, orario, evento,
+             storia, geografia, recensione, dato_statistico, contatto, altro.
+          4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
+             array vuoto [].
+          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
+             generico privo di dati concreti.
+
+          Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
+          [
+            {{"fact": "...", "category": "...", "quote_originale": "..."}}
+          ]
+          Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
+
+          TARGET TOPIC:
+          {topic}
+
+          URL SORGENTE:
+          {source_url}
+
+          TESTO SORGENTE:
+          {testo}
+          """
+
+
+          def _stima_token(testo):
+              """Stima approssimata dei token (~4 caratteri/token per testo misto
+              italiano/inglese). Deliberatamente prudente: meglio sovrastimare che
+              sforare il limite reale."""
+              if not testo:
+                  return 0
+              return max(1, len(testo) // 4)
+
+
+          class TokenBucket:
+              """Token bucket a ricarica continua per il rate limiting TPM di una
+              singola API key. Non e' un pacing a intervallo fisso: permette raffiche
+              quando il budget e' pieno e rallenta automaticamente quando si avvicina
+              al limite, aspettando solo il tempo necessario a liberare budget."""
+
+              def __init__(self, capacity_tokens, refill_period_seconds=60.0):
+                  self.capacity = capacity_tokens
+                  self.tokens = capacity_tokens
+                  self.refill_period = refill_period_seconds
+                  self.refill_rate = capacity_tokens / refill_period_seconds  # token/secondo
+                  self.last_refill = time.monotonic()
+                  self._lock = asyncio.Lock()
+
+              def _refill(self):
+                  now = time.monotonic()
+                  elapsed = now - self.last_refill
+                  if elapsed > 0:
+                      self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+                      self.last_refill = now
+
+              async def acquire(self, needed_tokens, label=""):
+                  """Attende finche' non c'e' budget sufficiente, poi lo consuma."""
+                  needed_tokens = min(needed_tokens, self.capacity)  # non bloccare mai indefinitamente
+                  async with self._lock:
+                      while True:
+                          self._refill()
+                          if self.tokens >= needed_tokens:
+                              self.tokens -= needed_tokens
+                              return
+                          deficit = needed_tokens - self.tokens
+                          wait_seconds = deficit / self.refill_rate
+                          wait_seconds = min(wait_seconds, 20.0)  # non aspettare mai troppo in un colpo solo
+                          print(f"{label}[TPM-BUCKET] Budget insufficiente "
+                                f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
+                                flush=True)
+                          await asyncio.sleep(wait_seconds)
+
+
+          class GeminiKeyPool:
+              """Gestisce una o piu' API key Gemini con round-robin, token bucket
+              indipendente per chiave, e cooldown automatico sulle chiavi che
+              sforano il limite. Funziona in modo trasparente anche con una sola
+              chiave configurata."""
+
+              def __init__(self, api_keys):
+                  api_keys = [k for k in api_keys if k]
+                  if not api_keys:
+                      raise ValueError("Nessuna API key Gemini fornita")
+
+                  self.entries = []
+                  for key in api_keys:
+                      self.entries.append({
+                          "key": key,
+                          "client": genai.Client(api_key=key),
+                          "bucket": TokenBucket(TPM_BUDGET),
+                          "cooldown_until": 0.0,
+                      })
+                  self._idx = 0
+                  self._lock = asyncio.Lock()
+
+              async def _pick_entry(self, label=""):
+                  """Sceglie la prossima chiave disponibile (non in cooldown) in
+                  round-robin. Se tutte sono in cooldown, aspetta quella che si
+                  libera per prima."""
+                  async with self._lock:
+                      n = len(self.entries)
+                      while True:
+                          now = time.monotonic()
+                          candidati = [(i, e) for i, e in enumerate(self.entries) if e["cooldown_until"] <= now]
+                          if candidati:
+                              for _ in range(n):
+                                  self._idx = (self._idx + 1) % n
+                                  entry = self.entries[self._idx]
+                                  if entry["cooldown_until"] <= now:
+                                      return entry
+                          prossima_liberazione = min(e["cooldown_until"] for e in self.entries)
+                          attesa = max(0.5, prossima_liberazione - now)
+                          print(f"{label}[KEY-POOL] Tutte le chiavi in cooldown, attendo {attesa:.1f}s...",
+                                flush=True)
+                          await asyncio.sleep(min(attesa, 15.0))
+
+              def _mark_cooldown(self, entry, label=""):
+                  entry["cooldown_until"] = time.monotonic() + COOLDOWN_SECONDS
+                  print(f"{label}[KEY-POOL] Chiave in cooldown per {COOLDOWN_SECONDS:.0f}s "
+                        f"(quota TPM superata)", flush=True)
+
+              async def esegui_con_pool(self, payload, timeout_seconds, label=""):
+                  """Sceglie una chiave disponibile, attende budget TPM sufficiente
+                  sul suo bucket, esegue la chiamata Live. Un SOLO tentativo su UNA
+                  chiave: la logica di retry su piu' chiavi vive nel chiamante
+                  (estrai_nuggets), non qui."""
+
+                  entry = await self._pick_entry(label)
+                  stima = _stima_token(payload)
+                  await entry["bucket"].acquire(stima, label=label)
+
+                  accumulated_text = ""
+                  try:
+                      async def run_session():
+                          nonlocal accumulated_text
+                          async with entry["client"].aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
+                              await session.send_realtime_input(text=payload)
+                              async for response in session.receive():
+                                  if response.server_content and response.server_content.output_transcription:
+                                      if response.server_content.output_transcription.text:
+                                          accumulated_text += response.server_content.output_transcription.text
+                                  if response.server_content and response.server_content.turn_complete:
+                                      break
+
+                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
+                      return accumulated_text.strip(), None
+
+                  except (asyncio.TimeoutError, TimeoutError):
+                      return None, "timeout"
+                  except Exception as e:
+                      err_str = str(e).lower()
+                      if any(marker in err_str for marker in QUOTA_ERROR_MARKERS):
+                          self._mark_cooldown(entry, label=label)
+                          return None, "quota"
+                      return None, f"errore: {e}"
+
+
+          def _estrai_json_da_risposta(raw_text):
+              if not raw_text:
+                  return None
+              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
+              json_str = match.group(1) if match else raw_text
+              try:
+                  parsed = json.loads(json_str)
+                  if isinstance(parsed, list):
+                      return parsed
+              except Exception:
+                  pass
+              return None
+
+
+          def _calcola_confidence(quote_originale, testo_sorgente):
+              """Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello."""
+              if not quote_originale or not testo_sorgente:
+                  return "low"
+
+              quote_norm = re.sub(r'\s+', ' ', quote_originale).strip().lower()
+              testo_norm = re.sub(r'\s+', ' ', testo_sorgente).strip().lower()
+
+              if not quote_norm:
+                  return "low"
+
+              if quote_norm in testo_norm:
+                  return "high"
+
+              finestra = len(quote_norm)
+              if finestra < 8 or len(testo_norm) < finestra:
+                  best_ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm).ratio()
+              else:
+                  best_ratio = 0.0
+                  step = max(1, finestra // 2)
+                  for i in range(0, len(testo_norm) - finestra + 1, step):
+                      frammento = testo_norm[i:i + finestra]
+                      ratio = difflib.SequenceMatcher(None, quote_norm, frammento).ratio()
+                      if ratio > best_ratio:
+                          best_ratio = ratio
+                      if best_ratio > 0.95:
+                          break
+
+              if best_ratio >= 0.85:
+                  return "high"
+              elif best_ratio >= 0.60:
+                  return "medium"
+              else:
+                  return "low"
+
+
+          def scrivi_nuggets_jsonl(nuggets, jsonl_path):
+              """Scrittura incrementale: ogni nugget e' una riga JSON append-only.
+              Se il file non esiste viene creato. Nessuna riscrittura del file intero:
+              ogni chiamata aggiunge solo le righe nuove."""
+              if not nuggets:
+                  return
+              with open(jsonl_path, "a", encoding="utf-8") as f:
+                  for n in nuggets:
+                      f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+
+          async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
+                                    node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
+                                    max_key_attempts=None):
+              """
+              Estrae nugget strutturati da un singolo testo gia' scrapato, tramite
+              Gemini Live, usando il pool di chiavi con token bucket TPM.
+
+              Se una chiave sforra la quota, riprova automaticamente su un'altra
+              chiave del pool (fino a max_key_attempts, default = numero di chiavi
+              nel pool). Non solleva mai eccezioni verso il chiamante.
+
+              Ritorna: lista di dict nugget con schema
+                {fact, source_url, category, confidence, quote_originale}
+              oppure None in caso di fallimento totale (tutte le chiavi esaurite/timeout).
+              """
+              if not testo_markdown or len(testo_markdown.strip()) < 50:
+                  return []
+
+              label = f"[NODO {node_id}] " if node_id is not None else ""
+              payload = NUGGET_PROMPT_TEMPLATE.format(
+                  topic=topic,
+                  source_url=source_url,
+                  testo=testo_markdown
+              )
+
+              if max_key_attempts is None:
+                  max_key_attempts = len(key_pool.entries)
+
+              ultimo_motivo = None
+              for tentativo in range(max_key_attempts):
+                  accumulated_text, errore = await key_pool.esegui_con_pool(payload, timeout_seconds, label=label)
+
+                  if errore is None:
+                      parsed = _estrai_json_da_risposta(accumulated_text)
+                      if parsed is None:
+                          print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
+                                f"Output grezzo: {accumulated_text[:80]}...", flush=True)
+                          return None
+
+                      nuggets = []
+                      for item in parsed:
+                          if not isinstance(item, dict):
+                              continue
+                          fact = str(item.get("fact", "")).strip()
+                          quote = str(item.get("quote_originale", "")).strip()
+                          category = str(item.get("category", "altro")).strip() or "altro"
+                          if not fact:
+                              continue
+
+                          confidence = _calcola_confidence(quote, testo_markdown)
+                          nuggets.append({
+                              "fact": fact,
+                              "source_url": source_url,
+                              "category": category,
+                              "confidence": confidence,
+                              "quote_originale": quote
+                          })
+
+                      print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
+                      return nuggets
+
+                  elif errore == "quota":
+                      ultimo_motivo = "quota"
+                      print(f"{label}[NUGGET] Quota superata su {source_url}, "
+                            f"provo con un'altra chiave ({tentativo + 1}/{max_key_attempts})...", flush=True)
+                      continue
+
+                  elif errore == "timeout":
+                      print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}.", flush=True)
+                      return None
+
+                  else:
+                      print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
+                      return None
+
+              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
+                    f"(ultimo motivo: {ultimo_motivo})", flush=True)
+              return None
+          EOF
+
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, async + nugget extraction)
+        run: |
+          cat << 'EOF' > m2_step1.py
+          import time
+          import sys
+          import random
+          import os
+          import json
+          import asyncio
+          from curl_cffi import requests as curl_requests
+          from extraction_utils import html_to_clean_markdown
+          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          # Numero massimo di chiamate Gemini Live in volo contemporaneamente PER NODO.
+          # Il vero limite di velocita' e' gestito dal token bucket TPM dentro
+          # GeminiKeyPool: questo semaforo serve solo a non aprire un numero
+          # spropositato di WebSocket paralleli (che sarebbero comunque messi in coda
+          # dal bucket, ma e' piu' pulito limitarli anche a livello di concorrenza).
+          NUGGET_CONCURRENCY = 5
+
+          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step1.jsonl"
+          # Lock per serializzare le scritture JSONL tra i task concorrenti dello
+          # stesso nodo (append su file e' quasi sempre atomico su Linux per righe
+          # brevi, ma il lock elimina ogni ambiguita' senza costare quasi nulla).
+          _jsonl_lock = asyncio.Lock()
+
+
+          def carica_gemini_api_keys():
+              """Legge GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ...
+              Funziona anche con una sola chiave configurata."""
+              keys = []
+              primary = os.environ.get("GEMINI_API_KEY")
+              if primary:
+                  keys.append(primary)
+              i = 2
+              while True:
+                  k = os.environ.get(f"GEMINI_API_KEY_{i}")
+                  if not k:
+                      break
+                  keys.append(k)
+                  i += 1
+              return keys
+
+
+          async def verify_proxy_active(port, max_retries=5, delay=5):
+              test_session = curl_requests.AsyncSession(impersonate="chrome120")
+              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              for _ in range(max_retries):
+                  try:
+                      resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200:
+                          await test_session.close()
+                          return True
+                  except Exception:
+                      pass
+                  await asyncio.sleep(delay)
+              await test_session.close()
+              return False
+
+
+          def validate_html(html, url, status_code):
+              if status_code >= 400:
+                  return False, f"Blocco HTTP {status_code}"
+              if not html or len(html.strip()) < 300:
+                  return False, "HTML vuoto"
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return True, ""
+
+              low_html = html.lower()
+              blocking_indicators = [
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
+                  "just a moment", "security verification", "please enable js", "enable javascript",
+                  "are you a robot", "please wait for verification", "we've detected unusual activity",
+                  "if you are not redirected", "unusual traffic from your computer network",
+                  "checking your browser", "prove your humanity", "captcha verification",
+                  "please enter in the characters you see below", "access to this page is forbidden",
+                  "error 1020", "you have been blocked", "pardon our interruption",
+                  "se non vieni reindirizzato", "se hai problemi ad accedere",
+                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
+              ]
+
+              for ind in blocking_indicators:
+                  if ind in low_html:
+                      return False, f"WAF/Captcha rilevato: {ind}"
+              return True, ""
+
+
+          async def salva_nuggets(nuggets):
+              """Scrittura incrementale immediata su disco (JSONL), protetta da lock
+              per evitare interleaving tra task concorrenti dello stesso nodo."""
+              if not nuggets:
+                  return
+              async with _jsonl_lock:
+                  scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+
+
+          async def main():
+              if not await verify_proxy_active(ACTIVE_PORT):
+                  sys.exit(0)
+
+              queue_file = f"/tmp/step1_queue_{node_id}.json"
+              if not os.path.exists(queue_file):
+                  sys.exit(0)
+
+              with open(queue_file, "r") as f:
+                  targets = json.load(f)
+
+              api_keys = carica_gemini_api_keys()
+              key_pool = GeminiKeyPool(api_keys) if api_keys else None
+              if key_pool:
+                  print(f"[NODO {node_id}] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
+              else:
+                  print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
+
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+
+              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
+              failed_targets = []
+              nugget_retry_pool = []  # (url, testo_markdown) andati in timeout/errore: un solo retry a fine nodo
+
+              session = curl_requests.AsyncSession(impersonate="chrome120")
+              session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+              session.headers.update({
+                  "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+              })
+
+              nugget_tasks = []
+
+              async def lancia_nugget_task(url, testo_markdown):
+                  """Task fire-and-forget: il loop di scraping prosegue subito sul
+                  target successivo mentre Gemini processa questo in background.
+                  Il risultato viene scritto su disco NON APPENA arriva (mai solo
+                  accumulato in RAM), cosi' un'interruzione improvvisa del job non
+                  perde il lavoro gia' completato."""
+                  if key_pool is None:
+                      return
+
+                  async def _run():
+                      async with nugget_semaphore:
+                          esito = await estrai_nuggets(
+                              key_pool=key_pool,
+                              source_url=url,
+                              testo_markdown=testo_markdown,
+                              topic=TARGET_TOPIC,
+                              node_id=node_id
+                          )
+                      if esito is None:
+                          nugget_retry_pool.append((url, testo_markdown))
+                      else:
+                          await salva_nuggets(esito)
+
+                  nugget_tasks.append(asyncio.create_task(_run()))
+
+              for url in targets:
+                  print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+                  try:
+                      resp = await session.get(url, timeout=12)
+                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+
+                      if is_ok:
+                          if any(site in url for site in DIAGNOSTIC_SITES):
+                              from bs4 import BeautifulSoup
+                              soup = BeautifulSoup(resp.text, 'html.parser')
+                              text = soup.get_text(separator=' ', strip=True)
+                          else:
+                              text = html_to_clean_markdown(resp.text, url)
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                          print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
+
+                          if not any(site in url for site in DIAGNOSTIC_SITES):
+                              await lancia_nugget_task(url, text)
+                      else:
+                          print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
+                          failed_targets.append(url)
+                  except Exception:
+                      print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                      failed_targets.append(url)
+
+                  await asyncio.sleep(random.uniform(1.0, 2.0))
+
+              await session.close()
+
+              # Salva SUBITO il testo grezzo e i target falliti: questo non dipende
+              # dalle chiamate nugget ancora in corso, quindi va scritto a prescindere.
+              with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
+                  f.write(results)
+              with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
+                  json.dump(failed_targets, f)
+
+              if nugget_tasks:
+                  print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
+                  await asyncio.gather(*nugget_tasks, return_exceptions=True)
+
+              if nugget_retry_pool and key_pool is not None:
+                  print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
+                  retry_tasks = []
+                  for url, testo_markdown in nugget_retry_pool:
+                      async def _retry(url=url, testo_markdown=testo_markdown):
+                          async with nugget_semaphore:
+                              esito = await estrai_nuggets(
+                                  key_pool=key_pool,
+                                  source_url=url,
+                                  testo_markdown=testo_markdown,
+                                  topic=TARGET_TOPIC,
+                                  node_id=node_id
+                              )
+                          if esito:
+                              await salva_nuggets(esito)
+                          else:
+                              print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
+                      retry_tasks.append(asyncio.create_task(_retry()))
+                  await asyncio.gather(*retry_tasks, return_exceptions=True)
+
+              print(f"[NODO {node_id}] STEP 1 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+
+      - name: Esecuzione Scraping Parallelo - STEP 1
+        run: |
+          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
           
-          if [ ! -f "$INPUT_FILE" ] && [ -f "nuggets_input.json" ]; then
-            INPUT_FILE="nuggets_input.json"
-          fi
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+      - name: Refresh IP Container per lo STEP 2
+        run: |
+          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          sleep 6
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        run: |
+          cat << 'EOF' > m2_step2_setup.py
+          import json
+          import os
+
+          merged_failed = []
+          for i in range(1, 7):
+              filename = f"failed_node_{i}.json"
+              if os.path.exists(filename):
+                  with open(filename, "r", encoding="utf-8") as f:
+                      try: merged_failed.extend(json.load(f))
+                      except Exception: pass
           
-          if [ -f "$INPUT_FILE" ]; then
-            echo "Avvio pipeline agnostica con input: $INPUT_FILE"
-            python deep_research_consolidator.py --input "$INPUT_FILE" --output-dir ./output
-          else
-            echo "ERRORE: File di input non trovato."
-            exit 1
-          fi
+          unique_failed = list(dict.fromkeys(merged_failed))
+          
+          for i in range(1, 7):
+              chunk = unique_failed[i-1::6]
+              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+                  
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          EOF
+          python -u m2_step2_setup.py
 
-      - name: Archiviazione nuggets_riconciliati.json
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato + nugget extraction)
+        run: |
+          cat << 'EOF' > m2_step2.py
+          import asyncio
+          import time
+          import sys
+          import random
+          import os
+          import json
+          from urllib.parse import urlparse, parse_qs
+          from cloakbrowser import launch_persistent_context_async
+          from extraction_utils import html_to_clean_markdown
+          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+          node_id = int(sys.argv[1])
+          INITIAL_PORT = 40000 + node_id
+
+          NUGGET_CONCURRENCY = 5
+          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+
+          NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step2.jsonl"
+          _jsonl_lock = asyncio.Lock()
+
+
+          def carica_gemini_api_keys():
+              keys = []
+              primary = os.environ.get("GEMINI_API_KEY")
+              if primary:
+                  keys.append(primary)
+              i = 2
+              while True:
+                  k = os.environ.get(f"GEMINI_API_KEY_{i}")
+                  if not k:
+                      break
+                  keys.append(k)
+                  i += 1
+              return keys
+
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p', 'find_desc']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
+
+          async def salva_nuggets(nuggets):
+              if not nuggets:
+                  return
+              async with _jsonl_lock:
+                  scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+
+
+          async def main():
+              queue_file = f"/tmp/step2_queue_{node_id}.json"
+              if not os.path.exists(queue_file):
+                  return
+
+              with open(queue_file, "r") as f:
+                  targets = json.load(f)
+
+              if not targets:
+                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                      f.write("")
+                  return
+
+              api_keys = carica_gemini_api_keys()
+              key_pool = GeminiKeyPool(api_keys) if api_keys else None
+              if key_pool:
+                  print(f"[NODO {node_id}] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
+              else:
+                  print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
+
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+              nugget_retry_pool = []
+              nugget_tasks = []
+
+              async def lancia_nugget_task(url, testo_markdown):
+                  if key_pool is None:
+                      return
+
+                  async def _run():
+                      async with nugget_semaphore:
+                          esito = await estrai_nuggets(
+                              key_pool=key_pool,
+                              source_url=url,
+                              testo_markdown=testo_markdown,
+                              topic=TARGET_TOPIC,
+                              node_id=node_id
+                          )
+                      if esito is None:
+                          nugget_retry_pool.append((url, testo_markdown))
+                      else:
+                          await salva_nuggets(esito)
+
+                  nugget_tasks.append(asyncio.create_task(_run()))
+
+              home_dir = os.path.expanduser("~")
+              profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
+              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+
+              base_args = [
+                  "--no-sandbox",
+                  "--disable-dev-shm-usage",
+                  f"--fingerprint={random.randint(100000, 999999)}",
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
+              ]
+
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
+              try:
+                  context = await launch_persistent_context_async(
+                      profile_dir,
+                      headless=False,
+                      humanize=True,
+                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
+                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                      geoip=True,
+                      viewport={"width": 1920, "height": 1080},
+                      args=base_args
+                  )
+                  page = await context.new_page()
+
+                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
+                  await asyncio.sleep(2)
+                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
+                  await asyncio.sleep(2)
+
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
+                  return
+
+              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+
+              for url in targets:
+                  print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
+                  try:
+                      query_to_search = get_query_from_url(url)
+
+                      if "bing.com" in url:
+                          await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                          await asyncio.sleep(random.uniform(2.5, 4.0))
+                          try:
+                              search_box = page.locator("textarea[name='q'], input[name='q']").first
+                              await search_box.fill(query_to_search)
+                              await page.keyboard.press("Enter")
+                          except Exception:
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
+                      elif "startpage.com" in url:
+                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                          await asyncio.sleep(random.uniform(2.0, 3.5))
+                          try:
+                              search_box = page.locator("input#q").first
+                              await search_box.fill(query_to_search)
+                              await page.keyboard.press("Enter")
+                          except Exception:
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
+                      elif "html.duckduckgo.com" in url:
+                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                          await asyncio.sleep(random.uniform(2.0, 3.5))
+                          try:
+                              search_box = page.locator("input[name=q]").first
+                              await search_box.fill(query_to_search)
+                              await page.keyboard.press("Enter")
+                          except Exception:
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
+                      else:
+                          await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+
+                      try:
+                          await page.wait_for_load_state("networkidle", timeout=12000)
+                      except Exception:
+                          pass
+
+                      await asyncio.sleep(6)
+
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(1)
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(2)
+
+                      raw_html = await page.content()
+                      current_url = page.url
+
+                      text_for_check = html_to_clean_markdown(raw_html, current_url)
+                      text_lower_for_check = text_for_check.lower()
+
+                      blocking_indicators = [
+                          "just a moment", "are you a robot", "prove your humanity",
+                          "captcha verification", "please enter in the characters you see below",
+                          "access is forbidden", "access to this page is forbidden", "challenge-platform",
+                          "we've detected unusual activity"
+                      ]
+                      is_blocked = any(b in text_lower_for_check for b in blocking_indicators)
+
+                      if len(text_for_check) > 150 and not is_blocked:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_check}\n"
+                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+
+                          await lancia_nugget_task(url, text_for_check)
+                      else:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
+                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
+
+                  except Exception as e:
+                      print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+
+                  await asyncio.sleep(random.uniform(4.0, 7.0))
+
+              try:
+                  await context.close()
+              except Exception:
+                  pass
+
+              # Salva subito il testo grezzo, indipendentemente dalle chiamate
+              # nugget ancora in corso.
+              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                  f.write(results)
+
+              if nugget_tasks:
+                  print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
+                  await asyncio.gather(*nugget_tasks, return_exceptions=True)
+
+              if nugget_retry_pool and key_pool is not None:
+                  print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
+                  retry_tasks = []
+                  for url, testo_markdown in nugget_retry_pool:
+                      async def _retry(url=url, testo_markdown=testo_markdown):
+                          async with nugget_semaphore:
+                              esito = await estrai_nuggets(
+                                  key_pool=key_pool,
+                                  source_url=url,
+                                  testo_markdown=testo_markdown,
+                                  topic=TARGET_TOPIC,
+                                  node_id=node_id
+                              )
+                          if esito:
+                              await salva_nuggets(esito)
+                          else:
+                              print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
+                      retry_tasks.append(asyncio.create_task(_retry()))
+                  await asyncio.gather(*retry_tasks, return_exceptions=True)
+
+              print(f"[NODO {node_id}] STEP 2 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+
+      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
+        if: always()
+        run: |
+          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
+          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
+          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
+          TAIL_PID=$!
+          
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+          
+          for i in {1..6}; do
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
+          done
+
+          touch output_node_1_step1.txt output_node_1_step2.txt \
+                output_node_2_step1.txt output_node_2_step2.txt \
+                output_node_3_step1.txt output_node_3_step2.txt \
+                output_node_4_step1.txt output_node_4_step2.txt \
+                output_node_5_step1.txt output_node_5_step2.txt \
+                output_node_6_step1.txt output_node_6_step2.txt
+
+          cat output_node_1_step1.txt output_node_1_step2.txt \
+              output_node_2_step1.txt output_node_2_step2.txt \
+              output_node_3_step1.txt output_node_3_step2.txt \
+              output_node_4_step1.txt output_node_4_step2.txt \
+              output_node_5_step1.txt output_node_5_step2.txt \
+              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
+
+      - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
+        if: always()
+        run: |
+          cat << 'EOF' > merge_nuggets.py
+          import json
+          import os
+          import glob
+
+          # Cerca TUTTI i file nuggets_node_*_step*.jsonl presenti nella working
+          # directory, indipendentemente da quanti nodi/step siano effettivamente
+          # arrivati alla fine. Questo rende il merge resiliente anche a
+          # interruzioni parziali del job: se il job muore a meta', questo script
+          # recupera comunque tutto cio' che era stato scritto fino a quel momento.
+          jsonl_files = sorted(glob.glob("nuggets_node_*_step*.jsonl"))
+
+          merged_nuggets = []
+          per_node_stats = {}
+
+          for filename in jsonl_files:
+              count = 0
+              corrotte = 0
+              try:
+                  with open(filename, "r", encoding="utf-8") as f:
+                      for riga in f:
+                          riga = riga.strip()
+                          if not riga:
+                              continue
+                          try:
+                              nugget = json.loads(riga)
+                              merged_nuggets.append(nugget)
+                              count += 1
+                          except json.JSONDecodeError:
+                              # Riga scritta a meta' (es. processo interrotto durante
+                              # il flush): la scartiamo senza far fallire tutto il merge.
+                              corrotte += 1
+              except Exception as e:
+                  print(f"Errore lettura {filename}: {e}", flush=True)
+
+              label = filename.replace("nuggets_node_", "").replace(".jsonl", "")
+              per_node_stats[label] = count
+              if corrotte:
+                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
+
+          # Deduplica su (fact, source_url) normalizzati
+          seen = set()
+          nuggets_deduplicati = []
+          for n in merged_nuggets:
+              fact_norm = (n.get("fact") or "").strip().lower()
+              url_norm = (n.get("source_url") or "").strip().lower()
+              key = (fact_norm, url_norm)
+              if key in seen:
+                  continue
+              seen.add(key)
+              nuggets_deduplicati.append(n)
+
+          confidence_counts = {"high": 0, "medium": 0, "low": 0}
+          for n in nuggets_deduplicati:
+              c = n.get("confidence", "low")
+              if c in confidence_counts:
+                  confidence_counts[c] += 1
+
+          output_finale = {
+              "stats": {
+                  "file_jsonl_trovati": len(jsonl_files),
+                  "totale_nugget_grezzi": len(merged_nuggets),
+                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
+                  "per_nodo": per_node_stats,
+                  "per_confidence": confidence_counts
+              },
+              "nuggets": nuggets_deduplicati
+          }
+
+          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+              json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+                f"(da {len(merged_nuggets)} grezzi, {len(jsonl_files)} file letti) "
+                f"salvati in nuggets_finale.json", flush=True)
+          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+          EOF
+          python -u merge_nuggets.py
+
+      - name: Upload Artifact Macchina 2 (Testo Grezzo)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nuggets_riconciliati
-          path: output/nuggets_riconciliati.json
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
 
-      - name: Archiviazione verified_facts.json
+      - name: Upload Artifact Nugget (JSON Strutturato)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verified_facts
-          path: output/verified_facts.json
-
-      - name: Archiviazione needs_human_review.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: needs_human_review
-          path: output/needs_human_review.json
+          name: Nuggets_Macchina2
+          path: nuggets_finale.json
