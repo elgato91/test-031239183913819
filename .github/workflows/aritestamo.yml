@@ -54,7 +54,7 @@ jobs:
           ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
           MAX_RETRY_TRANSIENT = 3
 
-          # Toleranze per il controllo numerico
+          # Parametri di tolleranza per il controllo anti-allucinazione deterministico
           NUMERIC_TOLERANCE_PCT = 0.02
           SIMILARITY_THRESHOLD = 0.60
           NUMBER_REGEX = re.compile(r"\d[\d.,]*\d|\d")
@@ -246,11 +246,19 @@ jobs:
                   prompt, label=label, expect_list=False
               )
 
-              if parsed is None or "macro_aree" not in parsed:
-                  print(f"{label}Clustering fallito, uso fallback per-categoria.", flush=True)
+              if parsed is None:
+                  print(f"{label}Clustering fallito (nessuna risposta), uso fallback per-categoria.", flush=True)
                   return _fallback_clustering_per_categoria(nuggets)
 
-              macro_aree_raw = parsed["macro_aree"]
+              # Gestione tollerante di ritorni strutturati come liste flat o oggetti avvolti
+              if isinstance(parsed, list):
+                  macro_aree_raw = parsed
+              elif isinstance(parsed, dict) and "macro_aree" in parsed:
+                  macro_aree_raw = parsed["macro_aree"]
+              else:
+                  print(f"{label}Clustering fallito (formato JSON imprevisto), uso fallback per-categoria.", flush=True)
+                  return _fallback_clustering_per_categoria(nuggets)
+
               assegnati = {}
               for area in macro_aree_raw:
                   nome = str(area.get("nome_macro_area", "")).strip() or "Altre informazioni"
@@ -291,7 +299,7 @@ jobs:
               if len(macro_aree) <= max_macro_aree:
                   return macro_aree
 
-              # Accorpamento deterministico delle macro-aree con meno nugget per garantire il tetto dei 15 blocchi
+              # Accorpamento deterministico dei raggruppamenti minori per evitare chiamate AI in eccesso
               macro_aree_ordinate = sorted(macro_aree, key=lambda a: len(a["nuggets"]))
               residuale_nome = "Altre informazioni"
               residuale_nuggets = []
@@ -383,8 +391,8 @@ jobs:
                   prompt, label=label, expect_list=False
               )
 
-              if parsed is None:
-                  print(f"{label}[RICONCILIAZIONE] Fallita per macro-area '{nome_macro_area}'. Fallback applicato.", flush=True)
+              if parsed is None or not isinstance(parsed, dict):
+                  print(f"{label}[RICONCILIAZIONE] Fallita o non strutturata per macro-area '{nome_macro_area}'. Fallback applicato.", flush=True)
                   return _fallback_nessuna_riconciliazione(nome_macro_area, nuggets)
 
               parsed.setdefault("macro_area", nome_macro_area)
@@ -472,7 +480,11 @@ jobs:
           def _raccogli_quote_originali(source_ids, id_map):
               testi = []
               for local_id in source_ids:
-                  nugget = id_map.get(local_id)
+                  try:
+                      lid = int(local_id)
+                  except (TypeError, ValueError):
+                      continue
+                  nugget = id_map.get(lid)
                   if nugget:
                       if nugget.get("quote_originale"):
                           testi.append(nugget["quote_originale"])
@@ -493,7 +505,11 @@ jobs:
               }
 
               for sid in source_ids:
-                  if sid not in id_map:
+                  try:
+                      sid_int = int(sid)
+                      if sid_int not in id_map:
+                          dettagli["source_ids_invalidi"].append(sid)
+                  except (TypeError, ValueError):
                       dettagli["source_ids_invalidi"].append(sid)
 
               if not source_ids or not testi_sorgente:
@@ -532,10 +548,19 @@ jobs:
 
               testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
 
+              invalid_ids = []
+              for sid in source_ids:
+                  try:
+                      sid_int = int(sid)
+                      if sid_int not in id_map:
+                          invalid_ids.append(sid)
+                  except (TypeError, ValueError):
+                      invalid_ids.append(sid)
+
               dettagli = {
                   "similarity_score": None,
                   "numeri_non_supportati": [],
-                  "source_ids_invalidi": [sid for sid in source_ids if sid not in id_map],
+                  "source_ids_invalidi": invalid_ids,
               }
 
               if not testi_sorgente:
@@ -613,19 +638,28 @@ jobs:
                           })
                   area["verified_facts"] = vf_verificati
 
-                  # Mappatura globale prima della cancellazione delle istanze locali
+                  # Mappatura sicura dagli ID locali a quelli globali (evita TypeError durante indicizzazione liste)
                   for fatto in area.get("fatti_consolidati", []):
-                      fatto["source_nugget_ids"] = [
-                          local_nuggets[lid].get("_global_id")
-                          for lid in fatto.get("source_nugget_ids", [])
-                          if 0 <= lid < len(local_nuggets)
-                      ]
+                      global_ids = []
+                      for lid in fatto.get("source_nugget_ids", []):
+                          try:
+                              lid_int = int(lid)
+                              if 0 <= lid_int < len(local_nuggets):
+                                  global_ids.append(local_nuggets[lid_int].get("_global_id"))
+                          except (TypeError, ValueError):
+                              continue
+                      fatto["source_nugget_ids"] = global_ids
+
                   for vf in area.get("verified_facts", []):
-                      vf["source_nugget_ids"] = [
-                          local_nuggets[lid].get("_global_id")
-                          for lid in vf.get("source_nugget_ids", [])
-                          if 0 <= lid < len(local_nuggets)
-                      ]
+                      global_ids = []
+                      for lid in vf.get("source_nugget_ids", []):
+                          try:
+                              lid_int = int(lid)
+                              if 0 <= lid_int < len(local_nuggets):
+                                  global_ids.append(local_nuggets[lid_int].get("_global_id"))
+                          except (TypeError, ValueError):
+                              continue
+                      vf["source_nugget_ids"] = global_ids
 
                   area.pop("_local_nuggets", None)
 
@@ -651,161 +685,4 @@ jobs:
                   val = os.environ.get(f"GEMINI_API_KEY_{idx}", "").strip()
                   if not val:
                       break
-                  keys.extend([k.strip() for k in val.split(",") if k.strip()])
-                  idx += 1
-              return keys
-
-          def _carica_nuggets(input_path):
-              with open(input_path, "r", encoding="utf-8") as f:
-                  data = json.load(f)
-
-              nuggets = []
-              if isinstance(data, dict) and "nuggets" in data:
-                  nuggets = data["nuggets"]
-              elif isinstance(data, list):
-                  nuggets = data
-              else:
-                  raise ValueError("Formato di input non valido.")
-
-              for i, nugget in enumerate(nuggets):
-                  nugget["_global_id"] = i
-              return nuggets
-
-          async def esegui_pipeline(input_path, output_dir):
-              os.makedirs(output_dir, exist_ok=True)
-              nuggets_grezzi = _carica_nuggets(input_path)
-
-              if not nuggets_grezzi:
-                  print("[ORCHESTRATOR] Nessun nugget in ingresso. Generazione output vuoti.")
-                  _scrivi_output_vuoto(output_dir)
-                  return
-
-              api_keys = _carica_api_keys()
-              if not api_keys:
-                  print("[ORCHESTRATOR] ERRORE: Chiavi API non configurate.")
-                  sys.exit(1)
-
-              gemma_client = GemmaAnalysisClient(api_key=api_keys[0], max_rpm=15)
-
-              print("[ORCHESTRATOR] Fase 1: Clustering dinamico agnostico...", flush=True)
-              macro_aree = await clusterizza_nuggets(gemma_client, nuggets_grezzi)
-              print(f"[ORCHESTRATOR] Create {len(macro_aree)} macro-aree.", flush=True)
-
-              print("[ORCHESTRATOR] Fase 2: Riconciliazione ad alta precisione con grounding...", flush=True)
-              macro_aree_riconciliate = []
-              for area in macro_aree:
-                  label = f"[{area['nome_macro_area']}] "
-                  risultato = await riconcilia_macro_area(
-                      gemma_client, area["nome_macro_area"], area["nuggets"], label=label
-                  )
-                  macro_aree_riconciliate.append(risultato)
-
-              print("[ORCHESTRATOR] Fase 3: Esecuzione controlli di coerenza numerica e testuale...", flush=True)
-              macro_aree_verificate, report_verifica = esegui_verifica_anti_allucinazione(macro_aree_riconciliate)
-
-              # Generazione output strutturati richiesti
-              reconciled_output = {
-                  "meta": {
-                      "totale_nugget_grezzi_input": len(nuggets_grezzi),
-                      "totale_macro_aree": len(macro_aree_verificate),
-                      "tetto_macro_aree": MAX_MACRO_AREE,
-                  },
-                  "macro_aree": macro_aree_verificate,
-              }
-
-              verified_facts_flat = []
-              for area in macro_aree_verificate:
-                  for vf in area.get("verified_facts", []):
-                      vf_out = dict(vf)
-                      vf_out["macro_area"] = area.get("macro_area")
-                      verified_facts_flat.append(vf_out)
-
-              with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
-                  json.dump(reconciled_output, f, indent=2, ensure_ascii=False)
-
-              with open(os.path.join(output_dir, "verified_facts.json"), "w", encoding="utf-8") as f:
-                  json.dump({"verified_facts": verified_facts_flat}, f, indent=2, ensure_ascii=False)
-
-              with open(os.path.join(output_dir, "needs_human_review.json"), "w", encoding="utf-8") as f:
-                  json.dump({"stats": report_verifica}, f, indent=2, ensure_ascii=False)
-
-              # Generazione del GitHub Step Summary Report
-              summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
-              if summary_file:
-                  with open(summary_file, "a", encoding="utf-8") as sf:
-                      sf.write("### 🏛️ Report di Consolidamento Agnostico Gemma 4\n\n")
-                      sf.write("| Metrica | Valore |\n")
-                      sf.write("| --- | --- |\n")
-                      sf.write(f"| Nugget Grezzi Analizzati | {len(nuggets_grezzi)} |\n")
-                      sf.write(f"| Macro-aree Individuate | {len(macro_aree_verificate)} |\n")
-                      sf.write(f"| Fatti Consolidati finali | {report_verifica['totale_fatti_consolidati']} |\n")
-                      sf.write(f"| Informazioni Verificate Estratte | {report_verifica['totale_verified_facts']} |\n")
-                      sf.write(f"| Elementi per Revisione Umana (needs_human_review) | {report_verifica['totale_non_verificati']} |\n\n")
-
-                      if report_verifica['needs_human_review']:
-                          sf.write("#### 🚨 Elementi con Discrepanze Rilevate (needs_human_review)\n")
-                          sf.write("| Tipo | Macro-Area | Elemento / Fatto | Dettaglio Deviazione |\n")
-                          sf.write("| --- | --- | --- | --- |\n")
-                          for item in report_verifica['needs_human_review']:
-                              if item["tipo"] == "fatto_consolidato":
-                                  det = f"Similarity: {item['verification_details'].get('similarity_score')} \| Numeri non supportati: {item['verification_details'].get('numeri_non_supportati')}"
-                                  sf.write(f"| Consolidato | {item['macro_area']} | {item['fact']} | {det} |\n")
-                              else:
-                                  det = f"Similarity: {item['verification_details'].get('similarity_score')} \| Numeri non supportati: {item['verification_details'].get('numeri_non_supportati')}"
-                                  sf.write(f"| Verified Fact | {item['macro_area']} | `{item['campo']}`: {item['valore']} | {det} |\n")
-
-          def _scrivi_output_vuoto(output_dir):
-              with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
-                  json.dump({"meta": {"totale_nugget_grezzi_input": 0}, "macro_aree": []}, f, indent=2)
-              with open(os.path.join(output_dir, "verified_facts.json"), "w", encoding="utf-8") as f:
-                  json.dump({"verified_facts": []}, f, indent=2)
-              with open(os.path.join(output_dir, "needs_human_review.json"), "w", encoding="utf-8") as f:
-                  json.dump({"stats": {"needs_human_review": []}}, f, indent=2)
-
-          def main():
-              parser = argparse.ArgumentParser(description="Pipeline di riconciliazione nugget editoriali.")
-              parser.add_argument("--input", required=True, help="Path al file JSON con i nugget grezzi.")
-              parser.add_argument("--output-dir", default="./output", help="Directory di output.")
-              args = parser.parse_args()
-              asyncio.run(esegui_pipeline(args.input, args.output_dir))
-
-          if __name__ == "__main__":
-              main()
-          EOF
-
-      - name: Esecuzione Consolidamento Nugget
-        run: |
-          INPUT_FILE="${{ github.event.inputs.input_file }}"
-          if [ -z "$INPUT_FILE" ]; then
-            INPUT_FILE="nuggets_finale.json"
-          fi
-          
-          if [ ! -f "$INPUT_FILE" ] && [ -f "nuggets_input.json" ]; then
-            INPUT_FILE="nuggets_input.json"
-          fi
-          
-          if [ -f "$INPUT_FILE" ]; then
-            echo "Avvio pipeline agnostica con input: $INPUT_FILE"
-            python deep_research_consolidator.py --input "$INPUT_FILE" --output-dir ./output
-          else
-            echo "ERRORE: File di input non trovato."
-            exit 1
-          fi
-
-      - name: Archiviazione nuggets_riconciliati.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: nuggets_riconciliati
-          path: output/nuggets_riconciliati.json
-
-      - name: Archiviazione verified_facts.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: verified_facts
-          path: output/verified_facts.json
-
-      - name: Archiviazione needs_human_review.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: needs_human_review
-          path: output/needs_human_review.json
+                  keys.exten
