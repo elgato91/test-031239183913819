@@ -6,6 +6,9 @@ on:
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TARGET_TOPIC: "Orvieto"
     steps:
 
       - name: Installazione Font di Sistema
@@ -23,7 +26,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -263,7 +266,221 @@ jobs:
               return markdown_text
           EOF
 
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
+      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live
+        run: |
+          cat << 'EOF' > nugget_extractor.py
+          """
+          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati
+          tramite Gemini Live API (gemini-3.1-flash-live-preview).
+
+          Segue lo stesso pattern del middleware filtro URL (url_screener.py):
+            - client.aio.live.connect con response_modalities=["AUDIO"] +
+              output_audio_transcription per ottenere testo dalla sessione Live
+            - timeout di sicurezza con asyncio.wait_for
+            - parsing JSON robusto con fallback su regex ```json ... ```
+            - nessuna eccezione propagata verso il chiamante: ogni fallimento
+              ritorna None, mai un'eccezione non gestita
+
+          Principio non-negoziabile (coerente con ARIA):
+            la "confidence" NON e' mai auto-riportata dal modello. Viene derivata
+            deterministicamente confrontando la quote_originale dichiarata dal
+            modello con il testo sorgente realmente scrapato (fuzzy match), esattamente
+            come il fuzzy recovery gia' usato in url_screener.py con difflib.
+          """
+
+          import json
+          import re
+          import asyncio
+          import difflib
+
+          from google import genai
+
+          MODEL_NAME = "gemini-3.1-flash-live-preview"
+
+          CONFIG_LIVE = {
+              "response_modalities": ["AUDIO"],
+              "output_audio_transcription": {}
+          }
+
+          # Timeout di sicurezza per singola chiamata Live (per-target, non per-chunk)
+          NUGGET_TIMEOUT_SECONDS = 40.0
+
+          NUGGET_PROMPT_TEMPLATE = """
+          Sei un estrattore di fatti (nugget) ad alta precisione per un sistema editoriale
+          di ricerca. Il tuo compito e' leggere il TESTO SORGENTE fornito ed estrarre
+          SOLO informazioni fattuali, dati concreti o affermazioni verificabili che
+          potrebbero essere utili per un articolo editoriale sul TARGET TOPIC indicato.
+
+          REGOLE:
+          1. Estrai SOLO fatti realmente presenti nel testo. Non inventare, non
+             dedurre, non completare informazioni mancanti.
+          2. Per ogni nugget, riporta in "quote_originale" la frase o porzione di
+             testo ESATTA (verbatim, non parafrasata) da cui hai estratto il fatto.
+             Questo campo verra' verificato programmaticamente contro il testo
+             sorgente: se non corrisponde, il nugget verra' scartato.
+          3. Classifica ogni nugget in una "category" tra: prezzo, orario, evento,
+             storia, geografia, recensione, dato_statistico, contatto, altro.
+          4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
+             array vuoto [].
+          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
+             generico privo di dati concreti.
+
+          Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
+          [
+            {{"fact": "...", "category": "...", "quote_originale": "..."}}
+          ]
+          Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
+
+          TARGET TOPIC:
+          {topic}
+
+          URL SORGENTE:
+          {source_url}
+
+          TESTO SORGENTE:
+          {testo}
+          """
+
+
+          def _estrai_json_da_risposta(raw_text):
+              """Estrae l'array JSON dalla risposta grezza, con fallback su regex.
+              Identico approccio a url_screener.py."""
+              if not raw_text:
+                  return None
+              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
+              json_str = match.group(1) if match else raw_text
+              try:
+                  parsed = json.loads(json_str)
+                  if isinstance(parsed, list):
+                      return parsed
+              except Exception:
+                  pass
+              return None
+
+
+          def _calcola_confidence(quote_originale, testo_sorgente):
+              """
+              Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello.
+
+              - high: la quote e' rintracciabile pressoche' verbatim nel testo sorgente
+              - medium: match parziale/fuzzy sopra soglia minima
+              - low: quote non riscontrabile nel testo sorgente (possibile allucinazione)
+              """
+              if not quote_originale or not testo_sorgente:
+                  return "low"
+
+              quote_norm = re.sub(r'\s+', ' ', quote_originale).strip().lower()
+              testo_norm = re.sub(r'\s+', ' ', testo_sorgente).strip().lower()
+
+              if not quote_norm:
+                  return "low"
+
+              # Match verbatim diretto (case-insensitive, whitespace-normalizzato)
+              if quote_norm in testo_norm:
+                  return "high"
+
+              # Fuzzy match: cerca la sottostringa piu' simile nel testo sorgente
+              # usando una finestra scorrevole di dimensione comparabile alla quote
+              finestra = len(quote_norm)
+              if finestra < 8 or len(testo_norm) < finestra:
+                  # Quote troppo corta o testo troppo piccolo per un confronto affidabile
+                  best_ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm).ratio()
+              else:
+                  best_ratio = 0.0
+                  step = max(1, finestra // 2)
+                  for i in range(0, len(testo_norm) - finestra + 1, step):
+                      frammento = testo_norm[i:i + finestra]
+                      ratio = difflib.SequenceMatcher(None, quote_norm, frammento).ratio()
+                      if ratio > best_ratio:
+                          best_ratio = ratio
+                      if best_ratio > 0.95:
+                          break
+
+              if best_ratio >= 0.85:
+                  return "high"
+              elif best_ratio >= 0.60:
+                  return "medium"
+              else:
+                  return "low"
+
+
+          async def estrai_nuggets(client, semaphore, source_url, testo_markdown, topic,
+                                    node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS):
+              """
+              Estrae nugget strutturati da un singolo testo gia' scrapato, tramite
+              Gemini Live. Non solleva mai eccezioni verso il chiamante: in caso di
+              errore o timeout ritorna None, e il chiamante decide come gestire il
+              retry (in Step 1/2: rimessa in coda per un secondo tentativo a fine nodo).
+
+              Ritorna: lista di dict nugget con schema
+                {fact, source_url, category, confidence, quote_originale}
+              oppure None in caso di fallimento totale della chiamata.
+              """
+              if not testo_markdown or len(testo_markdown.strip()) < 50:
+                  return []
+
+              label = f"[NODO {node_id}] " if node_id is not None else ""
+              payload = NUGGET_PROMPT_TEMPLATE.format(
+                  topic=topic,
+                  source_url=source_url,
+                  testo=testo_markdown
+              )
+
+              async with semaphore:
+                  accumulated_text = ""
+                  try:
+                      async def run_session():
+                          nonlocal accumulated_text
+                          async with client.aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
+                              await session.send_realtime_input(text=payload)
+                              async for response in session.receive():
+                                  if response.server_content and response.server_content.output_transcription:
+                                      if response.server_content.output_transcription.text:
+                                          accumulated_text += response.server_content.output_transcription.text
+                                  if response.server_content and response.server_content.turn_complete:
+                                      break
+
+                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
+
+                  except (asyncio.TimeoutError, TimeoutError):
+                      print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}. "
+                            f"Verra' ritentato a fine nodo.", flush=True)
+                      return None
+                  except Exception as e:
+                      print(f"{label}[NUGGET] Errore chiamata Live su {source_url}: {e}", flush=True)
+                      return None
+
+              parsed = _estrai_json_da_risposta(accumulated_text.strip())
+              if parsed is None:
+                  print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
+                        f"Output grezzo: {accumulated_text[:80]}...", flush=True)
+                  return None
+
+              nuggets = []
+              for item in parsed:
+                  if not isinstance(item, dict):
+                      continue
+                  fact = str(item.get("fact", "")).strip()
+                  quote = str(item.get("quote_originale", "")).strip()
+                  category = str(item.get("category", "altro")).strip() or "altro"
+                  if not fact:
+                      continue
+
+                  confidence = _calcola_confidence(quote, testo_markdown)
+
+                  nuggets.append({
+                      "fact": fact,
+                      "source_url": source_url,
+                      "category": category,
+                      "confidence": confidence,
+                      "quote_originale": quote
+                  })
+
+              print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
+              return nuggets
+          EOF
+
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, async + nugget extraction)
         run: |
           cat << 'EOF' > m2_step1.py
           import time
@@ -271,92 +488,195 @@ jobs:
           import random
           import os
           import json
-          from curl_cffi import requests
+          import asyncio
+          from curl_cffi import requests as curl_requests
           from extraction_utils import html_to_clean_markdown
+          from nugget_extractor import estrai_nuggets
+          from google import genai
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
-          if len(sys.argv) < 2: sys.exit(1)
+          # Numero massimo di sessioni Gemini Live concorrenti PER NODO.
+          # Tenuto deliberatamente basso: ogni sessione apre un WebSocket separato,
+          # e 6 nodi girano in parallelo a livello di job (6 x NUGGET_CONCURRENCY
+          # connessioni totali nel picco).
+          NUGGET_CONCURRENCY = 5
+
+          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          def verify_proxy_active(port, max_retries=5, delay=5):
-              test_session = requests.Session(impersonate="chrome120")
+
+          async def verify_proxy_active(port, max_retries=5, delay=5):
+              test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
-                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200: return True
-                  except: pass
-                  time.sleep(delay)
+                      resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200:
+                          await test_session.close()
+                          return True
+                  except Exception:
+                      pass
+                  await asyncio.sleep(delay)
+              await test_session.close()
               return False
 
+
           def validate_html(html, url, status_code):
-              if status_code >= 400: return False, f"Blocco HTTP {status_code}"
-              if not html or len(html.strip()) < 300: return False, "HTML vuoto"
-              if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
-              
+              if status_code >= 400:
+                  return False, f"Blocco HTTP {status_code}"
+              if not html or len(html.strip()) < 300:
+                  return False, "HTML vuoto"
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return True, ""
+
               low_html = html.lower()
               blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
                   "just a moment", "security verification", "please enable js", "enable javascript",
                   "are you a robot", "please wait for verification", "we've detected unusual activity",
                   "if you are not redirected", "unusual traffic from your computer network",
-                  "checking your browser", "prove your humanity", "captcha verification", 
+                  "checking your browser", "prove your humanity", "captcha verification",
                   "please enter in the characters you see below", "access to this page is forbidden",
                   "error 1020", "you have been blocked", "pardon our interruption",
-                  "se non vieni reindirizzato", "se hai problemi ad accedere", 
+                  "se non vieni reindirizzato", "se hai problemi ad accedere",
                   "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
               ]
-              
+
               for ind in blocking_indicators:
-                  if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
+                  if ind in low_html:
+                      return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
 
-          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
 
-          queue_file = f"/tmp/step1_queue_{node_id}.json"
-          if not os.path.exists(queue_file): sys.exit(0)
-          
-          with open(queue_file, "r") as f:
-              targets = json.load(f)
+          async def main():
+              if not await verify_proxy_active(ACTIVE_PORT):
+                  sys.exit(0)
 
-          results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
-          failed_targets = []
-          
-          session = requests.Session(impersonate="chrome120")
-          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-          session.headers.update({
-              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-          })
+              queue_file = f"/tmp/step1_queue_{node_id}.json"
+              if not os.path.exists(queue_file):
+                  sys.exit(0)
 
-          for url in targets:
-              print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
-              try:
-                  resp = session.get(url, timeout=12)
-                  is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-                  
-                  if is_ok:
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          from bs4 import BeautifulSoup
-                          soup = BeautifulSoup(resp.text, 'html.parser')
-                          text = soup.get_text(separator=' ', strip=True)
+              with open(queue_file, "r") as f:
+                  targets = json.load(f)
+
+              api_key = os.environ.get("GEMINI_API_KEY")
+              gemini_client = genai.Client(api_key=api_key) if api_key else None
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+
+              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
+              failed_targets = []
+              all_nuggets = []
+              # target il cui SCRAPING e' riuscito ma la cui NUGGET EXTRACTION e' fallita
+              # per timeout/errore: vengono ritentati una sola volta a fine nodo.
+              nugget_retry_pool = []  # lista di tuple (url, testo_markdown)
+
+              session = curl_requests.AsyncSession(impersonate="chrome120")
+              session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+              session.headers.update({
+                  "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+              })
+
+              nugget_tasks = []
+
+              async def lancia_nugget_task(url, testo_markdown):
+                  """Crea un task fire-and-forget per l'estrazione nugget, cosi' il
+                  loop di scraping puo' proseguire subito sul target successivo."""
+                  if gemini_client is None:
+                      return
+
+                  async def _run():
+                      esito = await estrai_nuggets(
+                          client=gemini_client,
+                          semaphore=nugget_semaphore,
+                          source_url=url,
+                          testo_markdown=testo_markdown,
+                          topic=TARGET_TOPIC,
+                          node_id=node_id
+                      )
+                      if esito is None:
+                          # Timeout o errore: candidato al retry a fine nodo
+                          nugget_retry_pool.append((url, testo_markdown))
                       else:
-                          text = html_to_clean_markdown(resp.text, url)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
-                      failed_targets.append(url)
-              except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
-                  failed_targets.append(url)
-              
-              time.sleep(random.uniform(1.0, 2.0))
+                          all_nuggets.extend(esito)
 
-          with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
-          with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
+                  task = asyncio.create_task(_run())
+                  nugget_tasks.append(task)
+
+              for url in targets:
+                  print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+                  try:
+                      resp = await session.get(url, timeout=12)
+                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+
+                      if is_ok:
+                          if any(site in url for site in DIAGNOSTIC_SITES):
+                              from bs4 import BeautifulSoup
+                              soup = BeautifulSoup(resp.text, 'html.parser')
+                              text = soup.get_text(separator=' ', strip=True)
+                          else:
+                              text = html_to_clean_markdown(resp.text, url)
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                          print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
+
+                          # Lancia l'estrazione nugget in background SENZA attendere:
+                          # il loop prosegue subito sul prossimo target.
+                          if not any(site in url for site in DIAGNOSTIC_SITES):
+                              await lancia_nugget_task(url, text)
+                      else:
+                          print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
+                          failed_targets.append(url)
+                  except Exception:
+                      print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                      failed_targets.append(url)
+
+                  await asyncio.sleep(random.uniform(1.0, 2.0))
+
+              await session.close()
+
+              # Attende il completamento di tutte le chiamate nugget lanciate in background
+              if nugget_tasks:
+                  print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
+                  await asyncio.gather(*nugget_tasks, return_exceptions=True)
+
+              # Secondo (e ultimo) tentativo per i target andati in timeout/errore
+              if nugget_retry_pool and gemini_client is not None:
+                  print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
+                  retry_tasks = []
+                  for url, testo_markdown in nugget_retry_pool:
+                      async def _retry(url=url, testo_markdown=testo_markdown):
+                          esito = await estrai_nuggets(
+                              client=gemini_client,
+                              semaphore=nugget_semaphore,
+                              source_url=url,
+                              testo_markdown=testo_markdown,
+                              topic=TARGET_TOPIC,
+                              node_id=node_id
+                          )
+                          if esito:
+                              all_nuggets.extend(esito)
+                          else:
+                              print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
+                      retry_tasks.append(asyncio.create_task(_retry()))
+                  await asyncio.gather(*retry_tasks, return_exceptions=True)
+
+              with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
+                  f.write(results)
+              with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
+                  json.dump(failed_targets, f)
+              with open(f"nuggets_node_{node_id}_step1.json", "w", encoding="utf-8") as f:
+                  json.dump(all_nuggets, f, indent=2, ensure_ascii=False)
+
+              print(f"[NODO {node_id}] STEP 1 completato. Nugget totali estratti: {len(all_nuggets)}", flush=True)
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
           EOF
 
       - name: Esecuzione Scraping Parallelo - STEP 1
@@ -407,7 +727,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato + nugget extraction)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -419,10 +739,15 @@ jobs:
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from extraction_utils import html_to_clean_markdown
+          from nugget_extractor import estrai_nuggets
+          from google import genai
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
+
+          NUGGET_CONCURRENCY = 5
+          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -440,7 +765,35 @@ jobs:
               with open(queue_file, "r") as f: targets = json.load(f)
               if not targets:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
+                  with open(f"nuggets_node_{node_id}_step2.json", "w", encoding="utf-8") as f: json.dump([], f)
                   return
+
+              api_key = os.environ.get("GEMINI_API_KEY")
+              gemini_client = genai.Client(api_key=api_key) if api_key else None
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+              all_nuggets = []
+              nugget_retry_pool = []  # (url, testo) andati in timeout/errore: un solo retry a fine nodo
+              nugget_tasks = []
+
+              async def lancia_nugget_task(url, testo_markdown):
+                  if gemini_client is None:
+                      return
+
+                  async def _run():
+                      esito = await estrai_nuggets(
+                          client=gemini_client,
+                          semaphore=nugget_semaphore,
+                          source_url=url,
+                          testo_markdown=testo_markdown,
+                          topic=TARGET_TOPIC,
+                          node_id=node_id
+                      )
+                      if esito is None:
+                          nugget_retry_pool.append((url, testo_markdown))
+                      else:
+                          all_nuggets.extend(esito)
+
+                  nugget_tasks.append(asyncio.create_task(_run()))
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
@@ -549,6 +902,9 @@ jobs:
                       if len(text_for_check) > 150 and not is_blocked:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_check}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+
+                          # Nugget extraction in background, non blocca il loop
+                          await lancia_nugget_task(url, text_for_check)
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
@@ -562,8 +918,36 @@ jobs:
               try: await context.close()
               except: pass
 
+              if nugget_tasks:
+                  print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
+                  await asyncio.gather(*nugget_tasks, return_exceptions=True)
+
+              if nugget_retry_pool and gemini_client is not None:
+                  print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
+                  retry_tasks = []
+                  for url, testo_markdown in nugget_retry_pool:
+                      async def _retry(url=url, testo_markdown=testo_markdown):
+                          esito = await estrai_nuggets(
+                              client=gemini_client,
+                              semaphore=nugget_semaphore,
+                              source_url=url,
+                              testo_markdown=testo_markdown,
+                              topic=TARGET_TOPIC,
+                              node_id=node_id
+                          )
+                          if esito:
+                              all_nuggets.extend(esito)
+                          else:
+                              print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
+                      retry_tasks.append(asyncio.create_task(_retry()))
+                  await asyncio.gather(*retry_tasks, return_exceptions=True)
+
               with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                   f.write(results)
+              with open(f"nuggets_node_{node_id}_step2.json", "w", encoding="utf-8") as f:
+                  json.dump(all_nuggets, f, indent=2, ensure_ascii=False)
+
+              print(f"[NODO {node_id}] STEP 2 completato. Nugget totali estratti: {len(all_nuggets)}", flush=True)
 
           if __name__ == "__main__":
               asyncio.run(main())
@@ -605,8 +989,78 @@ jobs:
               output_node_5_step1.txt output_node_5_step2.txt \
               output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
 
-      - name: Upload Artifact Macchina 2
+      - name: Merge Nugget Finale (JSON strutturato deduplicato)
+        run: |
+          cat << 'EOF' > merge_nuggets.py
+          import json
+          import os
+
+          TOTAL_NODES = 6
+
+          merged_nuggets = []
+          per_node_stats = {}
+
+          for i in range(1, TOTAL_NODES + 1):
+              for step in ["step1", "step2"]:
+                  filename = f"nuggets_node_{i}_{step}.json"
+                  if os.path.exists(filename):
+                      try:
+                          with open(filename, "r", encoding="utf-8") as f:
+                              nuggets = json.load(f)
+                              if isinstance(nuggets, list):
+                                  merged_nuggets.extend(nuggets)
+                                  per_node_stats[f"node_{i}_{step}"] = len(nuggets)
+                      except Exception as e:
+                          print(f"Errore lettura {filename}: {e}", flush=True)
+                          per_node_stats[f"node_{i}_{step}"] = 0
+
+          # Deduplica su (fact, source_url) normalizzati: evita nugget duplicati
+          # quando lo stesso fatto appare identico da estrazioni diverse.
+          seen = set()
+          nuggets_deduplicati = []
+          for n in merged_nuggets:
+              fact_norm = (n.get("fact") or "").strip().lower()
+              url_norm = (n.get("source_url") or "").strip().lower()
+              key = (fact_norm, url_norm)
+              if key in seen:
+                  continue
+              seen.add(key)
+              nuggets_deduplicati.append(n)
+
+          # Conteggio per livello di confidence, utile per audit rapido
+          confidence_counts = {"high": 0, "medium": 0, "low": 0}
+          for n in nuggets_deduplicati:
+              c = n.get("confidence", "low")
+              if c in confidence_counts:
+                  confidence_counts[c] += 1
+
+          output_finale = {
+              "stats": {
+                  "totale_nugget_grezzi": len(merged_nuggets),
+                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
+                  "per_nodo": per_node_stats,
+                  "per_confidence": confidence_counts
+              },
+              "nuggets": nuggets_deduplicati
+          }
+
+          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+              json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+                f"(da {len(merged_nuggets)} grezzi) salvati in nuggets_finale.json", flush=True)
+          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+          EOF
+          python -u merge_nuggets.py
+
+      - name: Upload Artifact Macchina 2 (Testo Grezzo)
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2
           path: output_macchina2_cdp.txt
+
+      - name: Upload Artifact Nugget (JSON Strutturato)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuggets_Macchina2
+          path: nuggets_finale.json
