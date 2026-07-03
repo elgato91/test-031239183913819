@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      TARGET_TOPIC: "Orvieto"
+      TARGET_TOPIC: "Come Sta Andando Apple?"
     steps:
 
       - name: Installazione Font di Sistema
