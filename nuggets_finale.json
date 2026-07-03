@@ -1,0 +1,1567 @@
+{
+  "stats": {
+    "totale_nugget_grezzi": 220,
+    "totale_nugget_deduplicati": 220,
+    "per_nodo": {
+      "node_1_step1": 35,
+      "node_1_step2": 16,
+      "node_2_step1": 43,
+      "node_2_step2": 17,
+      "node_3_step1": 28,
+      "node_3_step2": 0,
+      "node_4_step1": 18,
+      "node_4_step2": 18,
+      "node_5_step1": 24,
+      "node_5_step2": 0,
+      "node_6_step1": 21,
+      "node_6_step2": 0
+    },
+    "per_confidence": {
+      "high": 175,
+      "medium": 37,
+      "low": 8
+    }
+  },
+  "nuggets": [
+    {
+      "fact": "La costruzione del Duomo di Orvieto iniziò nel 1290 e proseguì fino alla seconda metà del 1500.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "La costruzione, iniziata nel 1290 per dare al Corporale del Miracolo di Bolsena un posto dove essere venerato, proseguì fino alla seconda metà del 1500."
+    },
+    {
+      "fact": "Il biglietto unico per Duomo, Tesoro della Cattedrale, Cappella di S. Brizio, Palazzi Papali e Chiesa S. Agostino costa 5 €.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "5 € biglietto unico per Duomo, Tesoro della Cattedrale, Cappella di S. Brizio, Palazzi Papali, Chiesa S. Agostino."
+    },
+    {
+      "fact": "Luca Signorelli completò gli affreschi della Cappella di San Brizio.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "Ci lavorarono per primi il Beato Angelico e Benozzo Gozzoli, che affrescarono parte dei soffitti, ma fu Luca Signorelli a completarla."
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio fu costruito nel 1527 su commissione di papa Clemente VII ed è profondo 62 metri.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "storia",
+      "confidence": "low",
+      "quote_originale": "Questa meraviglia di ingegneria fu costruita nel 1527 per volere di papa Clemente VII che affidò l’incarico a Giuliano da Sangallo il Giovane. [...] Il pozzo, profondo 62 metri, è interamente scavato nel tufo"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio dispone di doppie scale elicoidali indipendenti.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Il capolavoro del Sangallo furono le doppie scale elicoidali, ampie e indipendenti, una per la discesa e l’altra per la risalità."
+    },
+    {
+      "fact": "Il Pozzo della Cava raggiunge i 30 metri di profondità.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "Si scende a 30 metri di profondità e si passeggia nei cunicoli scavati nel tufo"
+    },
+    {
+      "fact": "La città sotterranea di Orvieto è composta da un labirinto di oltre 1200 grotte, cunicoli, pozzi e cisterne.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "geografia",
+      "confidence": "medium",
+      "quote_originale": "un complesso labirinto formato da oltre 1200 grotte, cunicoli, pozzi e cisterne."
+    },
+    {
+      "fact": "La Torre del Moro ha 250 scalini.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Per arrivare a godere di questa vista, però, dovete affrontare 250 gradini belli ripidi."
+    },
+    {
+      "fact": "La Fortezza di Albornoz ospita oggi i giardini pubblici.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Oggi ospita i giardini pubblici ed è il luogo ideale per una pausa con vista sulla valle circostante."
+    },
+    {
+      "fact": "L'Orvieto DOC bianco utilizza prevalentemente uva Grechetto.",
+      "source_url": "https://10cose.it/orvieto/cosa-vedere-orvieto",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "Tra i vini, la fa da padrone l’Orvieto DOC in cui, nel bianco, è protagonista l’uva del vitigno Grechetto"
+    },
+    {
+      "fact": "Il Duomo di Orvieto è una struttura gotica risalente al XIV secolo, nota per la facciata con mosaici e gli affreschi interni di Luca Signorelli.",
+      "source_url": "https://adventurebackpack.com/orvieto-itinerary",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "This magnificent Gothic structure features an intricate facade adorned with vibrant mosaics that depict biblical scenes. Take your time to marvel at the detailed frescoes by renowned artists such as Luca Signorelli inside the cathedral. ... the cathedral dates back to the 14th century."
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio, costruito nel XVI secolo da Antonio da Sangallo il Giovane, presenta una doppia scala a chiocciola e 248 gradini.",
+      "source_url": "https://adventurebackpack.com/orvieto-itinerary",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "visting the Pozzo di San Patrizio, a remarkable well built in the 16th century. This architectural marvel was designed by Antonio da Sangallo the Younger, featuring a double spiral staircase that allows for the descent of water carriers without meeting each other. Today, visitors can descend the 248 steps"
+    },
+    {
+      "fact": "La Necropoli Etrusca, situata appena fuori città, è un sito patrimonio mondiale dell'UNESCO.",
+      "source_url": "https://adventurebackpack.com/orvieto-itinerary",
+      "category": "geografia",
+      "confidence": "medium",
+      "quote_originale": "head to the Etruscan Necropolis located just outside the town, a UNESCO World Heritage site"
+    },
+    {
+      "fact": "La Torre del Moro è alta 47 metri e funge da torre dell'orologio.",
+      "source_url": "https://adventurebackpack.com/orvieto-itinerary",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "Torre del Moro, the clock tower that stands at 47 meters tall."
+    },
+    {
+      "fact": "In primavera, le temperature medie diurne si aggirano tra i 15°C e i 20°C.",
+      "source_url": "https://adventurebackpack.com/orvieto-itinerary",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "By April, daytime temperatures average around 15°C to 20°C (59°F to 68°F)"
+    },
+    {
+      "fact": "Il viaggio in treno da Roma a Orvieto dura circa 1,5 ore con un costo stimato tra i 10 e i 30 EUR.",
+      "source_url": "https://adventurebackpack.com/orvieto-itinerary",
+      "category": "prezzo",
+      "confidence": "medium",
+      "quote_originale": "Regular services from Rome to Orvieto take approximately 1.5 hours. ... Train from Rome to Orvieto | 10 – 30"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio fu scavato nel XVI secolo per risolvere la crisi idrica di Orvieto e raggiunge una profondità di oltre 50 metri.",
+      "source_url": "https://borghistoriciditalia.it/orvieto/orvieto-pozzo-di-san-patrizio",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Il Pozzo di San Patrizio ad Orvieto è uno dei più grandi pozzi d'Europa, scavato nel XVI secolo per risolvere la crisi idrica della città. Il pozzo, che raggiunge una profondità di oltre 50 metri"
+    },
+    {
+      "fact": "La costruzione del pozzo, commissionata dal cardinale Giovanni de' Medici, iniziò nel 1527 e si concluse nel 1537.",
+      "source_url": "https://borghistoriciditalia.it/orvieto/orvieto-pozzo-di-san-patrizio",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Il Pozzo di San Patrizio fu commissionato dal cardinale Giovanni de' Medici, futuro papa Leone X, per risolvere la crisi idrica della città. La costruzione del pozzo iniziò nel 1527 e si concluse nel 1537."
+    },
+    {
+      "fact": "Il pozzo è caratterizzato da una doppia scala a chiocciola progettata per il transito dei muli carichi d'acqua.",
+      "source_url": "https://borghistoriciditalia.it/orvieto/orvieto-pozzo-di-san-patrizio",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "è una vera e propria opera d'arte dell'architettura, caratterizzata da una doppia scala a chiocciola che permetteva ai muli di scendere e salire portando l'acqua."
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio si trova in Piazza Ranieri a Orvieto.",
+      "source_url": "https://borghistoriciditalia.it/orvieto/orvieto-pozzo-di-san-patrizio",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Il Pozzo di San Patrizio si trova in Piazza Ranieri a Orvieto, vicino alla chiesa di San Francesco."
+    },
+    {
+      "fact": "La Torre del Moro fu costruita nel 1200 al centro della città.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "La Torre del Moro fu costruita nel 1200 al centro della città"
+    },
+    {
+      "fact": "La torre è alta 47 metri e orientata verso i quattro punti cardinali.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Alta 47 metri e orientata quasi perfettamente secondo i quattro punti cardinali"
+    },
+    {
+      "fact": "L'orologio meccanico e le due campane civiche furono installati sulla torre a seguito dei restauri del 1866.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "A seguito dei restauri del 1866, sulla torre venne installato l’orologio meccanico e le due campane civiche."
+    },
+    {
+      "fact": "Il prezzo del biglietto intero è di 3.80 euro, quello ridotto è di 3.00 euro, mentre per i gruppi di almeno 15 persone il costo è di 2.00 euro.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Intero 3.80 euro Ridotto 3.00 euro gruppi (almeno 15 persone): 2.00 euro"
+    },
+    {
+      "fact": "La torre è accessibile tramite ascensore.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Presente ascensore."
+    },
+    {
+      "fact": "La torre si trova in Corso Cavour, 87, 05018 Orvieto TR, Italia.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Corso Cavour, 87, 05018 Orvieto TR, Italia"
+    },
+    {
+      "fact": "Nei mesi di marzo, aprile, settembre e ottobre la torre è aperta dalle 10:00 alle 19:00.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Marzo / aprile / settembre / ottobre: 10:00 - 19:00"
+    },
+    {
+      "fact": "Nei mesi di maggio e agosto l'orario di apertura è dalle 10:00 alle 20:00.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Maggio / Agosto: 10:00 - 20:00"
+    },
+    {
+      "fact": "Da novembre a febbraio l'orario di apertura è dalle 10:30 alle 16:30.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Novembre / Dicembre / Gennaio / Febbraio: 10:30 - 16:30"
+    },
+    {
+      "fact": "Il numero di telefono per informazioni e biglietti è 0763.344567.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "Per info e biglietti : 0763.344567"
+    },
+    {
+      "fact": "L'orario delle visite guidate è tutti i giorni alle 11,00 - 12,15 - 16,00 - 17,15.",
+      "source_url": "https://orvietounderground.it",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Tutti i giorni  \nore 11,00 - 12,15 - 16,00 - 17,15"
+    },
+    {
+      "fact": "La partenza delle visite è da Piazza Duomo n.23.",
+      "source_url": "https://orvietounderground.it",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "PARTENZA\n\nPiazza Duomo n.23"
+    },
+    {
+      "fact": "I sotterranei di Orvieto sono stati realizzati in circa 2500 anni di scavi.",
+      "source_url": "https://orvietounderground.it",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "i sotterranei di Orvieto, realizzati dagli antichi abitanti in circa 2500 anni di ininterrotti scavi."
+    },
+    {
+      "fact": "La visita guidata ha una durata di un'ora.",
+      "source_url": "https://orvietounderground.it",
+      "category": "evento",
+      "confidence": "high",
+      "quote_originale": "Un viaggio di un’ora alla scoperta di una millenaria, sorprendente ed inattesa “Città Sotterranea”"
+    },
+    {
+      "fact": "Orvieto Underground fa parte della rete di convenzioni “Patrimoni Condivisi” con Orte Sotterranea, Narni Sotterranea, Rieti Sotterranea e altri siti.",
+      "source_url": "https://orvietounderground.it",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Nasce ufficialmente la rete di convenzioni “Patrimoni Condivisi”.  \n**Orte Sotterranea, Narni Sotterranea, Rieti Sotterranea, Orvieto Underground, la Torre dell’Orologio di Bassano in Teverina, il Parco delle Cascate di Chia, il Bunker Soratte e la Pro Loco di Rignano Flaminio** promuovono insieme un turismo consapevole"
+    },
+    {
+      "fact": "Orvieto sorge sopra una rupe tufacea.",
+      "source_url": "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "la singolarità di Orvieto sia nell’ adagiarsi sopra un’inespugnabile rupe tufacea"
+    },
+    {
+      "fact": "La Cattedrale di Orvieto è dedicata alla Madonna Assunta.",
+      "source_url": "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "la Cattedrale dedicata alla Madonna Assunta"
+    },
+    {
+      "fact": "Dalla sommità della Torre del Moro si ha una vista a 360 gradi.",
+      "source_url": "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Torre del Moro, dalla cui sommità si apre una vista a 360 gradi"
+    },
+    {
+      "fact": "Dalla Torre del Moro si possono vedere l'antico quartiere di San Giovenale, palazzi medievali, chiese e piazze.",
+      "source_url": "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "consente di ammirare a volo d’uccello gli antichi Palazzi dei poteri medievali, le chiese, le piazze e il dedalo di vicoli del quartiere di San Giovenale"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio fu progettato dall'architetto Antonio da Sangallo.",
+      "source_url": "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Pozzo di San Patrizio, geniale opera dell’architetto Antonio da Sangallo"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio ha una doppia scala elicoidale con 248 gradini per raggiungere l'acqua.",
+      "source_url": "https://assoguide.it/it/st_location/le-nostre-citta/orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "concepì una doppia scala elicoidale intagliata nella roccia: 248 gradini per arrivare all’acqua di falda"
+    },
+    {
+      "fact": "Il Pozzo della Cava si trova in Via della Cava, 28, 05018 Orvieto (TR).",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Via della Cava, 28, 05018 Orvieto TR"
+    },
+    {
+      "fact": "Il sito è chiuso il lunedì e aperto dalle 10 alle 20 dal martedì alla domenica.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Lunedì\n\nChiuso\n\nMartedì\n\n10–20\n\nMercoledì\n\n10–20\n\nGiovedì\n\n10–20\n\nVenerdì\n\n10–20\n\nSabato\n\n10–20\n\nDomenica\n\n10–20"
+    },
+    {
+      "fact": "La struttura è un museo archeologico e attrazione turistica.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Museo\n\nMuseo archeologico\n\nAttrazione turistica"
+    },
+    {
+      "fact": "Il percorso è autoguidato con pannelli informativi e opuscoli.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "non ci sono guide ma fogli con descrizione delle varie sale."
+    },
+    {
+      "fact": "I cani sono ammessi alla visita.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Io e mio marito siamo entrati insieme alla mia cagnolina Joey"
+    },
+    {
+      "fact": "La visita non è accessibile in carrozzina a causa dei gradini.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "non visitabile con carrozzina per via degli scalini."
+    },
+    {
+      "fact": "Il pozzo è profondo 36 metri.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "Profondo 36 metri, si visita facilmente."
+    },
+    {
+      "fact": "Il sito ospita resti etruschi, medievali e rinascimentali, inclusi resti di forni per ceramica.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "si trova in un complesso di nove grotte ricche di ritrovamenti etruschi, medievali e rinascimentali tra cui spiccano i resti di due fornaci per la produzione di ceramica."
+    },
+    {
+      "fact": "Nel periodo natalizio viene allestito un presepe all'interno del pozzo.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "evento",
+      "confidence": "high",
+      "quote_originale": "Durante il periodo natalizio viene allestito anche un presepe molto caratteristico."
+    },
+    {
+      "fact": "Il numero di telefono è 0763 342373 e il sito web è https://www.pozzodellacava.it/.",
+      "source_url": "https://altraopinione.org/museo/orvieto/pozzo-della-cava",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "Numero di telefonotelf:0763 342373\n\nSito webhttps://www.pozzodellacava.it/"
+    },
+    {
+      "fact": "Orvieto si trova in Umbria, vicino al confine con il Lazio.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Orvieto è una stupenda città che si trova nel cuore dell’Italia, in Umbria – poco lontano dal confine con il Lazio."
+    },
+    {
+      "fact": "Il biglietto della funicolare costa 1,30€ per gli adulti ed è gratuito per i bambini fino a 6 anni.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Nel biglietto della funicolare (adulti 1,30€; bambini fino a 6 anni gratis)"
+    },
+    {
+      "fact": "La costruzione del Duomo di Orvieto, Cattedrale di Santa Maria Assunta, iniziò nel 1290 e durò oltre 200 anni.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Il Duomo di Orvieto è la Cattedrale di Santa Maria Assunta, costruita a partire dal 1290 per volere di papa Niccolò IV. Per la sua costruzione si impiegarono oltre 200 anni."
+    },
+    {
+      "fact": "La Orvieto sotterranea conta circa 1.200 caverne collegate da gallerie.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "Si tratta di una vera e propria città sotterranea. Del resto, parliamo di circa 1.200 caverne, collegate da innumerevoli gallerie."
+    },
+    {
+      "fact": "L'ingresso al Pozzo di San Patrizio costa 5€, gratuito per bambini fino a 6 anni.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "pozzo di San Patrizio (ingresso 5€; bambini fino a 6 anni gratis)"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio è profondo quasi 60 metri e conta 250 scalini.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "dato_statistico",
+      "confidence": "medium",
+      "quote_originale": "Il pozzo è profondo quasi 60 metri, è stato costruito nel 1527"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio ha 250 scalini.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "scendere – e poi risalire! – i 250 scalini che compongono le vie del pozzo"
+    },
+    {
+      "fact": "La Fortezza di Albornoz fu costruita nel 1364.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "La fortezza fu costruita nel 1364"
+    },
+    {
+      "fact": "La Fortezza di Albornoz oggi ospita i giardini pubblici di Orvieto.",
+      "source_url": "https://4viteinvacanza.it/itinerari/orvieto-con-i-bambini",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Oggi il luogo ospita i giardini pubblici di Orvieto."
+    },
+    {
+      "fact": "La Trattoria del Moro Aronne a Orvieto è un'azienda a conduzione familiare che propone i 'nidi', una lasagna con pecorino e miele.",
+      "source_url": "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
+      "category": "recensione",
+      "confidence": "high",
+      "quote_originale": "Opening night we always visit Trattoria del Moro Aronne. Like many restaurants in Orvieto, this is a family run establishment. My favorite here is the nidi, a lasagna noodle filled with pecorino cheese and honey."
+    },
+    {
+      "fact": "Il Ristorante Il Giardino da Giovanni si è trasferito vicino alla piazza del mercato locale.",
+      "source_url": "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "he expanded and moved to a beautiful location close to where the local market is held."
+    },
+    {
+      "fact": "Il menu di Giovanni include tagliatelle con pasta di cacao, mascarpone e prosciutto, oltre a bistecca con pistacchi e patate al forno con rosmarino e salvia.",
+      "source_url": "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
+      "category": "recensione",
+      "confidence": "low",
+      "quote_originale": "My pick here is Giovanni’s tagliatelle, cacao paste with mascarpone cheese and prosciutto. ... Giovanni has the most delicious steak with pistachios, which you must have with the baked potatoes seasoned with rosemary and sage."
+    },
+    {
+      "fact": "A Orvieto si tengono cene con degustazione di olio e vino presso Bartolomei e corsi di cucina con lo Chef Lorenzo in fattoria.",
+      "source_url": "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
+      "category": "evento",
+      "confidence": "low",
+      "quote_originale": "olive oil and wine pairing dinner at Bartolomei, and our cooking class with Chef Lorenzo at his farm,"
+    },
+    {
+      "fact": "Montanucci offre pranzi caldi e freddi.",
+      "source_url": "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
+      "category": "recensione",
+      "confidence": "high",
+      "quote_originale": "hot and cold lunch offerings from Montanuccis"
+    },
+    {
+      "fact": "Il Bar Duomo propone pizza con salsiccia e patatine.",
+      "source_url": "https://adventuresinitaly.ca/2024/05/02/a-food-tour-of-orvieto",
+      "category": "recensione",
+      "confidence": "high",
+      "quote_originale": "pizza with sausage and fries at Bar Duomo"
+    },
+    {
+      "fact": "La denominazione d'origine controllata “Orvieto” è stata approvata con D.P.R. del 07.08.1971.",
+      "source_url": "https://assovini.it/italia/umbria/item/525-orvieto-doc",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Approvato con D.P.R. 07.08.1971, G.U. 219 del 31.08.1971"
+    },
+    {
+      "fact": "Il disciplinare prevede le tipologie Secco, Abboccato, Amabile, Dolce, Superiore (anche Vendemmia tardiva) e Muffa nobile.",
+      "source_url": "https://assovini.it/italia/umbria/item/525-orvieto-doc",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "1. Secco\n2. Abboccato\n3. Amabile\n4. Dolce\n5. Superiore, anche\r\nVendemmia tardiva\n6. Muffa nobile"
+    },
+    {
+      "fact": "Il vino Orvieto DOC deve contenere almeno il 60% di vitigni Trebbiano Toscano (o Procanico) e Grechetto.",
+      "source_url": "https://assovini.it/italia/umbria/item/525-orvieto-doc",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "=> 60% Vitigni\r\nTrebbiano Toscano (o Procanico) e Grechetto;"
+    },
+    {
+      "fact": "La zona di produzione del vino DOC Orvieto comprende comuni nelle province di Viterbo e Terni.",
+      "source_url": "https://assovini.it/italia/umbria/item/525-orvieto-doc",
+      "category": "geografia",
+      "confidence": "medium",
+      "quote_originale": "La Zona di Produzione del Vino DOC Orvieto\r\nè localizzata in:\r\n\r\n- provincia di Viterbo\r\n\r\n- provincia di Terni"
+    },
+    {
+      "fact": "La Sottozona Orvieto Classico comprende la zona storica intorno alla Rupe, nei pressi della città di Orvieto.",
+      "source_url": "https://assovini.it/italia/umbria/item/525-orvieto-doc",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "La Sottozona Orvieto Classico\r\ncomprende la zona storica intorno alla Rupe, ristretta della Valle del Paglia, in prossimità della città di Orvieto."
+    },
+    {
+      "fact": "Il Duomo di Orvieto osserva orari di apertura differenziati durante l'anno, ad esempio da Aprile a Settembre è aperto dalle 9:30 alle 19:00 nei giorni feriali.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Da Aprile a Settembre\n9:30 – 19:00"
+    },
+    {
+      "fact": "Il prezzo del biglietto singolo per il Duomo è di €8,00, ma è incluso in Card Unica.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Prezzo del biglietto:\n\n### ~~€8,00~~ Incluso"
+    },
+    {
+      "fact": "Il Labirinto di Adriano è visitabile giornalmente 6 giorni su 7, con chiusura il lunedì.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Visite giornaliere 6 giorni su 7 escluso il lunedì"
+    },
+    {
+      "fact": "Il Museo Etrusco “Claudio Faina” si trova in Piazza Duomo, 29.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Museo Etrusco “Claudio Faina”\nPiazza Duomo, 29"
+    },
+    {
+      "fact": "Orvieto Underground propone visite guidate in Italiano e Inglese.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "evento",
+      "confidence": "high",
+      "quote_originale": "Visite in Italiano e Inglese."
+    },
+    {
+      "fact": "Dal 29 settembre 2025 l'area archeologica della Necropoli etrusca di Crocifisso del Tufo subisce modifiche nel percorso di visita.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "evento",
+      "confidence": "high",
+      "quote_originale": "Dal 29 settembre 2025, per permettere interventi di miglioramento per la riqualificazione e l’accessibilità, l’area archeologica della Necropoli etrusca di Crocifisso del Tufo subirà modifiche nel percorso di visita."
+    },
+    {
+      "fact": "Il Pozzo della Cava è chiuso annualmente dall'8 al 31 gennaio 2024.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Chiusura annuale dal 08 al 31/01/2024"
+    },
+    {
+      "fact": "L'orario di apertura del Pozzo di San Patrizio nei mesi di Maggio, Giugno, Luglio e Agosto è dalle 09:00 alle 19:30.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Maggio – Giugno\nLuglio – Agosto\nDalle 09:00 alle 19:30"
+    },
+    {
+      "fact": "L'ultimo ingresso alla Torre del Moro è consentito 30 minuti prima della chiusura.",
+      "source_url": "https://cartaunica.it/cosa-vedere-ad-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Ultimo ingresso 30 minuti prima della chiusura."
+    },
+    {
+      "fact": "Orvieto sorge sopra un’imponente rupe di tufo.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "“Alta” perché sorge sopra un’imponente rupe di tufo"
+    },
+    {
+      "fact": "La costruzione del Duomo di Orvieto iniziò nel 1290 per custodire la reliquia del Miracolo di Bolsena.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Costruito a partire dal 1290, fu pensato per custodire la reliquia del Miracolo di Bolsena."
+    },
+    {
+      "fact": "La Cappella di San Brizio nel Duomo fu affrescata da Beato Angelico e completata da Luca Signorelli.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Quest’ultima, affrescata da Beato Angelico e completata da Luca Signorelli"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio fu costruito nel Cinquecento e scende per oltre 60 metri nella rupe.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Costruito nel Cinquecento per garantire l’approvvigionamento d’acqua in caso di assedio, scende per oltre 60 metri nel cuore della rupe tufacea."
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio dispone di doppie scale elicoidali progettate per non far incrociare chi sale e chi scende.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Le sue doppie scale elicoidali, pensate per far salire e scendere uomini e muli senza incrociarsi, rappresentano un esempio unico di ingegneria rinascimentale."
+    },
+    {
+      "fact": "Sotto Orvieto esiste una rete di gallerie, cunicoli, pozzi, cantine, cave e cisterne scavate nel tufo.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Gallerie, cunicoli, pozzi, cantine, cave e antiche cisterne formano un intricato labirinto che oggi è possibile esplorare attraverso un percorso guidato."
+    },
+    {
+      "fact": "Tra i monumenti di Orvieto ci sono la Torre del Moro, la Fortezza dell’Albornoz e il Museo dell’Opera del Duomo.",
+      "source_url": "https://conventosanbartolomeo.com/un-giorno-a-orvieto-alla-scoperta-della-citta-sospesa-tra-cielo-e-tufo",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "la Torre del Moro, da cui godere una vista impareggiabile sulla città; la Fortezza dell’Albornoz, oggi giardino pubblico con affaccio sulla valle; il Museo dell’Opera del Duomo, scrigno silenzioso di capolavori pittorici."
+    },
+    {
+      "fact": "Il Pozzo della Cava è un complesso archeologico situato nella parte più antica del quartiere medievale di Orvieto sotterranea.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "geografia",
+      "confidence": "medium",
+      "quote_originale": "Una discesa in un affascinante angolo della Orvieto sotterranea che si snoda sotto le vie e le case della parte più antica del quartiere medievale"
+    },
+    {
+      "fact": "Dal 2023 il Pozzo della Cava è inserito nella Rete Mondiale dei Musei dell’Acqua dell’UNESCO.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "Inserito dal 2023 nella prestigiosa Rete Mondiale dei Musei dell’Acqua dell’UNESCO"
+    },
+    {
+      "fact": "Il sito archeologico comprende, tra le altre cose, fornaci di ceramica, ritrovamenti medievali, resti etruschi e la grotta grande.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "storia",
+      "confidence": "low",
+      "quote_originale": "· le fornaci di ceramica\n- · i ritrovamenti medievali\n- · i resti etruschi\n- · la grotta grande"
+    },
+    {
+      "fact": "Il biglietto di ingresso intero al Pozzo della Cava ha un costo di € 5, mentre quello ridotto è di € 3,50.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "€ 5 intero\n€ 3,50 ridotto"
+    },
+    {
+      "fact": "La Carta Orvieto, valida un anno e include tutti i musei e monumenti, costa € 35 intero e € 25 ridotto.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Tutti i musei e i monumenti di Orvieto in un unico biglietto - valido un anno\n\n[CartaUnica.it]\n\n€ 35 intero\n€ 25 ridotto"
+    },
+    {
+      "fact": "La 37a edizione del Presepe nel Pozzo si svolge dal 23 dicembre 2026 al 10 gennaio 2027.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "evento",
+      "confidence": "high",
+      "quote_originale": "Dal 23 dicembre 2026 al 10 gennaio 2027"
+    },
+    {
+      "fact": "La sorgente del Pozzo della Cava fu riscoperta il 25 aprile del 1996.",
+      "source_url": "https://pozzodellacava.it",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "Era il 25 aprile del 1996 quando gli addetti allo svuotamento del Pozzo della Cava [...] trovarono la sorgente"
+    },
+    {
+      "fact": "La ZTL di Orvieto è divisa in due aree differenti con regole diverse.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Orvieto restricted area (ZTL Orvieto) is divided into two different areas with different rules."
+    },
+    {
+      "fact": "L'accesso alla ZTL di Orvieto è controllato da 5 telecamere.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Access to Orvieto ZTL is watched by 5 cameras"
+    },
+    {
+      "fact": "Il varco di C.so Cavour / P.zza Cahen ha orari di funzionamento specifici che variano in base al periodo dell'anno (1° ottobre - 31 marzo e 1° aprile - 30 settembre) e ai giorni feriali/festivi.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "C.so Cavour / P.zza Cahen gate works\n\n- From 1° October to 31 March on Not working days and on Winter Umbria jazz : \n  - 10:00-16:00\n  - 17:00-22:30\n- From 1° April to 30 September every day :\n  - 10:00-16:00\n  - 17:00-22:30"
+    },
+    {
+      "fact": "I varchi di C.so Cavour / Teatro Mancinelli, C.so Cavour / P.zza della Repubblica e P.zza del Popolo / Via di Piazza del Popolo / Via Vitozzi sono attivi tutti i giorni 24 ore su 24.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "orario",
+      "confidence": "medium",
+      "quote_originale": "C.so Cavour / Teatro Mancinelli gate works every day from 00.00 - 24.00;\n\nC.so Cavour / P.zza della Repubblica gate works every day from 00.00 - 24.00\n\nP.zza del Popolo / Via di Piazza del Popolo / Via Vitozzi gate works every day from 00.00 - 24.00."
+    },
+    {
+      "fact": "Anche per ciclomotori e scooter è necessaria l'autorizzazione per accedere alla ZTL di Orvieto.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "any kind of vehicles can't enter without any authorization, even motorcycles and scooters must be allowed to enter."
+    },
+    {
+      "fact": "Residenti, veicoli di emergenza, taxi e ospiti degli hotel sono tra le categorie autorizzate ad entrare nella ZTL.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "The following kinds of people can enter in Orvieto ZTL :\n\n- Residents;\n- Police and Emergency vehicles;\n- Public utilities;\n- local administrations services,\n- ATC;\n- Taxi;\n- Delivery medicinal goods;\n- Visiting Doctors;\n- Hotel guests."
+    },
+    {
+      "fact": "L'orario per il carico e scarico merci per veicoli autorizzati è dalle 06:00 alle 10:00 e dalle 16:00 alle 17:00.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Authorized vehicles can deliver goods in Orvieto ZTL:from 06,00 to 10,00 and from 16,00 to 17,00."
+    },
+    {
+      "fact": "I veicoli per disabili possono sempre entrare, ma devono informare la Polizia Locale entro 72 ore se privi di previa autorizzazione.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "Vehicles for disabled people can always enter in Orvieto ZTL.\n If they need to enter without any authorization they have to inform Local Police within 72 hours since you entered."
+    },
+    {
+      "fact": "Gli ospiti degli hotel possono accedere per carico/scarico bagagli e l'hotel deve comunicare la targa alla Polizia Locale.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Hotel guests can enter in Orvieto ZTL for loading and unloading luggage.\n It is up the hotel to say car plate to Local Police."
+    },
+    {
+      "fact": "L'ufficio competente è la Polizia Locale di Orvieto, situata in Via Garibaldi 8.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/Umbria_en/orvieto.html",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "Local Police Orvieto\n\n8, Via Garibaldi - 05018 Orvieto (TR)"
+    },
+    {
+      "fact": "Il Museo Faina si trova nell'omonimo palazzo nel centro di Orvieto, in provincia di Terni.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Il Museo Faina si trova nell’omonimo palazzo in centro ad Orvieto, in provincia di Terni."
+    },
+    {
+      "fact": "Il Museo è stato fondato nel 1864, inizialmente come collezione privata.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Il Museo è stato fondato nel 1864, inizialmente come collezione privata"
+    },
+    {
+      "fact": "La collezione è stata donata al Comune di Orvieto nel 1954.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "poi donata al Comune di Orvieto nel 1954."
+    },
+    {
+      "fact": "Il museo ospita una collezione archeologica di età greca, etrusca e romane.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Il museo presenta una collezione archeologica di età greca, etrusca e romane."
+    },
+    {
+      "fact": "Sono conservati corredi funebri, un monetiere, collezioni numismatiche e vasi attici a figure rosse e nere.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "In particolare sono conservati corredi funebri, un monetiere, delle collezioni numismatiche e una raccolta di vasi attici a figure rosse e nere."
+    },
+    {
+      "fact": "Il piano terra ospita i frontoni del Tempio del Belvedere di Orvieto, il cippo a forma di testa di guerriero dalla necropoli del Crocifisso del Tufo e la Venere di Cannicella.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Il piano terra ospita i frontoni del Tempio del Belvedere di Orvieto, il cippo a forma di testa di guerriero che proviene dalla necropoli del Crocifisso del Tufo e la Venere di Cannicella, anch’essa proveniente dalla Necropoli di Cannicella."
+    },
+    {
+      "fact": "Il museo è aperto dal martedì alla domenica, dalle 10:00 alle 18:00, e chiuso il lunedì.",
+      "source_url": "https://artsupp.com/it/orvieto/musei/museo-faina",
+      "category": "orario",
+      "confidence": "medium",
+      "quote_originale": "lunedì | Chiuso | martedì | 10:00 - 18:00 | mercoledì | 10:00 - 18:00 | giovedì | 10:00 - 18:00 | venerdì | 10:00 - 18:00 | sabato | 10:00 - 18:00 | domenica | 10:00 - 18:00 |"
+    },
+    {
+      "fact": "La Torre del Moro è situata nel centro storico di Orvieto, all'incrocio tra Corso Cavour, Via del Duomo e Via della Costituente, adiacente al Palazzo dei Sette.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "geografia",
+      "confidence": "low",
+      "quote_originale": "La *Torre del Moro* si trova nel centro storico di Orvieto, a poca distanza dal celebre ed imponente Duomo di Orvieto, precisamente tra Corso Cavour, Via del Duomo e Via della Costituente, accanto al Palazzo dei Sette"
+    },
+    {
+      "fact": "La costruzione della Torre risale al XIII secolo, intorno all'anno 1200.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "La Torre viene costruita nel XIII secolo (intorno al 1200)"
+    },
+    {
+      "fact": "Originariamente nota come “Torre del Papa”, assunse il nome attuale nel XVI secolo da Raffaele di Sante, detto il Moro.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "In origine la Torre era anche conosciuta con il nome di “*Torre del Papa*” [...] e successivamente nel XVI secolo prende il nome di *Torre del Moro,* per tale Raffaele di Sante, detto il Moro"
+    },
+    {
+      "fact": "La Torre ha un'altezza di quarantasette metri.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "La Torre raggiunge l’altezza di quarantasette metri"
+    },
+    {
+      "fact": "Sulla cima si trovano un orologio della fine del XIX secolo e due campane, posizionate lì nel XIX secolo.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "sulla sommità si trova un orologio risalente alla fine del XIX secolo e due campane [...] ed entrambe vengono collocate nella *Torre del Moro* nel XIX secolo."
+    },
+    {
+      "fact": "La campana più grande risale al XIV secolo e apparteneva al Palazzo del Popolo; la più piccola proviene dalla Torre di Sant’Andrea.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "la prima, più grande, risale al XIV secolo e faceva parte del Palazzo del Popolo, mentre la seconda, di dimensioni più piccole, faceva parte della Torre di Sant’Andrea"
+    },
+    {
+      "fact": "Alla base della Torre è presente una targa con versi del Purgatorio di Dante Alighieri riguardanti le lotte tra le famiglie Monaldeschi e Filippeschi.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "storia",
+      "confidence": "low",
+      "quote_originale": "Alla base della struttura, all’angolo con Via della Costituente, si trova una targa incisa sul lato della *Torre del Moro* che recita: [...] Si tratta dei versi del Purgatorio della Divina Commedia di Dante Alighieri che afferma la continua lotta interna tra la famiglia dei Monaldeschi contro la famiglia Filippeschi"
+    },
+    {
+      "fact": "È consentito l'accesso per salire in cima alla Torre.",
+      "source_url": "https://aletes.it/torre-del-moro-nel-centro-di-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "E’ possibile salire sulla sommità della *Torre del Moro*"
+    },
+    {
+      "fact": "I primi insediamenti a Orvieto risalgono al IX secolo a.C. e si localizzarono in grotte tufacee.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "i primi insediamenti risalgono al IX° secolo a.C. e si localizzarono all’interno delle grotte tufacee"
+    },
+    {
+      "fact": "La costruzione del Duomo di Orvieto iniziò nel 1290.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Iniziato nel 1290"
+    },
+    {
+      "fact": "La facciata del Duomo, attribuita a Lorenzo Maitani, è larga 40 metri e alta 52 metri.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "l’elegante fronte, largo 40 metri ed alto 52 m"
+    },
+    {
+      "fact": "Il Reliquiario del Corporale fu eseguito nel 1337-1338 da Ugolino di Vieri.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "un celebre capolavoro d’oreficeria eseguito nel 1337-1338 dal senese Ugolino di Vieri"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio è profondo 62 metri, ha un diametro di 13,5 metri e dispone di due scale a chiocciola elicoidali con 248 gradini ciascuna.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "profondo 62 metri, ha un diametro di 13,5 metri. Tutt’attorno si snodano due scale a chiocciola elicoidali che non si incontrano mai; le due scalinate, composte da 248 gradini ognuna"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio fu scavato per volere di Clemente VII nel XVI secolo.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "Il pozzo, straordinaria opera di ingegneria civile del Cinquecento, fu scavato per volere di Clemente VII"
+    },
+    {
+      "fact": "La Festa della Palombella risale al Trecento.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "la Festa della Palombella, risalente al Trecento"
+    },
+    {
+      "fact": "La Pera di Monteleone d’Orvieto è nota anche come 'bistecca del villano'.",
+      "source_url": "https://bellaumbria.net/it/itinerari/cosa-vedere-a-orvieto-in-un-giorno",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Una particolarità unica è la Pera di Monteleone d’ Orvieto, detta anche “bistecca del villano”"
+    },
+    {
+      "fact": "La famiglia Fravolini opera nel settore delle ceramiche ad Orvieto da oltre venti anni.",
+      "source_url": "https://ceramichefravolini.com",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Da più di venti anni la famiglia Fravolini lavora nel settore delle ceramiche ad Orvieto, Umbria"
+    },
+    {
+      "fact": "L'azienda dispone di tre negozi di ceramica nel centro storico di Orvieto, situati tra Via del Duomo e Piazza Duomo.",
+      "source_url": "https://ceramichefravolini.com",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "L’azienda espone prodotti di ceramica in tre bellissimi negozi dislocati nel cuore del centro storico orvietano, fra Via del Duomo e Piazza Duomo"
+    },
+    {
+      "fact": "La costruzione del Duomo di Orvieto iniziò il 13 novembre 1290 sotto Papa Nicolò IV.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "La sua costruzione iniziò sotto la benedizione di **Papa Nicolò IV**, il 13 novembre 1290."
+    },
+    {
+      "fact": "Lorenzo Maitani progettò la facciata tricuspidale e gli archi rampanti laterali.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Lorenzo Maitani (ideatore degli archi rampanti laterali e della superba facciata tricuspidale)"
+    },
+    {
+      "fact": "La facciata del Duomo fu iniziata nel 1310 e completata nel 1532.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "La superba facciata, iniziata nel 1310 e conclusa solo nel 1532"
+    },
+    {
+      "fact": "La Cappella di San Brizio contiene affreschi di Luca Signorelli sul Giudizio Universale.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "**Cappella di San Brizio** con gli Affreschi di Luca Signorelli che narrano il Giudizio Universale"
+    },
+    {
+      "fact": "L'indirizzo del Duomo è Piazza del Duomo, 26 – 05018 Orvieto (TR).",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "Indirizzo: Piazza del Duomo, 26 – 05018 Orvieto (TR)"
+    },
+    {
+      "fact": "Da aprile a settembre il Duomo è aperto dalle 09:30 alle 19:00.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "09:30 – 19:00 (da aprile a settembre)"
+    },
+    {
+      "fact": "A marzo e ottobre il Duomo è aperto dalle 09:30 alle 18:00.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "09:30 – 18:00 (marzo e ottobre)"
+    },
+    {
+      "fact": "Da novembre a febbraio il Duomo è aperto dalle 09:30 alle 17:00.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "09:30 – 17:00 (da novembre a febbraio)"
+    },
+    {
+      "fact": "Il numero di telefono del Duomo è 0763342477.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "0763342477"
+    },
+    {
+      "fact": "L'indirizzo email del Duomo è info@duomodiorvieto.it.",
+      "source_url": "https://destinazioneorvieto.com/arte-cultura/duomo-di-orvieto",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "info@duomodiorvieto.it"
+    },
+    {
+      "fact": "Il ristorante Il giardino Da Giovanni propone piatti con prezzi compresi tra i 6 e i 23€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Piatti tra i 6 e i 23€."
+    },
+    {
+      "fact": "Il ristorante La Palomba si trova a Orvieto in Via Cipriano Manente, 16.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "Via Cipriano Manente, 16 Orvieto"
+    },
+    {
+      "fact": "Le grotte del Funaro offre piatti con prezzi che variano dai 9 ai 23€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Piatti tra i 9 e i 23€."
+    },
+    {
+      "fact": "La Trattoria Vinosus ha prezzi per i piatti che vanno dai 5 ai 28€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Piatti tra i 5 e i 28€."
+    },
+    {
+      "fact": "Il ristorante I Sette Consoli ha aperto nel 1992.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "dal 1992, si dedica alla ricerca"
+    },
+    {
+      "fact": "La cantina de I Sette Consoli dispone di circa 900 etichette.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "La cantina, altro pezzo forte della casa, conta circa 900 etichette"
+    },
+    {
+      "fact": "I Sette Consoli propone un menu degustazione di 6 portate a 55€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "C’è anche un menu degustazione in 6 portate a 55€."
+    },
+    {
+      "fact": "Cantina Vèra Orvieto Eno Bistrò offre un percorso di più piatti abbinati a 5 vini a 35€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Si possono assaggiare più piatti abbinati ai vini (5 in tutto) al prezzo di 35€."
+    },
+    {
+      "fact": "Coro Ristorante ha aperto a dicembre 2023 in una chiesa sconsacrata del '500.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "storia",
+      "confidence": "low",
+      "quote_originale": "In una vecchia chiesa sconsacrata del '500 ... a dicembre 2023 è arrivato un nuovo ristorante"
+    },
+    {
+      "fact": "Il Coro Ristorante propone tre percorsi degustazione: da 78€, 90€ e 110€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Coro Ardente, in 4 portate alla brace (78€), poi Coro Armonico, in 6 portate (90€), infine Coro Libero in 10 portate (110€)."
+    },
+    {
+      "fact": "Charlie Pizzeria è aperta esclusivamente per cena.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Aperto solo a cena"
+    },
+    {
+      "fact": "I prezzi presso Claudio Alvicolo variano tra i 15 e i 20€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Prezzi tra i 15 e i 20€."
+    },
+    {
+      "fact": "L'agriturismo Antichi Casali di Charme propone il menu 'Terra' a 55€ e il menu 'Inizio' a 69€.",
+      "source_url": "https://cibotoday.it/mappe/ristoranti-dove-mangiare-orvieto.html",
+      "category": "prezzo",
+      "confidence": "medium",
+      "quote_originale": "I percorsi sono Terra, da 4 portate a 55€ (con sole portate vegane e vegetariane), e Inizio, da 7 portate  a 69€."
+    },
+    {
+      "fact": "La Carta Unica, card per musei, monumenti e sconti, ha un prezzo a partire da 25 €",
+      "source_url": "https://duomodiorvieto.it",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Carta Unica\n\nMusei, monumenti, luoghi d’arte e sconti, tutto in una card. A partire da 25 €"
+    },
+    {
+      "fact": "La Cappella di San Brizio è celebre per il ciclo di affreschi Storie degli Ultimi Giorni, iniziato dal Beato Angelico nel 1447 e completato da Luca Signorelli nel 1499-1504",
+      "source_url": "https://duomodiorvieto.it",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Celebre per il ciclo di affreschi con Storie degli Ultimi Giorni, avviato dal Beato Angelico nel 1447 e completato da Luca Signorelli nel 1499-1504."
+    },
+    {
+      "fact": "La Cappella del Corporale fu costruita a metà del XIV secolo per custodire la reliquia del Sacro Lino del miracolo di Bolsena",
+      "source_url": "https://duomodiorvieto.it",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Costruita a metà del XIV secolo, la cappella deve il suo nome alla preziosa reliquia del Sacro Lino del miracolo di Bolsena, qui custodito."
+    },
+    {
+      "fact": "Sotto la cattedrale si trova un tunnel di circa 800 metri quadrati che mostra l'antico deposito e il cantiere della Fabbrica",
+      "source_url": "https://duomodiorvieto.it",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Un suggestivo “tunnel” di circa 800 metri quadrati, collocato al disotto del transetto e delle cappelle della cattedrale, offre uno spaccato realistico dell’antico deposito del duomo e il “racconto” del secolare cantiere della Fabbrica."
+    },
+    {
+      "fact": "La visita al Museo Etrusco Claudio Faina costa 3€ in più se abbinata a quella del Duomo",
+      "source_url": "https://duomodiorvieto.it",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Visita insieme al Duomo, il Museo Etrusco \"Claudio Faina\" con solo 3€ in più"
+    },
+    {
+      "fact": "Il centro di Orvieto è zones a traffico limitato (ZTL) controllata da telecamere.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Il centro di Orvieto è una Zona a Traffico Limitato (ZTL) e quindi viene monitorata da telecamere che controllano gli accessi"
+    },
+    {
+      "fact": "La sosta su strada nelle aree centrali è a pagamento dalle 8.00 alle 20.00 con tariffe di 1,00 € per la prima ora e 1,60 € per le successive.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "prezzo",
+      "confidence": "medium",
+      "quote_originale": "La sosta su strada a Orvieto nelle aree centrali è di norma a pagamento (delimitati da strisce blu), dalle ore 8.00 alle ore 20.00 con tariffa ordinaria pari a 1,00 €/h la prima ora e 1,60 €/h nelle seconda e successive."
+    },
+    {
+      "fact": "Il parcheggio di via Roma ha 500 posti ed è gestito dal Comune di Orvieto.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "parcheggio di via Roma (vedi posizione sulla google maps) da 500 posti gestito direttamente dal Comune Orvieto."
+    },
+    {
+      "fact": "Il costo del parcheggio di Via Roma è di 1,50 € per la prima ora, 1,40 € dalla seconda, con un massimo giornaliero di 12,00 €.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "La tariffa è 1,50 €/h la prima ora e 1,40 € dalla seconda ora e successive; la tariffa giornaliera massima è pari a 12,00 €."
+    },
+    {
+      "fact": "Il parcheggio di Via Roma è aperto 24 ore su 24 tutti i giorni.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Il parcheggio è aperto 24 ore su 24 tutti i giorni dell'anno ."
+    },
+    {
+      "fact": "Il parcheggio multipiano Campo della Fiera ha 620 posti.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "parcheggio multipiano Campo della Fiera (vedi posizione sulla google maps) da 620 posti gestito direttamente dal Comune Orvieto."
+    },
+    {
+      "fact": "Il parcheggio Campo della Fiera è collegato al centro tramite ascensore o scale mobili.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Il parcheggio multi-piano è collegato gratuitamente con il centro della città tramite l'Ascensore di Ripa Medici, funzionante dalle ore 5.45 fino alle ore 2.00, o il percorso meccanizzato delle scale mobili attivo dalle ore 7.00 fino alle ore 21.00."
+    },
+    {
+      "fact": "La tariffa del parcheggio Campo della Fiera è di 1,50 € la prima ora, 1,40 € dalla seconda, massimo 12,00 € al giorno.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "La tariffa è 1,50 €/h la prima ora e 1,40 € dalla seconda ora e successive; la tariffa giornaliera massima è pari a 12,00 €."
+    },
+    {
+      "fact": "Il parcheggio Campo della Fiera è aperto 24 ore su 24 ogni giorno.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Il parcheggio è aperto 24 ore su 24 tutti i giorni dell'anno ."
+    },
+    {
+      "fact": "Il parcheggio Piazza D'Armi dispone di 300 posti e l'accesso ai camper è consentito.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "parcheggio Piazza D'Armi (vedi posizione sulla google maps) da 300 posti gestito direttamente dal Comune Orvieto. ... Non è indicato un limite di altezza e pertanto è consentito l'accesso con camper."
+    },
+    {
+      "fact": "La sosta al parcheggio Piazza D'Armi costa 1,00 € per l'intera giornata.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "La tariffa è pari a 1,00 € e vale per tutta la giornata (24 ore)."
+    },
+    {
+      "fact": "Il parcheggio Piazza D'Armi è aperto 24 ore su 24.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Il parcheggio è aperto 24 ore su 24 tutti i giorni dell'anno ."
+    },
+    {
+      "fact": "Il parcheggio di piazza della Pace ha 450 posti, è gratuito e permette l'accesso ai camper.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "prezzo",
+      "confidence": "low",
+      "quote_originale": "il parcheggio ha una capacità complessiva di 450 posti ed è gestito direttamente dal Comune Orvieto. ... La sosta è gratuita ... Non è indicato un limite di altezza e pertanto è consentito l'accesso con camper."
+    },
+    {
+      "fact": "Il parcheggio di piazza della Pace è collegato al centro tramite funicolare.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "ed utilizzare la funicolare che, in circa due minuti, lo collega con il centro in corrispondenza di piazza Cahen"
+    },
+    {
+      "fact": "Il parcheggio Piazza della Pace è aperto 24 ore su 24.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Il parcheggio è aperto 24 ore su 24 tutti i giorni dell'anno ."
+    },
+    {
+      "fact": "Il parcheggio di Piazza Cahen ha 100 posti ed è dotato di parchimetro.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "il parcheggio regolato a parchimetro di piazza Cahen ... il parcheggio ha una capacità complessiva di 100 posti ed è gestito direttamente dal Comune Orvieto."
+    },
+    {
+      "fact": "La tariffa di Piazza Cahen è 1,00 € la prima ora, 1,60 € dalla seconda, massimo 12,00 € al giorno.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "La tariffa è 1,00 €/h la prima ora e 1,60 € dalla seconda ora e successive; la tariffa giornaliera massima è pari a 12,00 €."
+    },
+    {
+      "fact": "Il parcheggio Piazza Cahen è aperto 24 ore su 24.",
+      "source_url": "https://accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Il parcheggio è aperto 24 ore su 24 tutti i giorni dell'anno ."
+    },
+    {
+      "fact": "Orvieto è una piccola città collinare con viste sulle colline dell'Umbria.",
+      "source_url": "https://acooknotmad.com/2016/11/we-love-orvieto.html",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Orvieto is a small hill town that enjoys a close-knit community of very friendly people."
+    },
+    {
+      "fact": "Arrivando in treno a Orvieto, è possibile prendere una funicolare per raggiungere la città situata sopra.",
+      "source_url": "https://acooknotmad.com/2016/11/we-love-orvieto.html",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Getting off the train in Orvieto and taking the funicular up to the town above"
+    },
+    {
+      "fact": "La tradizione della passeggiata si svolge solitamente intorno alle 18:00 o 18:30.",
+      "source_url": "https://acooknotmad.com/2016/11/we-love-orvieto.html",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Usually around 6 or 6:30 pm most of the town suits up to leisurely stroll the main streets and piazzas"
+    },
+    {
+      "fact": "Via Cavour è una strada principale di Orvieto.",
+      "source_url": "https://acooknotmad.com/2016/11/we-love-orvieto.html",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "A seat on the main street, via Cavour"
+    },
+    {
+      "fact": "La Pergola è un ristorante di Orvieto.",
+      "source_url": "https://acooknotmad.com/2016/11/we-love-orvieto.html",
+      "category": "recensione",
+      "confidence": "high",
+      "quote_originale": "The first was La Pergola where a simple antipasto of sweet and sour guanciale or “baffo” delighted us"
+    },
+    {
+      "fact": "Il pizzaiolo di Charlie Pizzeria, Claudio delli Poggi, insegna alla Pizza University.",
+      "source_url": "https://acooknotmad.com/2016/11/we-love-orvieto.html",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "Their pizza chef, Claudio delli Poggi teaches at Pizza University"
+    },
+    {
+      "fact": "La Cappella di San Brizio nel Duomo di Orvieto è stata dipinta da Luca Signorelli.",
+      "source_url": "https://blog.ricksteves.com/blog/orvieto-cathedral-frescoes",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Orvieto Cathedral’s Chapel of San Brizio is one of the most jaw-dropping pieces of art you’ll see in Italy. Painted by Luca Signorelli"
+    },
+    {
+      "fact": "L'opera di Luca Signorelli risale alla fine del 1400.",
+      "source_url": "https://blog.ricksteves.com/blog/orvieto-cathedral-frescoes",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "it’s a twisted and vivid look at the psyche of the late 1400s."
+    },
+    {
+      "fact": "La costruzione del Duomo di Orvieto iniziò nel 1290 per volontà di Papa Nicolò IV.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "La costruzione del Duomo di Orvieto ebbe inizio nel 1290 per volontà di Papa Nicolò IV."
+    },
+    {
+      "fact": "Lorenzo Maitani fu caput magister della Fabbrica del Duomo dal 1310 al 1330.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Lorenzo Maitani, caput magister della Fabbrica dal 1310 al 1330."
+    },
+    {
+      "fact": "Il rosone della facciata è opera di Andrea di Cione detto l’Orcagna, risalente circa al 1354.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "il rosone di Andrea di Cione detto l’Orcagna (1354 ca)."
+    },
+    {
+      "fact": "La Cattedrale è dedicata a Santa Maria Assunta in Cielo.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "La Cattedrale è dedicata a Santa Maria Assunta in Cielo"
+    },
+    {
+      "fact": "Nella cappella del Corporale si conserva la reliquia del Miracolo Eucaristico avvenuto a Bolsena nel 1263.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "Nella cappella del Corporale, affrescata con le opere di Ugolino di Prete Ilario (1356 – 1364) ed altri artisti, si conserva la reliquia del Miracolo Eucaristico avvenuto a Bolsena (1263)"
+    },
+    {
+      "fact": "Il ciclo pittorico nella Cappella Nova o di San Brizio fu completato da Luca Signorelli tra il 1499 e il 1504.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "nella Cappella Nova o di San Brizio si trova uno dei maggiori cicli pittorici del Rinascimento avviato da Beato Angelico e terminato da Luca Signorelli (1499-1504)."
+    },
+    {
+      "fact": "Il biglietto per il Duomo e i Musei MODO ha un costo di € 5,00.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "prezzo",
+      "confidence": "medium",
+      "quote_originale": "Biglietti: Duomo e Musei MODO € 5,00"
+    },
+    {
+      "fact": "La Cattedrale è situata in Piazza del Duomo, 26, 05018 Orvieto TR.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Piazza del Duomo, 26, 05018 Orvieto TR, Italia"
+    },
+    {
+      "fact": "L'orario di visita turistica feriale da Aprile a Settembre è dalle 9.30 alle 19.00.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+      "category": "orario",
+      "confidence": "high",
+      "quote_originale": "Feriali Novembre/Febbraio: 9.30 - 17.00 Marzo e Ottobre: 9.30 - 18.00 Aprile/Settembre: 9.30 - 19.00"
+    },
+    {
+      "fact": "Il pozzo di San Patrizio è stato costruito tra il 1527 e il 1537.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "This enormous well was constructed between 1527 and 1537"
+    },
+    {
+      "fact": "La scala del pozzo di San Patrizio scende per 62 metri.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "descending 62 meters (203 feet)"
+    },
+    {
+      "fact": "La Fortezza Albornoz è stata costruita nel 1364.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Built in 1364 by Cardinal Egidio Albornoz"
+    },
+    {
+      "fact": "La costruzione della Cattedrale di Orvieto è iniziata nel 1290.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Construction began in 1290"
+    },
+    {
+      "fact": "La Torre del Moro ha una salita di 250 scalini.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "The 250-step climb"
+    },
+    {
+      "fact": "L'Orvieto Card costa €35.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "It costs €35"
+    },
+    {
+      "fact": "Orvieto si trova sulla linea ferroviaria Roma – Firenze – Milano.",
+      "source_url": "https://earthtrekkers.com/best-things-to-do-in-orvieto-italy",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Orvieto is located along the Rome – Florence – Milan train line"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio fu commissionato da Papa Clemente VII nel 1527.",
+      "source_url": "https://adagioumbro.it/it/cosa-vedere-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Commissionato da Papa Clemente VII nel 1527, il Pozzo di San Patrizio garantiva l’accesso all’acqua durante gli assedi."
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio è profondo 53 metri.",
+      "source_url": "https://adagioumbro.it/it/cosa-vedere-orvieto",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "| Profondità | 53 metri |"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio ha 248 gradini.",
+      "source_url": "https://adagioumbro.it/it/cosa-vedere-orvieto",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "| Gradini | 248 |"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio non è accessibile a persone con disabilità motorie.",
+      "source_url": "https://adagioumbro.it/it/cosa-vedere-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Non accessibile a persone con disabilità motorie."
+    },
+    {
+      "fact": "La Torre del Moro ha un'altezza di 47 metri.",
+      "source_url": "https://adagioumbro.it/it/cosa-vedere-orvieto",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "Con i suoi 47 metri di altezza, offre una vista panoramica straordinaria su Orvieto e le campagne circostanti."
+    },
+    {
+      "fact": "La Necropoli Etrusca di Crocifisso del Tufo risale al VI secolo a.C.",
+      "source_url": "https://adagioumbro.it/it/cosa-vedere-orvieto",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Risale al VI secolo a.C. e rivela le radici etrusche della città."
+    },
+    {
+      "fact": "Società Cooperativa Culture gestisce i servizi di custodia e gestione del Pozzo di San Patrizio per 5 anni dal 16 gennaio 2024.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "Il Comune di Orvieto – Ufficio Cultura gestisce tramite contratto d’appalto con Società Cooperativa Culture della durata di anni 5, decorrenti dal 16 gennaio 2024, il Pozzo di San Patrizio per quanto attiene ai sevizi di custodia e gestione"
+    },
+    {
+      "fact": "Papa Clemente VII commissionò lo scavo del pozzo ad Antonio da Sangallo il Giovane nel 1527 per rifornire d'acqua la città in caso di assedio.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "fu fatto scavare da Papa Clemente VII, rifugiatosi ad Orvieto dopo “il Sacco di Roma” [...] L’incarico fu affidato ad Antonio da Sangallo il Giovane nel 1527."
+    },
+    {
+      "fact": "L'opera fu completata nel 1537 sotto il papato di Paolo III Farnese.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "storia",
+      "confidence": "high",
+      "quote_originale": "L’opera fu completata nel 1537 sotto il papato di Paolo III Farnese."
+    },
+    {
+      "fact": "Il pozzo è profondo 54 metri e presenta una struttura a doppia scala a spirale di 248 gradini, 13 metri di diametro e 72 finestroni.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "dato_statistico",
+      "confidence": "high",
+      "quote_originale": "Il Pozzo ha una importante profondità (54 metri) ed è composto da una struttura a doppia scala a spirale di 248 gradini, 13 metri di diametro ed è illuminato da 72 finestroni."
+    },
+    {
+      "fact": "L'ingresso è gratuito per bambini sotto i 6 anni, accompagnatori di disabili, guide turistiche e 2 insegnanti con gruppi scolastici di minimo 20 studenti.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "Biglietto GRATUITO per (FREE ticket for) :\n\n-Bambini under 6 (Children under 6);\n\n-Accompagnatore del diversamente abile (Companion of the disabled person);\n\n-Guida turistica (Tourist Guide);\n\n-2 Insegnanti – Gruppi scolastici min 20 studenti (2 Teachers – School Groups – min 20 Students)."
+    },
+    {
+      "fact": "L'indirizzo del pozzo è Piazza Cahen, 5B, 05018 Orvieto TR, Italia.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Piazza Cahen, 5B, 05018 Orvieto TR, Italia"
+    },
+    {
+      "fact": "Il numero di telefono/fax è 0763.343768 e l'email è biglietteria.pozzosanpatrizio@coopculture.it.",
+      "source_url": "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+      "category": "contatto",
+      "confidence": "high",
+      "quote_originale": "Tel e Fax : 0763.343768\n\ne-mail : biglietteria.pozzosanpatrizio@coopculture.it"
+    },
+    {
+      "fact": "La visita guidata ha una durata approssimativa di 2,5 o 3 ore.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "L’attività avrà una durata di circa 2,5 – 3 ore"
+    },
+    {
+      "fact": "Il Pozzo di San Patrizio ha una profondità di circa 50 metri e presenta una scala elicoidale.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "geografia",
+      "confidence": "high",
+      "quote_originale": "Pozzo di San Patrizio, che ti permetterà di scendere ad una profondità di circa 50 metri grazie ad una particolare scala di forma elicoidale"
+    },
+    {
+      "fact": "La Cappella di San Brizio, all'interno del Duomo, contiene decorazioni di Beato Angelico, Benozzo Gozzoli, Pietro di Nicola Baroni e Luca Signorelli.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "storia",
+      "confidence": "medium",
+      "quote_originale": "nella Cappella di San Brizio e le sue decorazioni, eseguite da noti artisti quali Beato Angelico, Benozzo Gozzoli, Pietro di Nicola Baroni e Luca Signorelli"
+    },
+    {
+      "fact": "Il prezzo per un gruppo da 1 a 20 persone è di 180 €.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "da 1 a 20 pax\n\n180 €"
+    },
+    {
+      "fact": "Il prezzo per un gruppo da 21 a 40 persone è di 200 €.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "da 21 a 40 pax\n\n200 €"
+    },
+    {
+      "fact": "Il prezzo per un gruppo da 41 a 50 persone è di 220 €.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "prezzo",
+      "confidence": "high",
+      "quote_originale": "da 41 a 50 pax\n\n220 €"
+    },
+    {
+      "fact": "La visita è disponibile in sette lingue: Italiano, Inglese, Tedesco, Spagnolo, Francese, Olandese, Russo.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "altro",
+      "confidence": "medium",
+      "quote_originale": "Lingue parlate\n\n- Italiano\n- Inglese\n- Tedesco\n- Spagnolo\n- Francese\n- Olandese\n- Russo"
+    },
+    {
+      "fact": "La cancellazione è gratuita fino a 24 ore prima dell'attività con rimborso del 100%.",
+      "source_url": "https://exploring-umbria.com/attivita/visita-guidata-di-orvieto",
+      "category": "altro",
+      "confidence": "high",
+      "quote_originale": "Potrai cancellare la prenotazione per questa attività fino a 24 ore prima dello svolgimento e ti rimborseremo il 100% del prezzo."
+    }
+  ]
+}
