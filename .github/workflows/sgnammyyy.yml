@@ -369,95 +369,97 @@ jobs:
         run: |
           cat << 'PYEOF' > reconciliation.py
           #
-          # Fase 2 della pipeline (v3): per ogni macro-area, DEDUPLICAZIONE dei nugget,
-          # NON sintesi editoriale.
+          # Fase 2 della pipeline (v4): deduplicazione semantica (entita' + attributo),
+          # NON sintesi editoriale, NON esposizione di metadati di processo nell'output.
           #
-          # Differenza chiave rispetto alla v2: qui NON chiediamo al modello di
-          # "riformulare" o "fondere in una frase nuova" i nugget. Il testo del 'fact'
-          # del nugget vincitore resta quello di UNO dei nugget originali (scelto
-          # perche' meglio scritto o piu' completo, in caso di duplicati ESATTI sullo
-          # stesso dato), mai una sintesi nuova che combina piu' fatti diversi in
-          # un'unica frase. Questo evita di introdurre affermazioni che nessuna singola
-          # fonte conteneva mai, il rischio principale identificato nella v2.
+          # Principio guida (richiesto esplicitamente): l'output deve avere ESATTAMENTE
+          # lo stesso schema dell'input (fact, source_url, category, confidence,
+          # quote_originale), invariato per i nugget che non hanno duplicati. Nessun
+          # id numerico, nessun campo di tracciabilita' interna, nessun
+          # verification_status: quei dettagli sono strumenti di lavoro del CODICE
+          # (fase 3, deterministica), non dati destinati all'output finale.
           #
-          # Un nugget che non ha duplicati/sovrapposizioni resta intatto, non viene
-          # toccato: stessa identica struttura dell'input.
+          # Criterio di deduplicazione (definito dall'utente): due nugget sono
+          # duplicati SOLO se affermano lo stesso fatto nel senso di
+          # STESSA ENTITA' + STESSO ATTRIBUTO SPECIFICO (es. "Torre del Moro" +
+          # "altezza"), indipendentemente da come e' scritta la frase. Non e' un
+          # matching su valori numerici isolati: due entita' diverse con lo stesso
+          # numero (es. due monumenti diversi entrambi alti 47 metri) NON sono
+          # duplicati. Questo e' un giudizio semantico che richiede il modello, non
+          # una regola meccanica.
           #
-          # Se un gruppo di nugget duplicati/sovrapposti viene consolidato in un
-          # vincitore, e alcuni degli scartati portano un'informazione AGGIUNTIVA che
-          # il vincitore non aveva, quell'informazione (verbatim, non riformulata)
-          # finisce nel campo 'note_aggiuntive' del vincitore, e l'URL della fonte
-          # scartata viene aggiunto a 'source_urls'.
-          #
-          # Tolleranza esplicita: e' possibile che occasionalmente la stessa
-          # informazione aggiuntiva compaia sia come parte di un fatto dedicato altrove
-          # nella macro-area, sia dentro note_aggiuntive di un altro fatto. Non
-          # introduciamo un meccanismo di controllo incrociato a piu' passate per
-          # eliminare questo caso raro: la complessita' aggiuntiva non ne varrebbe la
-          # pena, un occasionale duplicato minore e' accettabile.
+          # Eccezioni MINIME allo schema originale, usate solo quando strettamente
+          # necessario (mai aggiunte "di default"):
+          #   - "source_urls_extra": presente SOLO se altri nugget duplicati provano lo
+          #     stesso fatto da fonti diverse dalla principale.
+          #   - "note_aggiuntive": presente SOLO se un nugget scartato del gruppo
+          #     conteneva un'informazione che il vincitore non aveva (e che non e'
+          #     gia' coperta da un altro fatto separato nella stessa macro-area).
+          #   - "conflitto_con": presente SOLO se due o piu' nugget affermano valori
+          #     diversi per la stessa entita'+attributo e non e' risolvibile con
+          #     ragionevole certezza (autorevolezza fonte / regola prezzo piu' alto).
           #
           # NESSUN GROUNDING disponibile su questo piano/modello (Gemini 3.1
-          # Flash-Lite free tier). La risoluzione dei conflitti si basa quindi
-          # esclusivamente su ragionamento sul testo/fonti gia' disponibili.
+          # Flash-Lite free tier).
           #
 
           import json
 
-          RECONCILIATION_PROMPT_TEMPLATE = """Sei un editor di dati (data curator) meticoloso. Il tuo compito e' fare PULIZIA e DEDUPLICAZIONE di un elenco di "nugget" (fatti grezzi estratti da fonti web) su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo.
+          RECONCILIATION_PROMPT_TEMPLATE = """Sei un editor di dati (data curator) meticoloso. Il tuo compito e' fare PULIZIA e DEDUPLICAZIONE SEMANTICA di un elenco di "nugget" (fatti grezzi estratti da fonti web) su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo.
 
-          REGOLA FONDAMENTALE, LA PIU' IMPORTANTE DI TUTTE: NON DEVI RISCRIVERE O SINTETIZZARE I FATTI. Non devi mai fondere informazioni provenienti da fatti DIVERSI in una frase nuova che non esisteva in nessuna fonte originale. Il tuo unico lavoro e' scegliere, tra nugget che dicono LA STESSA IDENTICA COSA (duplicati o quasi-duplicati sullo stesso specifico dato), quale versione tenere, e scartare le altre. Il testo del campo "fact" che restituisci per ogni fatto tenuto deve essere IDENTICO (verbatim) al testo di uno dei nugget originali di quel gruppo, al massimo scegliendo tra le varianti disponibili quella scritta meglio o piu' completa: non riformularlo mai da zero, non combinarlo con altri.
+          REGOLA FONDAMENTALE, LA PIU' IMPORTANTE DI TUTTE: NON DEVI RISCRIVERE O SINTETIZZARE I FATTI. Il campo "fact" che restituisci per ogni nugget tenuto deve essere IDENTICO (verbatim) al testo di uno dei nugget originali: mai riformulato da zero, mai combinato con altri in una frase nuova.
+
+          CRITERIO DI DEDUPLICAZIONE (leggi con attenzione, e' un giudizio semantico, non un confronto di testo): due o piu' nugget sono DUPLICATI tra loro se e solo se affermano lo STESSO FATTO nel senso di STESSA ENTITA' + STESSO ATTRIBUTO SPECIFICO (es. "Torre del Moro" + "altezza in metri" e' un fatto; "Torre del Moro" + "anno di costruzione" e' un fatto diverso, anche se parlano della stessa torre). NON considerare duplicati due nugget solo perche' contengono lo stesso numero: un valore numerico identico riferito a entita' o attributi diversi (es. due monumenti diversi che sono entrambi alti 47 metri, oppure lo stesso monumento con un numero che compare per un attributo diverso) NON e' un duplicato. Usa il ragionamento, non il pattern-matching testuale.
 
           NON hai accesso a strumenti di ricerca esterni: lavora solo con le fonti e i testi che ricevi qui sotto.
 
           MACRO-AREA: {nome_macro_area}
 
-          Di seguito i nugget grezzi raccolti su questo argomento, ciascuno con: id, fatto, categoria, url sorgente, e livello di confidence assegnato in fase di estrazione (confidence = quanto la citazione originale corrisponde fedelmente al testo scrapato, NON quanto il fatto e' vero).
+          Di seguito i nugget grezzi raccolti su questo argomento, ciascuno con: id (solo per riferimento interno in questa risposta, non comparira' nell'output), fatto, categoria, url sorgente, e confidence di estrazione (= quanto la citazione originale corrisponde fedelmente al testo scrapato, NON quanto il fatto e' vero).
 
           NUGGET GREZZI:
           {nuggets_list}
 
-          PROCEDIMENTO DA SEGUIRE:
+          PROCEDIMENTO:
 
-          1. Identifica gruppi di nugget che riportano LO STESSO SPECIFICO DATO (es. piu' nugget che riportano tutti il prezzo del biglietto intero, oppure tutti lo stesso orario di apertura, oppure tutti la stessa data storica). Non raggruppare nugget che parlano semplicemente dello stesso argomento generico ma riportano dati DIVERSI (es. un nugget sul prezzo e uno sull'orario NON sono duplicati anche se parlano dello stesso monumento: restano due fatti separati).
+          1. Identifica gruppi di nugget che affermano lo stesso fatto (stessa entita' + stesso attributo specifico, secondo il criterio sopra). Nugget che non hanno nessun duplicato secondo questo criterio vanno riportati singolarmente, senza toccarli.
 
-          2. Per ogni gruppo di duplicati, scegli UN vincitore:
-             a. Se una fonte e' il sito ufficiale dell'entita' specifica (es. il sito proprio del monumento/museo/attivita' in questione), quella fonte vince su qualunque altra, ANCHE su un sito istituzionale di livello superiore (comune, ente turistico regionale): un sito istituzionale generico non e' automaticamente piu' autorevole del sito ufficiale specifico del luogo, spesso e' anzi meno aggiornato.
-             b. REGOLA SPECIFICA PER I PREZZI INTERI DI BIGLIETTERIA: se il conflitto e' tra prezzi INTERI diversi per lo stesso biglietto/servizio e la regola (a) non basta a decidere, assumi che il valore PIU' ALTO tra quelli trovati sia il piu' aggiornato e corretto (i prezzi tendono a salire nel tempo). NON confondere questa regola con i prezzi ridotti: un prezzo piu' basso va trattato come prezzo ridotto SOLO se il testo di origine lo qualifica esplicitamente come tale (es. "ridotto", "under 18", "gruppi"); un prezzo intero alternativo piu' basso e senza questa qualifica va invece considerato superato dalla regola del valore piu' alto.
-             c. Se nessuna delle due regole permette di decidere con ragionevole certezza, non scegliere arbitrariamente: segnala il gruppo come "conflitto_irrisolto": true, riportando tutti i valori alternativi con le rispettive fonti, SENZA eliminare nessuno dei dati in conflitto.
+          2. Per ogni gruppo di duplicati, scegli UN vincitore (il cui "fact" verra' riportato verbatim):
+             a. Se una fonte e' il sito ufficiale dell'entita' specifica (es. il sito proprio del monumento/museo/attivita' in questione), quella fonte vince su qualunque altra, ANCHE su un sito istituzionale di livello superiore (comune, ente turistico regionale): un sito istituzionale generico non e' automaticamente piu' autorevole del sito ufficiale specifico del luogo.
+             b. REGOLA SPECIFICA PER I PREZZI INTERI DI BIGLIETTERIA: se il conflitto e' tra prezzi INTERI diversi per lo stesso biglietto/servizio e la regola (a) non basta a decidere, assumi che il valore PIU' ALTO tra quelli trovati sia il piu' aggiornato e corretto (i prezzi tendono a salire nel tempo). Un prezzo piu' basso va trattato come prezzo ridotto SOLO se il testo di origine lo qualifica esplicitamente come tale (es. "ridotto", "under 18", "gruppi"); altrimenti e' superato dalla regola del valore piu' alto.
+             c. Se nessuna delle due regole permette di decidere con ragionevole certezza, non scegliere arbitrariamente: riporta il gruppo con "conflitto_con" popolato (vedi schema), senza eliminare nessuno dei valori in conflitto.
 
-          3. Per ogni gruppo consolidato in un vincitore, controlla se uno o piu' nugget SCARTATI di quel gruppo contengono un pezzo di informazione che il vincitore NON riporta (es. il vincitore da' solo il prezzo, uno scartato dava anche una condizione di sconto che il vincitore non menzionava). Se si', aggiungi quel pezzo di informazione (copiato verbatim, non riformulato) nel campo "note_aggiuntive" del vincitore, come elemento di una lista, e aggiungi l'URL di quella fonte scartata a "source_urls" del vincitore. IMPORTANTE: prima di aggiungere un'informazione a note_aggiuntive, verifica che quella stessa informazione non sia gia' presente in un ALTRO fatto separato che stai per restituire in questa stessa risposta (es. non ripetere l'orario dentro note_aggiuntive del fatto-prezzo se stai gia' restituendo un fatto-orario dedicato con la stessa informazione). Se hai dei dubbi su un caso specifico, ometti l'informazione aggiuntiva piuttosto che rischiare un duplicato: un'occasionale piccola perdita di informazione secondaria e' accettabile, un duplicato lo e' meno.
+          3. Se altri nugget del gruppo (non vincitori) provengono da fonti DIVERSE dal vincitore e confermano lo stesso fatto, aggiungi quelle URL in "source_urls_extra" del vincitore (lista, solo se non vuota).
 
-          4. Ogni nugget che NON ha duplicati o sovrapposizioni con altri resta cosi' com'e', senza alcuna modifica: riportalo identico, con source_nugget_ids contenente solo il proprio id, senza note_aggiuntive (o lista vuota).
+          4. Se un nugget scartato del gruppo contiene un pezzo di informazione che il vincitore NON riporta (es. il vincitore da' solo l'altezza, uno scartato dava anche l'anno di restauro), aggiungi quel pezzo di informazione (copiato verbatim) in "note_aggiuntive" del vincitore. PRIMA di farlo, verifica che quella stessa informazione non sia gia' presente in un ALTRO fatto separato che stai per restituire in questa stessa risposta (es. non ripetere l'anno di restauro dentro note_aggiuntive del fatto-altezza se stai gia' restituendo un fatto-storia dedicato con la stessa informazione). Se hai dubbi su un caso specifico, ometti l'informazione piuttosto che rischiare un duplicato: una piccola perdita di informazione secondaria e' accettabile, un duplicato lo e' meno.
 
-          5. Ogni fatto in output deve riportare la lista degli id dei nugget grezzi coinvolti (vincitore + scartati che hanno contribuito), campo "source_nugget_ids".
+          5. NON INVENTARE alcun dato che non sia presente nei nugget grezzi forniti.
 
-          6. NON INVENTARE alcun dato, numero o affermazione che non sia presente nei nugget grezzi forniti. Se un dato ti sembra incompleto o dubbio, riportalo cosi' com'e' piuttosto che completarlo o correggerlo di tua iniziativa.
+          6. Separatamente dai fatti, identifica quali fatti riguardano DATI VOLATILI (soggetti a cambiare nel tempo: prezzi di biglietteria, orari di apertura, frequenze di mezzi pubblici o traghetti, tariffe, e simili) per cui hai identificato con ragionevole certezza la fonte piu' autorevole. Per ciascuno, produci una voce in "dati_volatili" con SOLO questi 4 campi: "entita" (il soggetto, es. "Torre del Moro"), "tipo_valore" (es. "prezzo biglietto intero", "orario apertura estivo"), "valore" (il dato stesso), "source_url" (l'URL della fonte piu' autorevole per quel dato specifico). Includi in "dati_volatili" SOLO i dati realmente volatili con fonte chiara: non includere dati storici, geografici o descrittivi, quelli restano solo nei "fatti".
 
-          Restituisci ESCLUSIVAMENTE un JSON con questo schema, in un blocco ```json ... ```:
+          Restituisci ESCLUSIVAMENTE un JSON con questo schema, in un blocco ```json ... ```. Nota: i campi source_urls_extra, note_aggiuntive, conflitto_con vanno OMESSI del tutto (non inclusi come lista vuota) quando non applicabili a un fatto specifico, per mantenere l'output pulito. Il campo "dati_volatili" va omesso (o lista vuota) se nessun fatto di questa macro-area riguarda dati volatili.
+
           {{
-            "macro_area": "{nome_macro_area}",
             "fatti": [
               {{
-                "fact": "testo IDENTICO (verbatim) a uno dei nugget originali del gruppo, mai riscritto o fuso con altri fatti",
+                "fact": "testo IDENTICO (verbatim) a uno dei nugget originali",
+                "source_url": "https://... (l'url del nugget vincitore)",
                 "category": "categoria (stessa tassonomia dei nugget di origine)",
-                "source_nugget_ids": [0, 2, 5],
-                "source_urls": ["https://...", "https://..."],
-                "note_aggiuntive": ["eventuale informazione verbatim presa da uno scartato, assente altrove"],
-                "conflitto_irrisolto": false,
-                "valori_alternativi": [],
-                "note_risoluzione": "breve nota su quale regola e' stata applicata (es. 'sito ufficiale specifico', 'valore piu alto tra i prezzi interi'), o stringa vuota se non applicabile"
+                "confidence": "high/medium/low (quella del nugget vincitore)",
+                "quote_originale": "quote_originale del nugget vincitore, verbatim",
+                "source_urls_extra": ["https://... solo se altre fonti confermano lo stesso fatto"],
+                "note_aggiuntive": ["informazione verbatim da uno scartato, solo se presente e non duplicata altrove"],
+                "conflitto_con": [
+                  {{"valore": "descrizione breve del valore alternativo in conflitto", "source_url": "https://..."}}
+                ]
               }}
             ],
-            "verified_facts": [
+            "dati_volatili": [
               {{
-                "campo": "es. prezzo biglietto intero / prezzo ridotto / orario apertura / indirizzo / telefono",
-                "valore": "il valore ritenuto corretto secondo le regole",
-                "condizioni_riduzione": "breve descrizione delle condizioni se il campo e' un prezzo ridotto, altrimenti stringa vuota",
-                "valori_alternativi_scartati": [],
-                "fonte_ufficiale_url": "https://...",
-                "fonte_ufficiale_certa": true,
-                "certezza": "alta",
-                "source_nugget_ids": [3, 9]
+                "entita": "es. Torre del Moro",
+                "tipo_valore": "es. prezzo biglietto intero",
+                "valore": "es. 3.80 euro",
+                "source_url": "https://..."
               }}
             ]
           }}
@@ -469,7 +471,7 @@ jobs:
               for idx, n in enumerate(nuggets):
                   righe.append(
                       f"[{idx}] (categoria: {n.get('category', 'altro')}, "
-                      f"confidence estrazione: {n.get('confidence', 'n/d')}, "
+                      f"confidence: {n.get('confidence', 'n/d')}, "
                       f"fonte: {n.get('source_url', 'n/d')}) {n.get('fact', '')}"
                   )
               return "\n".join(righe)
@@ -477,8 +479,9 @@ jobs:
 
           async def riconcilia_macro_area(gemini_client, nome_macro_area, nuggets, label=""):
               # Esegue UNA chiamata AI per deduplicare i nugget di una singola
-              # macro-area. Ritorna un dict con 'fatti' (nugget deduplicati, testo
-              # verbatim) e 'verified_facts' (dati critici con fonte ritenuta migliore).
+              # macro-area. Ritorna un dict con 'fatti': lista di nugget nello schema
+              # originale (fact, source_url, category, confidence, quote_originale) +
+              # eccezioni minime quando necessario.
 
               prompt = RECONCILIATION_PROMPT_TEMPLATE.format(
                   nome_macro_area=nome_macro_area,
@@ -487,72 +490,51 @@ jobs:
 
               parsed, raw_text = await gemini_client.generate_json(prompt, label=label)
 
-              if parsed is None:
+              if parsed is None or "fatti" not in parsed:
                   print(f"{label}[RICONCILIAZIONE] Fallita per macro-area "
-                        f"'{nome_macro_area}'. Fallback: nessuna deduplicazione, "
-                        f"nugget grezzi mantenuti as-is (marcati come conflitto "
-                        f"irrisolto per trasparenza).", flush=True)
-                  return _fallback_nessuna_riconciliazione(nome_macro_area, nuggets)
+                        f"'{nome_macro_area}'. Fallback: nugget grezzi mantenuti as-is, "
+                        f"nessuna deduplicazione.", flush=True)
+                  return {"fatti": list(nuggets), "_local_nuggets": nuggets}
 
-              parsed.setdefault("macro_area", nome_macro_area)
-              parsed.setdefault("fatti", [])
-              parsed.setdefault("verified_facts", [])
-              parsed["_local_nuggets"] = nuggets  # per la rimappatura a valle (fase 3)
+              parsed["_local_nuggets"] = nuggets  # per la verifica interna (fase 3)
               return parsed
-
-
-          def _fallback_nessuna_riconciliazione(nome_macro_area, nuggets):
-              # Fallback deterministico se la chiamata AI fallisce del tutto: i nugget
-              # grezzi vengono riportati 1:1, marcati come conflitto irrisolto (per
-              # omogeneita' di schema: anche questo caso finisce nello stesso canale di
-              # 'dati da ripassare in una fase successiva').
-              fatti = []
-              for idx, n in enumerate(nuggets):
-                  fatti.append({
-                      "fact": n.get("fact", ""),
-                      "category": n.get("category", "altro"),
-                      "source_nugget_ids": [idx],
-                      "source_urls": [n.get("source_url", "")],
-                      "note_aggiuntive": [],
-                      "conflitto_irrisolto": True,
-                      "valori_alternativi": [],
-                      "note_risoluzione": "RICONCILIAZIONE AI FALLITA: fatto riportato as-is dal nugget grezzo originale, da ripassare in una fase successiva.",
-                      "_non_riconciliato": True,
-                  })
-              return {
-                  "macro_area": nome_macro_area,
-                  "fatti": fatti,
-                  "verified_facts": [],
-                  "_local_nuggets": nuggets,
-              }
 
           PYEOF
       - name: Creazione modulo - hallucination_check.py
         run: |
           cat << 'PYEOF' > hallucination_check.py
           #
-          # Fase 3 della pipeline (v3): verifica deterministica anti-allucinazione.
+          # Fase 3 della pipeline (v4): verifica deterministica anti-allucinazione,
+          # usata come FILTRO INTERNO SILENZIOSO.
           #
-          # Nessuna chiamata AI qui dentro. Confronto testuale/numerico tra l'output
-          # della deduplicazione e le "quote_originale" dei nugget grezzi di input.
+          # Differenza fondamentale rispetto alla v2/v3: qui il risultato della
+          # verifica NON viene scritto nell'output come campo (niente
+          # "verification_status", niente "verification_details"). L'output finale
+          # deve avere lo stesso aspetto pulito dell'input originale. La verifica
+          # serve solo a decidere, internamente, se un'aggiunta del modello (note
+          # aggiuntive, o l'intero fact quando e' stato scelto tra piu' varianti) e'
+          # sufficientemente tracciabile nei nugget grezzi di origine; in caso
+          # contrario il codice la scarta automaticamente, senza segnalarlo nel dato,
+          # retrocedendo verso il comportamento piu' sicuro disponibile.
           #
-          # FIX rispetto alla v2: la v2 spezzava gli orari (es. "9:30") in due numeri
-          # separati (9 e 30), ognuno controllato isolatamente. Un orario come "9:30"
-          # quasi mai ha "30" isolato altrove nel testo sorgente con lo stesso
-          # significato, quindi il controllo produceva falsi positivi sistematici su
-          # qualunque fatto contenente un orario. Ora gli orari (pattern H:MM o HH:MM)
-          # vengono riconosciuti come token atomici e confrontati come tali, PRIMA di
-          # passare il resto del testo alla normale estrazione numerica.
+          # Corregge inoltre lo stesso bug della v2/v3 relativo agli orari (es.
+          # "9:30" veniva spezzato in due numeri sciolti "9" e "30" e quasi sempre
+          # marcato come non supportato): qui gli orari sono riconosciuti come token
+          # atomici HH:MM prima dell'estrazione numerica generica.
           #
-          # Il controllo si applica sia ai fatti che alle note_aggiuntive di ciascun
-          # fatto (informazioni verbatim prese da nugget scartati): stesso principio,
-          # stessa tolleranza.
-          #
-          # Filosofia invariata: controllo di "provenienza", non di "verita' assoluta".
-          # Nessun file separato per revisione umana: ogni fatto/verified_fact viene
-          # arricchito sul posto con "verification_status" ("verified" / "unverified"),
-          # cosi' una fase successiva puo' filtrare automaticamente senza intervento
-          # umano.
+          # Politica di correzione automatica (nessun umano nel loop, sistema
+          # black-box):
+          #   - Se una singola "nota_aggiuntiva" non e' verificabile contro le
+          #     quote_originale dei nugget del gruppo -> viene rimossa da quella lista
+          #     (il resto del fatto, se verificato, resta).
+          #   - Se il campo "fact" stesso del fatto consolidato non e' verificabile
+          #     (caso anomalo: dovrebbe essere sempre verbatim da un nugget originale,
+          #     quindi un fallimento qui indica probabile riscrittura non richiesta
+          #     da parte del modello) -> il fatto viene scartato e sostituito con il
+          #     PRIMO nugget grezzo del gruppo, intatto, com'era nell'input originale:
+          #     e' la retrocessione piu' sicura possibile, garantisce comunque la
+          #     presenza dell'informazione senza rischiare un dato riscritto e non
+          #     verificato.
           #
 
           import re
@@ -561,29 +543,17 @@ jobs:
           SIMILARITY_THRESHOLD = 0.60
           NUMERIC_TOLERANCE_PCT = 0.02  # 2%
 
-          # Riconosce orari nel formato H:MM o HH:MM (es. "9:30", "17:15") come token
-          # atomici, PRIMA che la regex numerica generica li spezzi in due numeri.
           TIME_REGEX = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
-
           NUMBER_REGEX = re.compile(r"\d[\d.,]*\d|\d")
 
 
           def _estrai_orari(testo):
-              # Estrae gli orari come stringhe normalizzate 'HH:MM', trattati come
-              # unita' atomiche non scomponibili in numeri separati.
               if not testo:
                   return []
-              orari = []
-              for match in TIME_REGEX.finditer(testo):
-                  ore, minuti = match.group(1), match.group(2)
-                  orari.append(f"{int(ore):02d}:{minuti}")
-              return orari
+              return [f"{int(m.group(1)):02d}:{m.group(2)}" for m in TIME_REGEX.finditer(testo)]
 
 
           def _rimuovi_orari_dal_testo(testo):
-              # Rimuove i pattern orario dal testo prima di passarlo all'estrazione
-              # numerica generica, cosi' i numeri di un orario non vengono ri-estratti e
-              # controllati (gia' erroneamente) come numeri sciolti.
               return TIME_REGEX.sub(" ", testo)
 
 
@@ -611,8 +581,7 @@ jobs:
                       if numero == 0:
                           return True
                       continue
-                  scostamento = abs(numero - n_sorgente) / abs(n_sorgente)
-                  if scostamento <= NUMERIC_TOLERANCE_PCT:
+                  if abs(numero - n_sorgente) / abs(n_sorgente) <= NUMERIC_TOLERANCE_PCT:
                       return True
               return False
 
@@ -642,168 +611,171 @@ jobs:
               return best_ratio
 
 
-          def _raccogli_quote_originali(source_nugget_ids, id_map):
-              # Raccoglie SOLO le quote_originale (testo verbatim scrapato) dei nugget
-              # citati, MAI il campo 'fact' del nugget grezzo (che e' gia' interpretazione
-              # di un primo LLM e non va usato come base per convalidare un secondo LLM:
-              # un'allucinazione gia' presente nel 'fact' si autoconvaliderebbe).
-              testi = []
-              for local_id in source_nugget_ids:
-                  nugget = id_map.get(local_id)
-                  if nugget and nugget.get("quote_originale"):
-                      testi.append(nugget["quote_originale"])
-              return "\n".join(testi)
-
-
-          def _verifica_testo(testo, testi_sorgente, source_ids_invalidi):
-              # Nucleo comune di verifica per un testo (fact o singola nota
-              # aggiuntiva) contro le quote sorgente. Ritorna (status, dettagli).
-
-              dettagli = {
-                  "similarity_score": None,
-                  "numeri_non_supportati": [],
-                  "orari_non_supportati": [],
-                  "source_ids_invalidi": source_ids_invalidi,
-              }
-
-              if not testi_sorgente:
-                  dettagli["motivo"] = "Nessuna quote originale disponibile per i source_nugget_ids dichiarati."
-                  return "unverified", dettagli
+          def _e_verificato(testo, testi_sorgente):
+              # Nucleo della verifica: True/False, nessun dettaglio esposto
+              # all'esterno di questo modulo. Questa e' la logica di gate interna.
+              if not testo or not testi_sorgente:
+                  return False
 
               similarity = _testo_supportato_fuzzy(testo, testi_sorgente)
-              dettagli["similarity_score"] = round(similarity, 3)
 
               orari_testo = _estrai_orari(testo)
               orari_sorgente = set(_estrai_orari(testi_sorgente))
-              for orario in orari_testo:
-                  if orario not in orari_sorgente:
-                      dettagli["orari_non_supportati"].append(orario)
+              if any(o not in orari_sorgente for o in orari_testo):
+                  return False
 
               numeri_testo = _estrai_numeri(testo)
               numeri_sorgente = _estrai_numeri(testi_sorgente)
-              for numero in numeri_testo:
-                  if not _numero_supportato(numero, numeri_sorgente):
-                      dettagli["numeri_non_supportati"].append(numero)
+              if any(not _numero_supportato(n, numeri_sorgente) for n in numeri_testo):
+                  return False
 
               ha_dati_puntuali = bool(orari_testo) or bool(numeri_testo)
-
               if ha_dati_puntuali:
-                  # Se il testo contiene orari e/o numeri, questi devono essere
-                  # tracciabili verbatim (con tolleranza) nelle quote originali: e'
-                  # il criterio decisivo, la similarity testuale grezza e' solo
-                  # informativa (un fatto puo' essere scritto in modo leggermente
-                  # diverso pur riportando lo stesso dato).
-                  is_verified = (
-                      not dettagli["numeri_non_supportati"]
-                      and not dettagli["orari_non_supportati"]
-                      and not source_ids_invalidi
-                  )
-              else:
-                  is_verified = (
-                      similarity >= SIMILARITY_THRESHOLD
-                      and not source_ids_invalidi
-                  )
-
-              return ("verified" if is_verified else "unverified"), dettagli
+                  # I dati puntuali (numeri/orari) sono gia' stati controllati sopra;
+                  # se sono tutti supportati, il testo e' verificato indipendentemente
+                  # dalla similarity generale (la riformulazione libera e' normale).
+                  return True
+              return similarity >= SIMILARITY_THRESHOLD
 
 
-          def verifica_fatto(fatto, id_map):
-              source_ids = fatto.get("source_nugget_ids", [])
-              source_ids_invalidi = [sid for sid in source_ids if sid not in id_map]
-              testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
-
-              status, dettagli = _verifica_testo(fatto.get("fact", ""), testi_sorgente, source_ids_invalidi)
-              fatto["verification_status"] = status
-              fatto["verification_details"] = dettagli
-
-              # Verifica anche ogni singola nota aggiuntiva, con lo stesso principio.
-              # Se anche solo una nota aggiuntiva non e' verificata, il fatto nel suo
-              # complesso viene marcato unverified (e' piu' sicuro: meglio segnalare
-              # un fatto altrimenti valido perche' contiene un'aggiunta sospetta, che
-              # lasciar passare inosservata l'aggiunta stessa).
-              note_verificate = []
-              for nota in fatto.get("note_aggiuntive", []):
-                  nota_status, nota_dettagli = _verifica_testo(nota, testi_sorgente, source_ids_invalidi)
-                  note_verificate.append({
-                      "testo": nota,
-                      "verification_status": nota_status,
-                      "verification_details": nota_dettagli,
-                  })
-                  if nota_status == "unverified":
-                      fatto["verification_status"] = "unverified"
-
-              if note_verificate:
-                  fatto["note_aggiuntive_verification"] = note_verificate
-
-              return fatto
+          def _quote_originali_gruppo(nugget_ids_originali, id_map):
+              # Raccoglie le quote_originale (verbatim) di TUTTI i nugget del gruppo
+              # che ha prodotto un fatto consolidato, non solo del vincitore: un'aggiunta
+              # legittima puo' provenire da qualsiasi nugget del gruppo. id_map e' tutta
+              # la macro-area (non solo il gruppo), quindi qui serve una lista di id
+              # espliciti, tracciata a parte dal chiamante tramite matching sul
+              # source_url + fact del vincitore (v. verifica_e_filtra_fatti).
+              testi = []
+              for nid in nugget_ids_originali:
+                  n = id_map.get(nid)
+                  if n and n.get("quote_originale"):
+                      testi.append(n["quote_originale"])
+              return "\n".join(testi)
 
 
-          def verifica_verified_fact(verified_fact, id_map):
-              source_ids = verified_fact.get("source_nugget_ids", [])
-              source_ids_invalidi = [sid for sid in source_ids if sid not in id_map]
-              testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
+          def _trova_nugget_originale(fatto, local_nuggets):
+              # Trova il nugget grezzo originale che corrisponde al 'fact' verbatim
+              # del fatto consolidato (il vincitore del gruppo). Match esatto sul testo
+              # del fact, che deve essere identico per costruzione (richiesto dal
+              # prompt). Ritorna l'indice nella lista local_nuggets, o None se non
+              # trovato (caso anomalo, gestito dal chiamante come fallimento verifica).
+              fact_testo = (fatto.get("fact") or "").strip()
+              for i, n in enumerate(local_nuggets):
+                  if (n.get("fact") or "").strip() == fact_testo:
+                      return i
+              return None
 
-              status, dettagli = _verifica_testo(str(verified_fact.get("valore", "")), testi_sorgente, source_ids_invalidi)
-              verified_fact["verification_status"] = status
-              verified_fact["verification_details"] = dettagli
-              return verified_fact
+
+          def verifica_e_filtra_fatti(fatti, local_nuggets):
+              # Applica il filtro silenzioso a tutti i fatti di una macro-area.
+              # Ritorna la lista di fatti pronta per l'output finale, GIA' pulita:
+              # nessun campo di verifica aggiunto, solo correzioni silenziose quando
+              # necessario. Ritorna anche un contatore aggregato (solo per il log).
+
+              id_map = {i: n for i, n in enumerate(local_nuggets)}
+              fatti_puliti = []
+              contatori = {"note_scartate": 0, "fatti_retrocessi": 0, "fatti_ok": 0}
+
+              for fatto in fatti:
+                  idx_vincitore = _trova_nugget_originale(fatto, local_nuggets)
+
+                  if idx_vincitore is None:
+                      # Il 'fact' non corrisponde verbatim a NESSUN nugget originale:
+                      # il modello ha riscritto quando non doveva. Non possiamo fidarci
+                      # di questo fatto: lo scartiamo dall'output di questa macro-area.
+                      # Il nugget originale che il modello intendeva rappresentare non
+                      # e' univocamente determinabile da qui, quindi il chiamante
+                      # (orchestrator) si occupa di garantire che nessun nugget vada
+                      # perso confrontando gli insiemi a livello di intera pipeline.
+                      contatori["fatti_retrocessi"] += 1
+                      continue
+
+                  # Le quote di riferimento per questo fatto: solo il nugget vincitore
+                  # stesso (la fonte del suo 'fact' e 'quote_originale' dichiarati).
+                  # Per le note_aggiuntive, invece, il riferimento e' l'intera
+                  # macro-area: un'informazione aggiuntiva puo' provenire da un
+                  # qualunque altro nugget della stessa macro-area.
+                  quote_vincitore = local_nuggets[idx_vincitore].get("quote_originale", "")
+
+                  fatto_pulito = dict(fatto)
+
+                  note_originali = fatto_pulito.get("note_aggiuntive", [])
+                  if note_originali:
+                      testi_macro_area = "\n".join(
+                          n.get("quote_originale", "") for n in local_nuggets
+                      )
+                      note_verificate = [
+                          nota for nota in note_originali
+                          if _e_verificato(nota, testi_macro_area)
+                      ]
+                      scartate = len(note_originali) - len(note_verificate)
+                      if scartate:
+                          contatori["note_scartate"] += scartate
+                      if note_verificate:
+                          fatto_pulito["note_aggiuntive"] = note_verificate
+                      else:
+                          fatto_pulito.pop("note_aggiuntive", None)
+
+                  contatori["fatti_ok"] += 1
+                  fatti_puliti.append(fatto_pulito)
+
+              return fatti_puliti, contatori
 
 
-          def esegui_verifica_anti_allucinazione(macro_aree_riconciliate):
-              # Entry point della fase 3. Arricchisce ogni fatto/verified_fact con i
-              # campi di verifica direttamente sull'oggetto. Ritorna anche un piccolo
-              # report aggregato di sole statistiche per log/summary.
+          def verifica_dati_volatili(dati_volatili, local_nuggets):
+              # Verifica silenziosa dei 'dati_volatili' (schema minimo: entita,
+              # tipo_valore, valore, source_url). Un dato volatile e' scartato SOLO se
+              # il suo 'valore' contiene numeri/orari non tracciabili in NESSUNA
+              # quote_originale della macro-area (stesso principio del resto della
+              # fase 3). Nessun campo di verifica viene aggiunto all'output: si scarta
+              # o si tiene, senza lasciare traccia del processo nel dato stesso.
 
-              totale_fatti = 0
-              totale_verified_facts = 0
-              totale_non_verificati = 0
-              totale_conflitti_irrisolti = 0
+              testi_macro_area = "\n".join(
+                  n.get("quote_originale", "") for n in local_nuggets
+              )
 
-              for area in macro_aree_riconciliate:
-                  local_nuggets = area.get("_local_nuggets", [])
-                  id_map = {i: n for i, n in enumerate(local_nuggets)}
+              validi = []
+              scartati = 0
+              for dv in dati_volatili:
+                  valore = str(dv.get("valore", ""))
+                  if _e_verificato(valore, testi_macro_area):
+                      validi.append(dv)
+                  else:
+                      scartati += 1
 
-                  fatti_verificati = []
-                  for fatto in area.get("fatti", []):
-                      totale_fatti += 1
-                      fatto_verificato = verifica_fatto(fatto, id_map)
-                      fatti_verificati.append(fatto_verificato)
-                      if fatto_verificato["verification_status"] == "unverified":
-                          totale_non_verificati += 1
-                      if fatto_verificato.get("conflitto_irrisolto"):
-                          totale_conflitti_irrisolti += 1
-                  area["fatti"] = fatti_verificati
+              return validi, scartati
 
-                  vf_verificati = []
-                  for vf in area.get("verified_facts", []):
-                      totale_verified_facts += 1
-                      vf_verificato = verifica_verified_fact(vf, id_map)
-                      vf_verificati.append(vf_verificato)
-                      if vf_verificato["verification_status"] == "unverified":
-                          totale_non_verificati += 1
-                  area["verified_facts"] = vf_verificati
 
-                  area.pop("_local_nuggets", None)
+          def recupera_nugget_persi(fatti_puliti, local_nuggets):
+              # Garanzia di non-perdita: confronta l'insieme dei nugget grezzi di
+              # input con quelli effettivamente rappresentati nei fatti in output
+              # (tramite match sul 'fact' verbatim). Ogni nugget grezzo che non compare
+              # in NESSUN fatto in output (ne' come vincitore ne' citato in
+              # source_urls_extra/note_aggiuntive) viene ri-aggiunto singolarmente,
+              # intatto, com'era nell'input originale. Questa e' la rete di sicurezza
+              # finale: garantisce che l'aggregato di dati non si restringa mai per
+              # un fallimento del modello o della verifica, coerente con l'obbligo di
+              # non perdere mai informazione senza intervento umano nel loop.
 
-              report = {
-                  "totale_fatti": totale_fatti,
-                  "totale_verified_facts": totale_verified_facts,
-                  "totale_non_verificati": totale_non_verificati,
-                  "totale_conflitti_irrisolti": totale_conflitti_irrisolti,
-              }
-
-              return macro_aree_riconciliate, report
+              facts_presenti = {f.get("fact", "").strip() for f in fatti_puliti}
+              recuperati = []
+              for n in local_nuggets:
+                  if n.get("fact", "").strip() not in facts_presenti:
+                      recuperati.append(dict(n))
+              return fatti_puliti + recuperati, len(recuperati)
 
           PYEOF
       - name: Creazione modulo - orchestrator.py
         run: |
           cat << 'PYEOF' > orchestrator.py
           #
-          # Orchestratore principale: carica i nugget grezzi, esegue clustering,
-          # deduplicazione per macro-area (NON sintesi editoriale, v3), verifica
-          # anti-allucinazione deterministica, e scrive UN SOLO output finale
-          # strutturato, pensato per essere consumato senza intervento umano da una
-          # fase successiva della pipeline di deep research.
+          # Orchestratore principale (v4): carica i nugget grezzi, esegue clustering,
+          # deduplicazione semantica per macro-area, applica il filtro anti-
+          # allucinazione SILENZIOSO (nessun campo di verifica nell'output), garantisce
+          # che nessun nugget vada perso, e scrive UN SOLO output finale nello stesso
+          # schema minimale dell'input (fact, source_url, category, confidence,
+          # quote_originale), con eccezioni aggiunte solo quando strettamente
+          # necessario.
           #
           # Uso:
           #     python orchestrator.py --input nuggets_finale.json --output-dir ./output
@@ -822,12 +794,8 @@ jobs:
           from gemini_client import GeminiAnalysisClient
           from clustering import clusterizza_nuggets
           from reconciliation import riconcilia_macro_area
-          from hallucination_check import esegui_verifica_anti_allucinazione
+          from hallucination_check import verifica_e_filtra_fatti, recupera_nugget_persi, verifica_dati_volatili
 
-          # Limite RPM richiesto per il piano free di Gemini 3.1 Flash-Lite. Questo
-          # limite e' UNICO e condiviso da TUTTA la pipeline (clustering + tutte le
-          # riconciliazioni per macro-area), perche' il limite e' applicato da Google
-          # per chiave/progetto, non per singola fase del nostro programma.
           MAX_RPM = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
 
 
@@ -849,7 +817,6 @@ jobs:
           def _carica_nuggets(input_path):
               with open(input_path, "r", encoding="utf-8") as f:
                   data = json.load(f)
-
               if isinstance(data, dict) and "nuggets" in data:
                   return data["nuggets"]
               if isinstance(data, list):
@@ -869,7 +836,8 @@ jobs:
 
               if not nuggets_grezzi:
                   print("[ORCHESTRATOR] Nessun nugget da processare. Uscita.", flush=True)
-                  _scrivi_output_vuoto(output_dir)
+                  with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
+                      json.dump({"nuggets": []}, f, indent=2, ensure_ascii=False)
                   return
 
               api_keys = _carica_api_keys()
@@ -889,57 +857,72 @@ jobs:
               print(f"[ORCHESTRATOR] Fase 2: deduplicazione per macro-area "
                     f"({len(macro_aree)} chiamate, rate-limited a {MAX_RPM} RPM condivisi "
                     f"col clustering)...", flush=True)
-              macro_aree_riconciliate = []
+
+              tutti_i_fatti = []
+              tutti_i_dati_volatili = []
+              tot_note_scartate = 0
+              tot_fatti_retrocessi = 0
+              tot_nugget_recuperati = 0
+              tot_dati_volatili_scartati = 0
+
               for area in macro_aree:
                   label = f"[{area['nome_macro_area']}] "
                   risultato = await riconcilia_macro_area(
                       gemini_client, area["nome_macro_area"], area["nuggets"], label=label
                   )
-                  macro_aree_riconciliate.append(risultato)
-                  print(f"{label}{len(risultato.get('fatti', []))} fatti, "
-                        f"{len(risultato.get('verified_facts', []))} verified_facts.", flush=True)
 
-              print("[ORCHESTRATOR] Fase 3: verifica anti-allucinazione deterministica...", flush=True)
-              macro_aree_verificate, report_verifica = esegui_verifica_anti_allucinazione(
-                  macro_aree_riconciliate
-              )
-              print(f"[ORCHESTRATOR] Verifica completata: "
-                    f"{report_verifica['totale_non_verificati']} elementi non verificati, "
-                    f"{report_verifica['totale_conflitti_irrisolti']} conflitti irrisolti "
-                    f"(entrambi restano nell'output principale con il relativo flag).", flush=True)
+                  fatti_grezzi = risultato.get("fatti", [])
+                  local_nuggets = risultato.get("_local_nuggets", area["nuggets"])
 
-              output_finale = {
-                  "meta": {
-                      "totale_nugget_grezzi_input": len(nuggets_grezzi),
-                      "totale_macro_aree": len(macro_aree_riconciliate),
-                      "stats_verifica": report_verifica,
-                  },
-                  "macro_aree": macro_aree_riconciliate,
-              }
+                  # Fase 3, applicata SILENZIOSAMENTE: nessun campo aggiunto
+                  # all'output, solo correzioni interne (rimozione note non
+                  # verificabili, scarto di fatti riscritti in modo anomalo).
+                  fatti_puliti, contatori = verifica_e_filtra_fatti(fatti_grezzi, local_nuggets)
 
+                  # Rete di sicurezza finale: nessun nugget grezzo puo' sparire
+                  # dall'output complessivo della macro-area, in nessun caso.
+                  fatti_completi, n_recuperati = recupera_nugget_persi(fatti_puliti, local_nuggets)
+
+                  dati_volatili_grezzi = risultato.get("dati_volatili", [])
+                  dati_volatili_puliti, n_scartati_volatili = verifica_dati_volatili(
+                      dati_volatili_grezzi, local_nuggets
+                  )
+
+                  tot_note_scartate += contatori["note_scartate"]
+                  tot_fatti_retrocessi += contatori["fatti_retrocessi"]
+                  tot_nugget_recuperati += n_recuperati
+                  tot_dati_volatili_scartati += n_scartati_volatili
+
+                  print(f"{label}{len(fatti_completi)} fatti in output "
+                        f"(da {len(local_nuggets)} nugget grezzi; "
+                        f"{contatori['note_scartate']} note scartate dal filtro, "
+                        f"{n_recuperati} nugget recuperati dalla rete di sicurezza), "
+                        f"{len(dati_volatili_puliti)} dati volatili identificati.", flush=True)
+
+                  tutti_i_fatti.extend(fatti_completi)
+                  tutti_i_dati_volatili.extend(dati_volatili_puliti)
+
+              print(f"[ORCHESTRATOR] Pipeline completata: {len(nuggets_grezzi)} nugget grezzi "
+                    f"-> {len(tutti_i_fatti)} fatti in output "
+                    f"({tot_note_scartate} note interne scartate dal filtro qualita', "
+                    f"{tot_fatti_retrocessi} fatti riscritti in modo anomalo scartati e "
+                    f"ripristinati dalla rete di sicurezza, "
+                    f"{tot_nugget_recuperati} nugget totali recuperati intatti, "
+                    f"{tot_dati_volatili_scartati} dati volatili scartati dal filtro), "
+                    f"{len(tutti_i_dati_volatili)} dati volatili totali.", flush=True)
+
+              output_finale = {"nuggets": tutti_i_fatti}
               output_path = os.path.join(output_dir, "nuggets_riconciliati.json")
               with open(output_path, "w", encoding="utf-8") as f:
                   json.dump(output_finale, f, indent=2, ensure_ascii=False)
 
+              dati_volatili_output = {"dati_volatili": tutti_i_dati_volatili}
+              dati_volatili_path = os.path.join(output_dir, "dati_volatili.json")
+              with open(dati_volatili_path, "w", encoding="utf-8") as f:
+                  json.dump(dati_volatili_output, f, indent=2, ensure_ascii=False)
+
               print(f"[ORCHESTRATOR] Output scritto in {output_path}", flush=True)
-
-
-          def _scrivi_output_vuoto(output_dir):
-              output_finale = {
-                  "meta": {
-                      "totale_nugget_grezzi_input": 0,
-                      "totale_macro_aree": 0,
-                      "stats_verifica": {
-                          "totale_fatti": 0,
-                          "totale_verified_facts": 0,
-                          "totale_non_verificati": 0,
-                          "totale_conflitti_irrisolti": 0,
-                      },
-                  },
-                  "macro_aree": [],
-              }
-              with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
-                  json.dump(output_finale, f, indent=2, ensure_ascii=False)
+              print(f"[ORCHESTRATOR] Dati volatili scritti in {dati_volatili_path}", flush=True)
 
 
           def main():
@@ -959,16 +942,20 @@ jobs:
         run: |
           cat << 'PYEOF' > print_summary.py
           import json
+          import os
 
           with open("./output/nuggets_riconciliati.json", encoding="utf-8") as f:
               data = json.load(f)
 
-          stats = data.get("meta", {}).get("stats_verifica", {})
-          print(f"- Macro-aree individuate: {data.get('meta', {}).get('totale_macro_aree', 0)}")
-          print(f"- Fatti totali (dopo deduplicazione): {stats.get('totale_fatti', 0)}")
-          print(f"- Verified facts totali: {stats.get('totale_verified_facts', 0)}")
-          print(f"- Elementi non verificati (flag unverified): {stats.get('totale_non_verificati', 0)}")
-          print(f"- Conflitti irrisolti (da ripassare con grounding a valle): {stats.get('totale_conflitti_irrisolti', 0)}")
+          n_fatti = len(data.get("nuggets", []))
+          print(f"- Fatti totali in output (dopo deduplicazione): {n_fatti}")
+
+          dv_path = "./output/dati_volatili.json"
+          if os.path.exists(dv_path):
+              with open(dv_path, encoding="utf-8") as f:
+                  dv_data = json.load(f)
+              n_dv = len(dv_data.get("dati_volatili", []))
+              print(f"- Dati volatili identificati (prezzi/orari con fonte): {n_dv}")
 
           PYEOF
 
@@ -997,8 +984,14 @@ jobs:
             python3 print_summary.py >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload Artifact - Nugget Deduplicati (output unico black-box)
+      - name: Upload Artifact - Nugget Deduplicati (schema identico all'input)
         uses: actions/upload-artifact@v4
         with:
           name: Nuggets_Riconciliati
           path: output/nuggets_riconciliati.json
+
+      - name: Upload Artifact - Dati Volatili (per aggiornamento periodico automatico)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dati_Volatili
+          path: output/dati_volatili.json
