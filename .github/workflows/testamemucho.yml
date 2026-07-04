@@ -29,7 +29,12 @@ jobs:
               -d '{
                 "contents": [{
                   "parts":[{"text": "Quali sono le notizie principali di oggi nel mondo? Rispondi in italiano in modo molto breve."}]
-                }] 
+                }],
+                "tools": [
+                  {
+                    "googleSearch": {}
+                  }
+                ]
               }')
 
             if [ "$HTTP_STATUS" -eq 200 ]; then
@@ -39,7 +44,7 @@ jobs:
               echo "Errore Server ($HTTP_STATUS). Attesa di 15 secondi prima del prossimo tentativo..."
               cat response.json
               echo ""
-              sleep 2
+              sleep 3
             fi
 
             if [ "$i" -eq 15 ]; then
