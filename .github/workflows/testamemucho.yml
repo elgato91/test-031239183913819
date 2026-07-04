@@ -1,37 +1,58 @@
-name: Test Gemma 4 26B
+name: Test Gemma 4 31B (Google AI Studio)
 
 on:
-  workflow_dispatch: # Ti permette di avviarlo manualmente dalla tab "Actions" su GitHub
+  workflow_dispatch: # Permette l'avvio manuale
 
 jobs:
-  test-gemma4:
+  test-gemma-31b:
     runs-on: ubuntu-latest
     steps:
-      - name: Invia prompt a Gemma 4 26B
+      - name: Invia prompt a Gemma 4 31B
         env:
           GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           if [ -z "$GOOGLE_API_KEY" ]; then
-            echo "Errore: GOOGLE_API_KEY non è configurata nei Secrets del repository."
+            echo "Errore: GOOGLE_API_KEY non è configurata nei Secrets di GitHub."
             exit 1
           fi
 
-          echo "Inizio chiamata a gemma-4-26b-a4b-it..."
+          echo "Inizio dei tentativi di chiamata a gemma-4-31b-it su Google AI Studio..."
 
-          curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GOOGLE_API_KEY}" \
-            -H 'Content-Type: application/json' \
-            -X POST \
-            -d '{
-              "contents": [{
-                "parts":[{"text": "Ciao Gemma 4! Rispondi con un brevissimo saluto di test in italiano."}]
-              }]
-            }' > response.json
+          # Ciclo di retry fino a 5 tentativi con attesa di 10 secondi in caso di errore 500
+          for i in {1..5}; do
+            echo "Tentativo $i di 5..."
 
-          # Mostra la risposta JSON grezza ricevuta dalle API
-          echo "=== RISPOSTA API ==="
+            HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+              "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${GOOGLE_API_KEY}" \
+              -H 'Content-Type: application/json' \
+              -X POST \
+              -d '{
+                "contents": [{
+                  "parts":[{"text": "Rispondi in italiano con pochissime parole: conferma se il test su Gemma 4 31B ha funzionato correttamente."}]
+                }]
+              }')
+
+            if [ "$HTTP_STATUS" -eq 200 ]; then
+              echo "Successo! Risposta ricevuta al tentativo $i."
+              break
+            else
+              echo "Server Google occupato o in errore ($HTTP_STATUS). Attesa di 10 secondi prima del prossimo tentativo..."
+              # Mostra l'errore per diagnostica
+              cat response.json
+              echo ""
+              sleep 10
+            fi
+
+            # Se si raggiunge l'ultimo tentativo e fallisce ancora, esce con errore
+            if [ "$i" -eq 5 ]; then
+              echo "Errore persistente dopo 5 tentativi."
+              exit 1
+            fi
+          done
+
+          echo "=== RISPOSTA GREZZA DA GOOGLE ==="
           cat response.json
           echo ""
 
-          # Opzionale: estrae solo il testo della risposta se è installato jq (preinstallato sui runner GitHub)
           echo "=== TESTO ESTRATTO ==="
           cat response.json | jq -r '.candidates[0].content.parts[0].text' || echo "Impossibile formattare la risposta."
