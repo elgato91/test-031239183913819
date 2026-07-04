@@ -1,4 +1,4 @@
-name: Test Gemma 4 31B con Google Search
+name: Test Gemma 4 31B Grounding Nativo
 
 on:
   workflow_dispatch:
@@ -7,44 +7,41 @@ jobs:
   test-grounding:
     runs-on: ubuntu-latest
     steps:
-      - name: Chiamata con Grounding a Gemma 4 31B
+      - name: Chiamata Diretta a Gemma 4 con Search
         env:
-          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: |
           if [ -z "$GOOGLE_API_KEY" ]; then
-            echo "Errore: GOOGLE_API_KEY non è configurata nei Secrets."
+            echo "Errore: GOOGLE_API_KEY non è impostata nei Secrets."
             exit 1
           fi
 
-          echo "Invio richiesta a gemma-4-31b-it con Google Search Grounding abilitato..."
+          echo "Inizio chiamata nativa a gemma-4-31b-it con Google Search..."
 
-          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${GOOGLE_API_KEY}" \
+          # Chiamata API ufficiale con il tool googleSearch abilitato
+          curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${GOOGLE_API_KEY}" \
             -H 'Content-Type: application/json' \
             -X POST \
             -d '{
               "contents": [{
-                "parts":[{"text": "Quali sono le ultime notizie meteo di oggi per Milano? Rispondi in italiano in modo sintetico."}]
+                "parts":[{"text": "Quali sono le notizie principali di oggi nel mondo? Rispondi in italiano."}]
               }],
               "tools": [
                 {
                   "googleSearch": {}
                 }
               ]
-            }')
+            }' > response.json
 
-          if [ "$HTTP_STATUS" -eq 200 ]; then
-            echo "Richiesta completata con successo!"
-          else
-            echo "Errore server Google ($HTTP_STATUS)."
-            cat response.json
-            exit 1
-          fi
-
-          echo "=== RISPOSTA FINALE ESTRATTA ==="
-          cat response.json | jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text'
+          echo "=== RISPOSTA GREZZA DA GOOGLE ==="
+          cat response.json
           echo ""
 
-          echo "=== FONTI E QUERY UTILIZZATE (GROUNDING METADATA) ==="
-          # Estrae i metadati di ricerca (le query inviate a Google e i siti web consultati)
-          cat response.json | jq '.candidates[0].groundingMetadata'
+          echo "=== TESTO ESTRATTO ==="
+          # Estrae solo la risposta testuale escludendo i blocchi di "thought" (pensiero)
+          cat response.json | jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text' || echo "Nessun testo finale estratto."
+
+          echo ""
+          echo "=== METADATI DI RICERCA (VERIFICA GROUNDING) ==="
+          # Mostra i metadati di grounding generati nativamente da Google (query e fonti)
+          cat response.json | jq '.candidates[0].groundingMetadata' || echo "Nessun metadato di grounding presente."
