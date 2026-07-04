@@ -19,8 +19,8 @@ jobs:
           echo "Inizio dei tentativi di chiamata a gemma-4-26b-a4b-it..."
 
           # Ciclo di retry fino a 5 tentativi con attesa di 15 secondi
-          for i in {1..5}; do
-            echo "Tentativo $i di 5..."
+          for i in {1..15}; do
+            echo "Tentativo $i di 15..."
 
             HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
               "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
@@ -44,7 +44,7 @@ jobs:
               echo "Errore Server ($HTTP_STATUS). Attesa di 15 secondi prima del prossimo tentativo..."
               cat response.json
               echo ""
-              sleep 15
+              sleep 2
             fi
 
             if [ "$i" -eq 5 ]; then
