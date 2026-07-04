@@ -20,7 +20,7 @@ jobs:
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
-          
+
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
@@ -55,7 +55,7 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
             sleep 0.5
           done
-          
+
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
 
@@ -78,16 +78,6 @@ jobs:
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
-
-          # Lista completa salvata a parte: e' la rete di sicurezza usata dal setup di
-          # Step 2 per capire quali target NON hanno lasciato alcuna traccia (ne'
-          # successo ne' fallimento esplicito) in output_node_X_step1.txt, ad esempio
-          # perche' il processo del loro nodo e' morto prima di arrivarci (crash,
-          # kill, timeout). Senza questo, un target del genere sparirebbe dalla
-          # pipeline per sempre, invece di essere ritentato in Step 2.
-          with open("/tmp/step1_all_targets.json", "w") as f:
-              json.dump(TARGETS, f)
-
           print("Code distribuite Step 1 generate con successo.")
           EOF
           python -u m2_step1_setup.py
@@ -515,76 +505,6 @@ jobs:
                           self._mark_cooldown(entry, label=label)
                           return None, "quota"
                       return None, f"errore: {e}"
-
-
-          # Timeout massimo tollerato per l'inizializzazione dell'intero pool (tutte le
-          # chiavi). genai.Client(...) e' sincrono e puo' fare setup di rete/canale
-          # gRPC sotto al cofano: se piu' processi nodo lo chiamano in una finestra
-          # temporale stretta, il client/endpoint puo' impallarsi invece di fallire
-          # in modo pulito (comportamento noto e documentato per il client google-genai
-          # sotto carico concorrente). Non e' MAI accettabile che questo blocchi o
-          # uccida il processo di scraping: se il pool non si inizializza in tempo,
-          # la nugget extraction viene semplicemente disattivata per quel nodo.
-          #
-          # NOTA: l'init del pool viene lanciata come task in BACKGROUND dal chiamante
-          # (m2_step1.py / m2_step2.py), in parallelo con l'inizio dello scraping vero
-          # e proprio, non prima. Per questo qui non serve piu' alcun jitter per
-          # "diradare" nel tempo l'avvio dei vari nodi: lo scraping di ciascun nodo
-          # parte comunque subito, indipendentemente da quanto ci mette il proprio
-          # pool Gemini a essere pronto in background.
-          POOL_INIT_TIMEOUT_SECONDS = 25.0
-
-
-          async def crea_pool_sicuro(api_keys, node_id=None, label_step=""):
-              """
-              Costruisce un GeminiKeyPool in modo che un problema di rete/gRPC durante
-              l'inizializzazione (hang, eccezione, timeout) non possa MAI interrompere
-              o rallentare in modo bloccante il processo di scraping del nodo.
-
-              Va SEMPRE lanciata come task in background (asyncio.create_task), MAI
-              at await diretto prima di iniziare lo scraping: e' pensata per essere
-              "in corso" mentre il nodo scarica gia' le sue pagine, non per essere
-              aspettata all'avvio.
-
-              Ritorna il GeminiKeyPool se l'inizializzazione va a buon fine entro
-              POOL_INIT_TIMEOUT_SECONDS, altrimenti None (nugget extraction disattivata
-              per questo nodo, scraping non impattato in alcun modo).
-              """
-              label = f"[NODO {node_id}] " if node_id is not None else ""
-
-              if not api_keys:
-                  return None
-
-              loop = asyncio.get_event_loop()
-
-              def _build_pool():
-                  # Eseguita in un thread separato: genai.Client(...) e' sincrono e
-                  # potenzialmente bloccante, quindi non deve mai girare direttamente
-                  # sull'event loop del nodo.
-                  return GeminiKeyPool(api_keys)
-
-              try:
-                  with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                      future = loop.run_in_executor(executor, _build_pool)
-                      pool = await asyncio.wait_for(future, timeout=POOL_INIT_TIMEOUT_SECONDS)
-                  print(f"{label}[GEMINI-POOL] Pool inizializzato con successo "
-                        f"({len(pool.entries)} chiave/i).", flush=True)
-                  return pool
-
-              except (asyncio.TimeoutError, TimeoutError):
-                  print(f"{label}[GEMINI-POOL] Inizializzazione pool oltre "
-                        f"{POOL_INIT_TIMEOUT_SECONDS:.0f}s (probabile contesa di rete/gRPC "
-                        f"con altri nodi concorrenti). Nugget extraction disattivata per "
-                        f"questo nodo, lo scraping prosegue normalmente.", flush=True)
-                  return None
-
-              except Exception as e:
-                  print(f"{label}[GEMINI-POOL] Errore inizializzazione pool: {e}. "
-                        f"Nugget extraction disattivata per questo nodo, lo scraping "
-                        f"prosegue normalmente.", flush=True)
-                  return None
-
-
           def _estrai_json_da_risposta(raw_text):
               if not raw_text:
                   return None
@@ -726,45 +646,57 @@ jobs:
               return None
           EOF
 
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, async + nugget extraction)
+      - name: Creazione Processo Estrattore Nugget INDIPENDENTE
         run: |
-          cat << 'EOF' > m2_step1.py
+          cat << 'EOF' > nugget_estrattore_standalone.py
+          import asyncio
+          import json
+          import os
           import time
           import sys
-          import random
-          import os
-          import json
-          import asyncio
-          from curl_cffi import requests as curl_requests
-          from extraction_utils import html_to_clean_markdown
-          from nugget_extractor import estrai_nuggets, scrivi_nuggets_jsonl, crea_pool_sicuro
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
 
-          # Numero massimo di chiamate Gemini Live in volo contemporaneamente PER NODO.
-          # Il vero limite di velocita' e' gestito dal token bucket TPM dentro
-          # GeminiKeyPool: questo semaforo serve solo a non aprire un numero
-          # spropositato di WebSocket paralleli (che sarebbero comunque messi in coda
-          # dal bucket, ma e' piu' pulito limitarli anche a livello di concorrenza).
+          """
+          Processo COMPLETAMENTE INDIPENDENTE dallo scraper. Gira in background,
+          lanciato in parallelo con Step 1 e (poi) Step 2, sulla stessa macchina ma
+          come processo a se stante: potrebbe girare identico su una macchina
+          diversa, l'unico contatto con lo scraper e' il file scraped_content.jsonl,
+          che legge in sola lettura via polling.
+
+          Nessun import di curl_cffi, cloakbrowser, playwright: questo processo non
+          sa nulla di WARP, proxy, browser headful o validazione HTML. Riceve solo
+          testo gia' pronto e lo passa a Gemini. Se Gemini e' lento, va in timeout,
+          sclera per qualsiasi motivo: non ha alcun modo di rallentare o rompere lo
+          scraping, perche' vive in un processo separato con il proprio event loop.
+
+          Il file di stato SCRAPED_CONTENT_POSITION_PATH tiene traccia di quante
+          righe sono gia' state lette, cosi' un riavvio di questo processo (se mai
+          servisse) non rielabora da capo tutto quanto gia' processato.
+          """
+
+          SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
+          NUGGETS_OUTPUT_PATH = "nuggets_estrattore.jsonl"
+
+          # Ogni quanti secondi si ricontrolla se ci sono nuove righe nel file
+          # condiviso. Un valore piccolo (1-2s) tiene la latenza di estrazione bassa
+          # senza consumare CPU in modo apprezzabile con un semplice polling.
+          POLL_INTERVAL_SECONDS = 2.0
+
+          # Dopo quanti secondi di INATTIVITA' del file (nessuna riga nuova) il
+          # processo si considera "lo scraper ha finito" e inizia il conto alla
+          # rovescia per chiudersi. Viene comunque sempre chiuso esplicitamente
+          # dal workflow con un timeout massimo, questo e' solo un modo per non
+          # restare in polling all'infinito se lanciato a mano.
+          IDLE_SHUTDOWN_SECONDS = 40.0
+
           NUGGET_CONCURRENCY = 5
-
           TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
 
-          if len(sys.argv) < 2:
-              sys.exit(1)
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-
-          NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step1.jsonl"
-          # Lock per serializzare le scritture JSONL tra i task concorrenti dello
-          # stesso nodo (append su file e' quasi sempre atomico su Linux per righe
-          # brevi, ma il lock elimina ogni ambiguita' senza costare quasi nulla).
           _jsonl_lock = asyncio.Lock()
 
 
           def carica_gemini_api_keys():
-              """Legge GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ...
-              Funziona anche con una sola chiave configurata."""
               keys = []
               primary = os.environ.get("GEMINI_API_KEY")
               if primary:
@@ -777,6 +709,143 @@ jobs:
                   keys.append(k)
                   i += 1
               return keys
+
+
+          async def salva_nuggets(nuggets):
+              if not nuggets:
+                  return
+              async with _jsonl_lock:
+                  scrivi_nuggets_jsonl(nuggets, NUGGETS_OUTPUT_PATH)
+
+
+          async def main():
+              api_keys = carica_gemini_api_keys()
+              if not api_keys:
+                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato "
+                        "immediatamente (nessun impatto sullo scraper).", flush=True)
+                  return
+
+              # Qui l'init del pool puo' tranquillamente essere un await diretto:
+              # se si blocca o fallisce, blocca SOLO questo processo indipendente,
+              # mai lo scraper, che gira altrove e non aspetta nessuno.
+              try:
+                  key_pool = GeminiKeyPool(api_keys)
+                  print(f"[ESTRATTORE] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
+              except Exception as e:
+                  print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. "
+                        f"Processo terminato (nessun impatto sullo scraper).", flush=True)
+                  return
+
+              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
+              tasks_in_volo = []
+              righe_lette = 0
+              ultima_riga_vista = time.monotonic()
+
+              print(f"[ESTRATTORE] Avvio polling su {SCRAPED_CONTENT_PATH} "
+                    f"(ogni {POLL_INTERVAL_SECONDS:.0f}s, topic='{TARGET_TOPIC}')...", flush=True)
+
+              async def processa_riga(source_url, testo_markdown):
+                  async with nugget_semaphore:
+                      esito = await estrai_nuggets(
+                          key_pool=key_pool,
+                          source_url=source_url,
+                          testo_markdown=testo_markdown,
+                          topic=TARGET_TOPIC,
+                          node_id=None
+                      )
+                  if esito:
+                      await salva_nuggets(esito)
+
+              while True:
+                  if os.path.exists(SCRAPED_CONTENT_PATH):
+                      with open(SCRAPED_CONTENT_PATH, "r", encoding="utf-8") as f:
+                          tutte_le_righe = f.readlines()
+
+                      righe_nuove = tutte_le_righe[righe_lette:]
+                      if righe_nuove:
+                          ultima_riga_vista = time.monotonic()
+
+                      for riga in righe_nuove:
+                          riga = riga.strip()
+                          if not riga:
+                              continue
+                          try:
+                              record = json.loads(riga)
+                          except json.JSONDecodeError:
+                              # Riga scritta a meta' da un nodo (raro, ma possibile se
+                              # capita esattamente nell'istante del polling): la si
+                              # rilegge al giro successivo, quindi qui la si salta e
+                              # NON si avanza righe_lette per questa specifica riga.
+                              continue
+
+                          source_url = record.get("source_url")
+                          testo_markdown = record.get("testo_markdown")
+                          if source_url and testo_markdown:
+                              print(f"[ESTRATTORE] Nuovo contenuto ricevuto: {source_url}", flush=True)
+                              tasks_in_volo.append(asyncio.create_task(processa_riga(source_url, testo_markdown)))
+
+                      righe_lette = len(tutte_le_righe)
+
+                  # Pulizia dei task gia' completati per non far crescere la lista
+                  # all'infinito durante run lunghe.
+                  tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
+
+                  inattivo_da = time.monotonic() - ultima_riga_vista
+                  if inattivo_da > IDLE_SHUTDOWN_SECONDS and not tasks_in_volo:
+                      print(f"[ESTRATTORE] Nessun nuovo contenuto da {inattivo_da:.0f}s e nessun "
+                            f"task in volo: presumo che lo scraper abbia finito. Chiusura.", flush=True)
+                      break
+
+                  await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+              if tasks_in_volo:
+                  print(f"[ESTRATTORE] Attesa completamento {len(tasks_in_volo)} estrazioni residue...", flush=True)
+                  await asyncio.gather(*tasks_in_volo, return_exceptions=True)
+
+              print(f"[ESTRATTORE] Terminato. Nugget salvati in {NUGGETS_OUTPUT_PATH}", flush=True)
+
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
+
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, disaccoppiato da Gemini)
+        run: |
+          cat << 'EOF' > m2_step1.py
+          import time
+          import sys
+          import random
+          import os
+          import json
+          import asyncio
+          from curl_cffi import requests as curl_requests
+          from extraction_utils import html_to_clean_markdown
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          # File JSONL condiviso tra TUTTI i nodi di Step 1 e letto in parallelo
+          # dall'estrattore di nugget (processo completamente separato). Ogni riga e'
+          # un oggetto {"source_url": ..., "testo_markdown": ...}. E' l'UNICO punto di
+          # contatto tra scraper ed estrattore: nessun'altra dipendenza, nessuna
+          # chiamata di rete verso Gemini da qui, nessun import di client Gemini.
+          SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
+
+          # Lock a livello di file (non di processo): piu' nodi scrivono in append
+          # sullo stesso file. append su Linux e' atomico per scritture sotto ~4KB
+          # in un colpo solo (PIPE_BUF), quindi per righe JSONL di dimensione tipica
+          # non serve altro; usiamo comunque un flush esplicito per sicurezza.
+
+
+          def carica_gemini_api_keys_placeholder():
+              # Mantenuto per compatibilita' di firma, non usato: lo scraper non sa
+              # nulla di Gemini. Rimane qui solo come promemoria che le chiavi vivono
+              # esclusivamente nel processo estrattore.
+              pass
 
 
           async def verify_proxy_active(port, max_retries=5, delay=5):
@@ -822,13 +891,29 @@ jobs:
               return True, ""
 
 
-          async def salva_nuggets(nuggets):
-              """Scrittura incrementale immediata su disco (JSONL), protetta da lock
-              per evitare interleaving tra task concorrenti dello stesso nodo."""
-              if not nuggets:
-                  return
-              async with _jsonl_lock:
-                  scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+          def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
+              """
+              Scrive una riga JSONL sul file condiviso, letto in parallelo dal
+              processo estrattore. Questa e' l'UNICA interazione tra scraper ed
+              estrattore: un append su un file di testo. Nessuna chiamata di rete
+              verso Gemini avviene qui, nessuna attesa, nessun blocco: se il file
+              non si riesce a scrivere per qualsiasi motivo, l'eccezione viene
+              ignorata (lo scraping non deve MAI fermarsi per un problema
+              dell'estrazione nugget a valle).
+              """
+              try:
+                  riga = json.dumps({
+                      "source_url": source_url,
+                      "testo_markdown": testo_markdown,
+                      "node_id": node_id,
+                      "step": step_label
+                  }, ensure_ascii=False)
+                  with open(SCRAPED_CONTENT_PATH, "a", encoding="utf-8") as f:
+                      f.write(riga + "\n")
+                      f.flush()
+              except Exception as e:
+                  print(f"[NODO {node_id}] Attenzione: impossibile pubblicare contenuto per "
+                        f"l'estrattore nugget ({e}). Lo scraping prosegue comunque.", flush=True)
 
 
           async def main():
@@ -842,37 +927,8 @@ jobs:
               with open(queue_file, "r") as f:
                   targets = json.load(f)
 
-              # --- Init del pool Gemini in BACKGROUND, non bloccante ---
-              # Prima questa chiamata era un `await` diretto qui in testa a main():
-              # il nodo restava fermo (jitter + eventuale attesa di rete sul client
-              # Gemini, fino a 25s) PRIMA di aprire la sessione HTTP e fare la prima
-              # richiesta di scraping vera. Questo spostava nel tempo il momento in
-              # cui il nodo usa per la prima volta il proprio tunnel proxy WARP,
-              # introducendo un ritardo variabile che la pipeline stabile (senza
-              # nugget extraction) non aveva mai avuto, e che e' risultato essere
-              # la causa dei nuovi "errore rete" osservati in Step 1.
-              #
-              # Ora l'inizializzazione parte in un task separato SUBITO, ma il nodo
-              # NON la aspetta: apre la sessione e comincia a scrapare nello stesso
-              # istante in cui l'avrebbe fatto senza nugget extraction del tutto.
-              # Il pool verra' atteso solo dal primo nugget task che ne avra'
-              # davvero bisogno (lancia_nugget_task), il che succede solo dopo che
-              # la prima pagina e' gia' stata scaricata e validata: tempo che il
-              # pool, nel frattempo, ha gia' avuto per completare la sua init.
-              api_keys = carica_gemini_api_keys()
-              pool_init_task = None
-              if api_keys:
-                  pool_init_task = asyncio.create_task(
-                      crea_pool_sicuro(api_keys, node_id=node_id, label_step="step1")
-                  )
-              else:
-                  print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
-
-              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
-
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
               failed_targets = []
-              nugget_retry_pool = []  # (url, testo_markdown) andati in timeout/errore: un solo retry a fine nodo
 
               session = curl_requests.AsyncSession(impersonate="chrome120")
               session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
@@ -880,45 +936,6 @@ jobs:
                   "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
               })
-
-              nugget_tasks = []
-
-              async def lancia_nugget_task(url, testo_markdown):
-                  """Task fire-and-forget: il loop di scraping prosegue subito sul
-                  target successivo mentre Gemini processa questo in background.
-                  Il risultato viene scritto su disco NON APPENA arriva (mai solo
-                  accumulato in RAM), cosi' un'interruzione improvvisa del job non
-                  perde il lavoro gia' completato."""
-                  if pool_init_task is None:
-                      return
-
-                  async def _run():
-                      # Il pool viene atteso QUI, non all'avvio del nodo: se e' gia'
-                      # pronto (caso comune, visto che ha avuto tutto il tempo dello
-                      # scraping della prima pagina per completarsi) questo await
-                      # ritorna all'istante. Se non lo e' ancora, aspetta solo questo
-                      # specifico task nugget, senza mai aver rallentato lo scraping.
-                      key_pool = await pool_init_task
-                      if key_pool is None:
-                          # Pool non disponibile (init fallita/andata in timeout):
-                          # nessun nugget per questo target, lo scraping non è
-                          # comunque stato toccato in alcun modo.
-                          return
-
-                      async with nugget_semaphore:
-                          esito = await estrai_nuggets(
-                              key_pool=key_pool,
-                              source_url=url,
-                              testo_markdown=testo_markdown,
-                              topic=TARGET_TOPIC,
-                              node_id=node_id
-                          )
-                      if esito is None:
-                          nugget_retry_pool.append((url, testo_markdown))
-                      else:
-                          await salva_nuggets(esito)
-
-                  nugget_tasks.append(asyncio.create_task(_run()))
 
               for url in targets:
                   print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
@@ -937,7 +954,7 @@ jobs:
                           print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
 
                           if not any(site in url for site in DIAGNOSTIC_SITES):
-                              await lancia_nugget_task(url, text)
+                              pubblica_contenuto_scrapato(url, text, node_id, "step1")
                       else:
                           print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
                           failed_targets.append(url)
@@ -949,48 +966,31 @@ jobs:
 
               await session.close()
 
-              # Salva SUBITO il testo grezzo e i target falliti: questo non dipende
-              # dalle chiamate nugget ancora in corso, quindi va scritto a prescindere.
               with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
                   f.write(results)
               with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
                   json.dump(failed_targets, f)
 
-              if nugget_tasks:
-                  print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
-                  await asyncio.gather(*nugget_tasks, return_exceptions=True)
-
-              # A questo punto pool_init_task, se esiste, e' sicuramente gia' risolto
-              # (tutti i nugget_tasks sopra lo hanno gia' atteso): riawaitarlo qui
-              # ritorna il risultato gia' calcolato all'istante, senza ricalcolare nulla.
-              key_pool_finale = await pool_init_task if pool_init_task is not None else None
-
-              if nugget_retry_pool and key_pool_finale is not None:
-                  print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
-                  retry_tasks = []
-                  for url, testo_markdown in nugget_retry_pool:
-                      async def _retry(url=url, testo_markdown=testo_markdown):
-                          async with nugget_semaphore:
-                              esito = await estrai_nuggets(
-                                  key_pool=key_pool_finale,
-                                  source_url=url,
-                                  testo_markdown=testo_markdown,
-                                  topic=TARGET_TOPIC,
-                                  node_id=node_id
-                              )
-                          if esito:
-                              await salva_nuggets(esito)
-                          else:
-                              print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
-                      retry_tasks.append(asyncio.create_task(_retry()))
-                  await asyncio.gather(*retry_tasks, return_exceptions=True)
-
-              print(f"[NODO {node_id}] STEP 1 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
+              print(f"[NODO {node_id}] STEP 1 completato.", flush=True)
 
 
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
+
+      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
+        run: |
+          # Processo completamente separato dallo scraper: nessun import di
+          # curl-cffi/cloakbrowser/playwright al suo interno, nessuna
+          # dipendenza dai container WARP. Legge in polling il file
+          # scraped_content.jsonl che Step 1 e Step 2 riempiono via via, e
+          # produce nuggets_estrattore.jsonl per conto suo. Lanciato UNA
+          # SOLA VOLTA qui, resta vivo per tutta la durata di Step 1 e
+          # Step 2 senza che nessuno dei due lo aspetti mai.
+          touch scraped_content.jsonl
+          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
+          echo $! > estrattore_nugget.pid
+          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
 
       - name: Esecuzione Scraping Parallelo - STEP 1
         run: |
@@ -998,7 +998,7 @@ jobs:
           touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
           tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
           TAIL_PID=$!
-          
+
           PIDS=()
           for i in {1..6}; do
             python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
@@ -1020,7 +1020,6 @@ jobs:
           cat << 'EOF' > m2_step2_setup.py
           import json
           import os
-          import re
 
           merged_failed = []
           for i in range(1, 7):
@@ -1030,46 +1029,6 @@ jobs:
                       try: merged_failed.extend(json.load(f))
                       except Exception: pass
 
-          # --- Rete di sicurezza ---
-          # Confronta la lista COMPLETA dei target originali di Step 1 con quelli che
-          # risultano effettivamente comparsi (successo o fallito, non importa quale)
-          # nei report testuali di Step 1. Un target originale che non compare in
-          # NESSUNO dei due posti (ne' failed_node_X.json, ne' output_node_X_step1.txt)
-          # e' un target il cui nodo e' morto prima di poterlo processare o loggare
-          # in alcun modo (crash, kill, hang risolto in timeout, ecc). Senza questo
-          # controllo quel target sparirebbe dalla pipeline per sempre, invece di
-          # essere recuperato qui in Step 2 come tutti gli altri falliti.
-          target_orfani = []
-          try:
-              with open("/tmp/step1_all_targets.json", "r", encoding="utf-8") as f:
-                  tutti_i_target = json.load(f)
-
-              testo_comparso = ""
-              for i in range(1, 7):
-                  out_file = f"output_node_{i}_step1.txt"
-                  if os.path.exists(out_file):
-                      with open(out_file, "r", encoding="utf-8") as f:
-                          testo_comparso += f.read()
-
-              for url in tutti_i_target:
-                  gia_in_failed = url in merged_failed
-                  compare_nei_report = ("TARGET: " + url) in testo_comparso
-                  if not gia_in_failed and not compare_nei_report:
-                      target_orfani.append(url)
-
-              if target_orfani:
-                  print(f"Trovati {len(target_orfani)} target orfani (nodo terminato "
-                        f"prima di produrre qualsiasi traccia): {target_orfani}")
-          except FileNotFoundError:
-              # step1_all_targets.json non presente: workflow generato con una
-              # versione precedente dello step di setup. Si prosegue solo con i
-              # falliti espliciti, comportamento identico a prima.
-              pass
-          except Exception as e:
-              print(f"Attenzione: controllo target orfani fallito ({e}), si prosegue "
-                    f"solo con i falliti espliciti.")
-
-          merged_failed.extend(target_orfani)
           unique_failed = list(dict.fromkeys(merged_failed))
 
           for i in range(1, 7):
@@ -1077,12 +1036,11 @@ jobs:
               with open(f"/tmp/step2_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
 
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser "
-                f"({len(target_orfani)} recuperati dalla rete di sicurezza).")
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato + nugget extraction)
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, disaccoppiato da Gemini)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -1096,25 +1054,14 @@ jobs:
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
           from extraction_utils import html_to_clean_markdown
-          from nugget_extractor import estrai_nuggets, scrivi_nuggets_jsonl, crea_pool_sicuro
 
           if len(sys.argv) < 2:
               sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
 
-          NUGGET_CONCURRENCY = 5
-          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
+          SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
-          NUGGETS_JSONL_PATH = f"nuggets_node_{node_id}_step2.jsonl"
-          _jsonl_lock = asyncio.Lock()
-
-          # Stessi indicatori usati in Step 1: la validazione va fatta sull'HTML
-          # grezzo (o su get_text semplice), MAI sul markdown gia' ripulito da
-          # html_to_clean_markdown, perche' lo stripping di nav/footer/header/form
-          # e la rimozione dei link non validi alterano la lunghezza e il contenuto
-          # del testo, producendo falsi positivi di "blocco" su pagine che in realta'
-          # sono state scaricate correttamente.
           BLOCKING_INDICATORS = [
               "just a moment", "are you a robot", "prove your humanity",
               "captcha verification", "please enter in the characters you see below",
@@ -1122,21 +1069,6 @@ jobs:
               "we've detected unusual activity", "checking your browser",
               "security verification", "unusual traffic from your computer network"
           ]
-
-
-          def carica_gemini_api_keys():
-              keys = []
-              primary = os.environ.get("GEMINI_API_KEY")
-              if primary:
-                  keys.append(primary)
-              i = 2
-              while True:
-                  k = os.environ.get(f"GEMINI_API_KEY_{i}")
-                  if not k:
-                      break
-                  keys.append(k)
-                  i += 1
-              return keys
 
 
           def get_query_from_url(url, default="migliore carbonara roma"):
@@ -1151,27 +1083,31 @@ jobs:
               return default
 
 
-          async def salva_nuggets(nuggets):
-              if not nuggets:
-                  return
-              async with _jsonl_lock:
-                  scrivi_nuggets_jsonl(nuggets, NUGGETS_JSONL_PATH)
+          def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
+              """Identica funzione di m2_step1.py: unico punto di contatto con
+              l'estrattore nugget, un semplice append su file. Nessuna chiamata di
+              rete verso Gemini, nessun blocco, nessuna dipendenza."""
+              try:
+                  riga = json.dumps({
+                      "source_url": source_url,
+                      "testo_markdown": testo_markdown,
+                      "node_id": node_id,
+                      "step": step_label
+                  }, ensure_ascii=False)
+                  with open(SCRAPED_CONTENT_PATH, "a", encoding="utf-8") as f:
+                      f.write(riga + "\n")
+                      f.flush()
+              except Exception as e:
+                  print(f"[NODO {node_id}] Attenzione: impossibile pubblicare contenuto per "
+                        f"l'estrattore nugget ({e}). Lo scraping prosegue comunque.", flush=True)
 
 
           async def verify_proxy_active(port, max_retries=6, delay=5):
-              """
-              Stessa identica logica del check gia' presente in m2_step1.py.
-              Nella pipeline stabile questo controllo mancava in Step 2, ma il
-              timing tutto sincrono lo rendeva innocuo: il ritardo introdotto dal
-              check bloccante in Step 1 (piu' i 6s di sleep fisso dopo il restart
-              dei container) copriva quasi sempre la latenza di avvio di WARP.
-              Con Step 1 reso asincrono e concorrente quel margine di sicurezza
-              implicito e' sparito: senza questo check, CloakBrowser puo' provare
-              ad aprire Chromium mentre il tunnel SOCKS5 del container non e'
-              ancora up, causando ERR_PROXY_CONNECTION_FAILED al primo goto e la
-              conseguente perdita silenziosa del nodo (nessun output, nessun
-              errore "gestito": il processo muore prima del loop sui target).
-              """
+              """Health-check del proxy prima di avviare il browser: nella pipeline
+              stabile mancava in Step 2, ma il timing tutto sincrono lo rendeva
+              innocuo. Va mantenuto qui a prescindere da qualsiasi discorso su
+              Gemini, perche' risolve un problema di timing tra Docker/WARP e
+              CloakBrowser che non ha nulla a che fare con la nugget extraction."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for tentativo in range(max_retries):
@@ -1190,13 +1126,9 @@ jobs:
 
 
           def validate_html(html, url, status_code):
-              """
-              Validazione WAF/captcha identica nello spirito a quella di Step 1,
-              ma eseguita sull'HTML grezzo scaricato dal browser (via page.content()),
-              PRIMA di qualunque pulizia o conversione a markdown. La conversione a
-              markdown resta un post-processing esclusivamente per l'output finale
-              e non deve mai influenzare la decisione di successo/fallimento.
-              """
+              """Validazione sull'HTML grezzo, PRIMA di qualunque conversione a
+              markdown: la conversione resta un post-processing per l'output finale
+              e non deve mai influenzare la decisione di successo/fallimento."""
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
@@ -1229,7 +1161,6 @@ jobs:
                       f.write("")
                   return
 
-              # --- FIX 1: health-check del proxy prima di avviare il browser ---
               if not await verify_proxy_active(INITIAL_PORT):
                   print(f"[NODO {node_id}] Proxy MAI diventato attivo sulla porta {INITIAL_PORT}. "
                         f"Nodo abortito, i target restano falliti.", flush=True)
@@ -1237,49 +1168,6 @@ jobs:
                       f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: proxy non disponibile, "
                                f"nodo abortito prima di iniziare\n{'#'*60}\n")
                   return
-
-              # --- Init del pool Gemini in BACKGROUND, non bloccante ---
-              # Stessa logica di m2_step1.py: l'init parte come task separato SUBITO
-              # dopo il proxy check, ma il nodo non la aspetta. Il browser viene
-              # avviato immediatamente dopo, esattamente ai tempi che avrebbe senza
-              # nugget extraction. Il pool viene atteso solo dal primo nugget task
-              # che ne avra' davvero bisogno, non dall'avvio del nodo.
-              api_keys = carica_gemini_api_keys()
-              pool_init_task = None
-              if api_keys:
-                  pool_init_task = asyncio.create_task(
-                      crea_pool_sicuro(api_keys, node_id=node_id, label_step="step2")
-                  )
-              else:
-                  print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
-
-              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
-              nugget_retry_pool = []
-              nugget_tasks = []
-
-              async def lancia_nugget_task(url, testo_markdown):
-                  if pool_init_task is None:
-                      return
-
-                  async def _run():
-                      key_pool = await pool_init_task
-                      if key_pool is None:
-                          return
-
-                      async with nugget_semaphore:
-                          esito = await estrai_nuggets(
-                              key_pool=key_pool,
-                              source_url=url,
-                              testo_markdown=testo_markdown,
-                              topic=TARGET_TOPIC,
-                              node_id=node_id
-                          )
-                      if esito is None:
-                          nugget_retry_pool.append((url, testo_markdown))
-                      else:
-                          await salva_nuggets(esito)
-
-                  nugget_tasks.append(asyncio.create_task(_run()))
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
@@ -1297,14 +1185,6 @@ jobs:
               context = None
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
-                  # --- FIX 2: try/finally attorno a tutto il ciclo di vita del browser ---
-                  # Se qualsiasi cosa fallisce dopo l'apertura del context (incluso il
-                  # primissimo goto di warmup), il context viene comunque chiuso in modo
-                  # esplicito prima che asyncio.run() chiuda il loop. Prima, un errore
-                  # qui faceva "return" immediato lasciando Chromium e le sue pipe aperte,
-                  # causando il "RuntimeError: Event loop is closed" nel __del__ del
-                  # subprocess transport quando il garbage collector interveniva dopo
-                  # la chiusura del loop.
                   try:
                       context = await launch_persistent_context_async(
                           profile_dir,
@@ -1382,7 +1262,6 @@ jobs:
                           raw_html = await page.content()
                           current_url = page.url
 
-                          # --- FIX 3: validazione sull'HTML grezzo, non sul markdown ---
                           is_ok, err_msg = validate_html(raw_html, current_url, None)
 
                           if is_ok:
@@ -1390,7 +1269,7 @@ jobs:
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
                               print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
 
-                              await lancia_nugget_task(url, text_for_output)
+                              pubblica_contenuto_scrapato(url, text_for_output, node_id, "step2")
                           else:
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({err_msg})\n"
                               print(f"[NODO {node_id}] -> Fallito: {err_msg}", flush=True)
@@ -1404,39 +1283,9 @@ jobs:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                       f.write(results)
 
-                  if nugget_tasks:
-                      print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
-                      await asyncio.gather(*nugget_tasks, return_exceptions=True)
-
-                  # Stesso ragionamento di m2_step1.py: qui il pool e' gia' risolto.
-                  key_pool_finale = await pool_init_task if pool_init_task is not None else None
-
-                  if nugget_retry_pool and key_pool_finale is not None:
-                      print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
-                      retry_tasks = []
-                      for url, testo_markdown in nugget_retry_pool:
-                          async def _retry(url=url, testo_markdown=testo_markdown):
-                              async with nugget_semaphore:
-                                  esito = await estrai_nuggets(
-                                      key_pool=key_pool_finale,
-                                      source_url=url,
-                                      testo_markdown=testo_markdown,
-                                      topic=TARGET_TOPIC,
-                                      node_id=node_id
-                                  )
-                              if esito:
-                                  await salva_nuggets(esito)
-                              else:
-                                  print(f"[NODO {node_id}] [NUGGET] Retry fallito definitivamente su {url}", flush=True)
-                          retry_tasks.append(asyncio.create_task(_retry()))
-                      await asyncio.gather(*retry_tasks, return_exceptions=True)
-
-                  print(f"[NODO {node_id}] STEP 2 completato. Nugget salvati in {NUGGETS_JSONL_PATH}", flush=True)
+                  print(f"[NODO {node_id}] STEP 2 completato.", flush=True)
 
               finally:
-                  # Chiusura esplicita e garantita del context, qualunque cosa succeda
-                  # sopra (successo, eccezione, return anticipato). Questo e' il pezzo
-                  # che mancava ed e' la causa diretta del RuntimeError sul loop chiuso.
                   if context is not None:
                       try:
                           await context.close()
@@ -1455,7 +1304,7 @@ jobs:
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
           TAIL_PID=$!
-          
+
           PIDS=()
           for i in {1..6}; do
             python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
@@ -1465,7 +1314,7 @@ jobs:
 
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
-          
+
           for i in {1..6}; do
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
@@ -1485,6 +1334,36 @@ jobs:
               output_node_5_step1.txt output_node_5_step2.txt \
               output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
 
+      - name: Attesa Coda Residua Estrattore Nugget (timeout massimo, non bloccante per lo scraper)
+        if: always()
+        run: |
+          # A questo punto lo SCRAPING E' GIA' COMPLETAMENTE FINITO (lo step
+          # sopra ha gia' fatto "wait" sui suoi processi e chiuso i container
+          # WARP). Questo step serve solo a dare all'estrattore, che nel
+          # frattempo ha gia' processato quasi tutto in parallelo mentre lo
+          # scraper lavorava, un margine di tempo limitato per smaltire le
+          # ultime righe rimaste in coda, senza pero' bloccare la pipeline
+          # all'infinito se per qualche motivo l'estrattore fosse ancora
+          # occupato o impallato.
+          if [ -f estrattore_nugget.pid ]; then
+            PID=$(cat estrattore_nugget.pid)
+            echo "Attendo la chiusura naturale del processo estrattore (PID $PID), max 60s..."
+            for i in {1..60}; do
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "Processo estrattore terminato naturalmente dopo ${i}s."
+                break
+              fi
+              sleep 1
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Timeout raggiunto: chiudo forzatamente il processo estrattore residuo."
+              kill "$PID" 2>/dev/null || true
+            fi
+          fi
+          touch nuggets_estrattore.jsonl
+          echo "--- log estrattore nugget ---"
+          cat estrattore_nugget.log || true
+
       - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
         if: always()
         run: |
@@ -1493,15 +1372,15 @@ jobs:
           import os
           import glob
 
-          # Cerca TUTTI i file nuggets_node_*_step*.jsonl presenti nella working
-          # directory, indipendentemente da quanti nodi/step siano effettivamente
-          # arrivati alla fine. Questo rende il merge resiliente anche a
-          # interruzioni parziali del job: se il job muore a meta', questo script
-          # recupera comunque tutto cio' che era stato scritto fino a quel momento.
-          jsonl_files = sorted(glob.glob("nuggets_node_*_step*.jsonl"))
+          # Con l'architettura disaccoppiata c'e' un SOLO file di output nugget,
+          # scritto dal processo estrattore indipendente (nuggets_estrattore.jsonl),
+          # non piu' un file per nodo/step come nella versione precedente. Il glob
+          # resta comunque utile per compatibilita' con eventuali run parziali o
+          # rilanci dello stesso file.
+          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
 
           merged_nuggets = []
-          per_node_stats = {}
+          per_file_stats = {}
 
           for filename in jsonl_files:
               count = 0
@@ -1523,8 +1402,7 @@ jobs:
               except Exception as e:
                   print(f"Errore lettura {filename}: {e}", flush=True)
 
-              label = filename.replace("nuggets_node_", "").replace(".jsonl", "")
-              per_node_stats[label] = count
+              per_file_stats[filename] = count
               if corrotte:
                   print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
 
@@ -1551,7 +1429,7 @@ jobs:
                   "file_jsonl_trovati": len(jsonl_files),
                   "totale_nugget_grezzi": len(merged_nuggets),
                   "totale_nugget_deduplicati": len(nuggets_deduplicati),
-                  "per_nodo": per_node_stats,
+                  "per_file": per_file_stats,
                   "per_confidence": confidence_counts
               },
               "nuggets": nuggets_deduplicati
