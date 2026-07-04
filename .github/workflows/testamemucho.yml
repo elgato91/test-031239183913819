@@ -4,10 +4,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-live-grounding:
+  test-live:
     runs-on: ubuntu-latest
     steps:
-      - name: Chiamata a Gemini 3.1 Flash Live con Search Grounding
+      - name: Installa SDK Google GenAI
+        run: |
+          # Installa la libreria ufficiale Google GenAI per il supporto WebSocket Live
+          pip install google-genai
+
+      - name: Esegui Chiamata Live WebSocket (Gemini 3.1 Flash Live)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -16,32 +21,52 @@ jobs:
             exit 1
           fi
 
-          echo "Inizio chiamata nativa a gemini-3.1-flash-live-preview con Google Search..."
+          # Scrive lo script Python per la connessione asincrona WebSocket
+          cat << 'EOF' > live_test.py
+          import asyncio
+          import os
+          from google import genai
+          from google.genai import types
 
-          # Chiamata API ufficiale con il modello Gemini 3.1 Flash Live e Google Search Grounding attivo
-          curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-live-preview:generateContent?key=${GEMINI_API_KEY}" \
-            -H 'Content-Type: application/json' \
-            -X POST \
-            -d '{
-              "contents": [{
-                "parts":[{"text": "Quali sono le ultime notizie più importanti di oggi nel mondo? Rispondi in italiano in modo molto sintetico."}]
-              }],
-              "tools": [
-                {
-                  "googleSearch": {}
-                }
-              ]
-            }' > response.json
+          async def main():
+              api_key = os.environ.get("GEMINI_API_KEY")
+              client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
+              
+              # Configura la sessione per l'audio, abilita la trascrizione testuale
+              # e attiva il Grounding con Google Search
+              config = types.LiveConnectConfig(
+                  response_modalities=[types.Modality.AUDIO],
+                  output_audio_transcription=types.AudioTranscriptionConfig(),
+                  tools=[{"google_search": {}}]
+              )
+              
+              print("Connessione in corso al WebSocket di gemini-3.1-flash-live-preview...")
+              
+              async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
+                  print("Connessione WebSocket stabilita con successo!")
+                  print("Invio del prompt con richiesta di Grounding...")
+                  
+                  # Invia la domanda al modello tramite il flusso live
+                  await session.send_realtime_input(
+                      text="Quali sono le ultime notizie più importanti di oggi nel mondo? Rispondi in italiano in modo molto sintetico."
+                  )
+                  
+                  print("\n=== RISPOSTA IN TEMPO REALE DA GEMINI 3.1 LIVE ===")
+                  async for response in session.receive():
+                      server_content = response.server_content
+                      if server_content:
+                          # Stampa la trascrizione testuale man mano che viene generata dall'audio nativo
+                          if server_content.output_transcription and server_content.output_transcription.text:
+                              print(server_content.output_transcription.text, end="", flush=True)
+                          
+                          # Termina la sessione quando il turno di risposta è completo
+                          if server_content.turn_complete:
+                              print("\n")
+                              break
 
-          echo "=== RISPOSTA GREZZA DA GOOGLE ==="
-          cat response.json
-          echo ""
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
 
-          echo "=== TESTO ESTRATTO ==="
-          # Estrae la risposta finale escludendo i blocchi di "thought" se presenti
-          cat response.json | jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text' || echo "Nessun testo finale estratto."
-
-          echo ""
-          echo "=== METADATI DI RICERCA (VERIFICA GROUNDING) ==="
-          # Mostra i metadati reali del grounding (query effettuate e fonti consultate)
-          cat response.json | jq '.candidates[0].groundingMetadata' || echo "Nessun metadato di grounding presente."
+          # Esegue lo script
+          python3 live_test.py
