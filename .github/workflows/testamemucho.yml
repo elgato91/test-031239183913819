@@ -1,4 +1,4 @@
-name: Test Gemma 4 Grounding Nativo
+name: Test Gemma 4 Grounding con Retry
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ jobs:
   test-grounding:
     runs-on: ubuntu-latest
     steps:
-      - name: Chiamata Diretta a Gemma 4 con Search
+      - name: Chiamata a Gemma 4 con Retry e Search Grounding
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -16,22 +16,42 @@ jobs:
             exit 1
           fi
 
-          echo "Inizio chiamata nativa a gemma-4-26b-a4b-it con Google Search..."
+          echo "Inizio dei tentativi di chiamata a gemma-4-26b-a4b-it..."
 
-          # Chiamata API ufficiale usando il modello 26B (che non soffre del bug 500 di Google)
-          curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
-            -H 'Content-Type: application/json' \
-            -X POST \
-            -d '{
-              "contents": [{
-                "parts":[{"text": "Quali sono le notizie principali di oggi nel mondo? Rispondi in italiano in modo molto breve."}]
-              }],
-              "tools": [
-                {
-                  "googleSearch": {}
-                }
-              ]
-            }' > response.json
+          # Ciclo di retry fino a 5 tentativi con attesa di 15 secondi
+          for i in {1..5}; do
+            echo "Tentativo $i di 5..."
+
+            HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+              "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
+              -H 'Content-Type: application/json' \
+              -X POST \
+              -d '{
+                "contents": [{
+                  "parts":[{"text": "Quali sono le notizie principali di oggi nel mondo? Rispondi in italiano in modo molto breve."}]
+                }],
+                "tools": [
+                  {
+                    "googleSearch": {}
+                  }
+                ]
+              }')
+
+            if [ "$HTTP_STATUS" -eq 200 ]; then
+              echo "Successo! Risposta ricevuta correttamente al tentativo $i."
+              break
+            else
+              echo "Errore Server ($HTTP_STATUS). Attesa di 15 secondi prima del prossimo tentativo..."
+              cat response.json
+              echo ""
+              sleep 15
+            fi
+
+            if [ "$i" -eq 5 ]; then
+              echo "Errore: il server ha fallito tutti e 5 i tentativi di chiamata."
+              exit 1
+            fi
+          done
 
           echo "=== RISPOSTA GREZZA DA GOOGLE ==="
           cat response.json
