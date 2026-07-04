@@ -29,12 +29,7 @@ jobs:
               -d '{
                 "contents": [{
                   "parts":[{"text": "Quali sono le notizie principali di oggi nel mondo? Rispondi in italiano in modo molto breve."}]
-                }],
-                "tools": [
-                  {
-                    "googleSearch": {}
-                  }
-                ]
+                }] 
               }')
 
             if [ "$HTTP_STATUS" -eq 200 ]; then
@@ -47,7 +42,7 @@ jobs:
               sleep 2
             fi
 
-            if [ "$i" -eq 5 ]; then
+            if [ "$i" -eq 15 ]; then
               echo "Errore: il server ha fallito tutti e 5 i tentativi di chiamata."
               exit 1
             fi
