@@ -1,72 +1,294 @@
-name: Test Gemini 3.1 Flash Live con Grounding
+name: Reconcile Nuggets - Agente Riconciliazione Editoriale
 
 on:
   workflow_dispatch:
+    inputs:
+      input_file:
+        description: "Path del file JSON con i nugget grezzi (deve essere nella repo)"
+        required: false
+        default: "nuggets_finale.json"
 
 jobs:
-  test-live:
+  reconcile:
     runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
-      - name: Installa SDK Google GenAI
-        run: |
-          # Installa la libreria ufficiale Google GenAI per il supporto WebSocket Live
-          pip install google-genai
 
-      - name: Esegui Chiamata Live WebSocket (Gemini 3.1 Flash Live)
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "Errore: GEMINI_API_KEY non è impostata nei Secrets."
-            exit 1
-          fi
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # Scrive lo script Python per la connessione asincrona WebSocket
-          cat << 'EOF' > live_test.py
-          import asyncio
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installazione dipendenze
+        run: |
+          pip install google-genai requests --break-system-packages
+
+      - name: Creazione modulo - orchestrator.py
+        run: |
+          cat << 'EOF' > orchestrator.py
           import os
+          import sys
+          import tarfile
+          import argparse
+          import requests
           from google import genai
-          from google.genai import types
 
-          async def main():
+          def run_antigravity_pipeline(input_path, output_dir):
+              # Recupero dell'API Key di Gemini
               api_key = os.environ.get("GEMINI_API_KEY")
-              client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
+              if not api_key:
+                  print("[ORCHESTRATOR] ERRORE: GEMINI_API_KEY non configurata.")
+                  sys.exit(1)
+
+              # Lettura del file di input locale contenente i nugget
+              print(f"[ORCHESTRATOR] Caricamento nugget grezzi da: {input_path}")
+              try:
+                  with open(input_path, "r", encoding="utf-8") as f:
+                      raw_nuggets_content = f.read()
+              except Exception as e:
+                  print(f"[ORCHESTRATOR] ERRORE durante la lettura del file di input: {e}")
+                  sys.exit(1)
+
+              # Inizializzazione del client Google GenAI SDK
+              client = genai.Client(api_key=api_key)
+
+              print("[ORCHESTRATOR] Inizializzazione dell'agente Google Antigravity in ambiente remoto...")
               
-              # Configura la sessione per l'audio, abilita la trascrizione testuale
-              # e attiva il Grounding con Google Search
-              config = types.LiveConnectConfig(
-                  response_modalities=[types.Modality.AUDIO],
-                  output_audio_transcription=types.AudioTranscriptionConfig(),
-                  tools=[{"google_search": {}}]
-              )
-              
-              print("Connessione in corso al WebSocket di gemini-3.1-flash-live-preview...")
-              
-              async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
-                  print("Connessione WebSocket stabilita con successo!")
-                  print("Invio del prompt con richiesta di Grounding...")
-                  
-                  # Invia la domanda al modello tramite il flusso live
-                  await session.send_realtime_input(
-                      text="Quali sono le ultime notizie più importanti di oggi nel mondo? Rispondi in italiano in modo molto sintetico."
+              # Definizione del prompt per l'agente Antigravity.
+              # Gli forniamo direttamente il dataset e gli chiediamo di eseguire l'intera elaborazione
+              # all'interno della sandbox, salvando i tre file JSON strutturati.
+              prompt = f"""
+          Sei l'Agente Riconciliazione Editoriale basato su Google Antigravity.
+          Il tuo compito è elaborare una lista di nugget editoriali (fatti grezzi) ed eseguire un'intera pipeline di riconciliazione e validazione.
+
+          Disponi di una sandbox Linux completa, puoi scrivere codice ed eseguire script Python per validare i dati e puoi usare il web search (grounding) per verificare i fatti ed eliminare conflitti.
+
+          Ecco i nugget grezzi in formato JSON da elaborare:
+          ```json
+          {raw_nuggets_content}
+          ```
+
+          Esegui le seguenti attività:
+
+          1. **Clustering Tematico**:
+             - Raggruppa i nugget in macro-aree tematiche (massimo 15). I nomi delle macro-aree devono emergere dal testo (es. "Duomo di Orvieto", "Orari e Tariffe", "Viabilità").
+             - Ogni nugget grezzo deve comparire in una sola macro-area (mappatura basata sugli ID indice o ID univoci).
+
+          2. **Riconciliazione e Grounding**:
+             - Consolida i fatti per eliminare ridondanze.
+             - Risolvi conflitti di dati (orari, cifre, date) facendo ricerche con Google Search.
+             - Per ciascun dato critico (orari, prezzi, contatti), crea un record separato in "verified_facts" e includi l'URL della fonte ufficiale in cui lo hai verificato.
+
+          3. **Verifica Anti-allucinazione Deterministica**:
+             - Scrivi ed esegui uno script Python interno nella sandbox che confronti i fatti consolidati con le "quote_originale" o "fact" del dataset originale.
+             - Controlla la corrispondenza dei numeri e la similarità del testo.
+             - Se un fatto non è supportato dalle fonti originali e non è stato verificato tramite grounding web, o se ci sono discrepanze numeriche significative, assegnalo allo stato "unverified" e includilo in "needs_human_review".
+
+          4. **Struttura degli Output Richiesti**:
+             Scrivi codice Python all'interno della sandbox per salvare esattamente questi tre file JSON nella cartella 'output':
+
+             a) `output/nuggets_riconciliati.json`
+             Deve avere questa struttura precisa:
+             {{
+               "meta": {{
+                 "total_nugget_grezzi_input": <numero_totale_nugget>,
+                 "total_macro_aree": <numero_macro_aree_generate>,
+                 "tetto_macro_aree": 15
+               }},
+               "macro_aree": [
+                 {{
+                   "macro_area": "<nome_macro_area>",
+                   "fatti_consolidati": [
+                     {{
+                       "fact": "<testo_fatto_consolidato>",
+                       "category": "<categoria>",
+                       "source_nugget_ids": [<indici_nugget_grezzi_di_origine>],
+                       "source_urls": ["<url_sorgente_1>", "<url_sorgente_2>"],
+                       "conflitto_irrisolto": false,
+                       "valori_alternativi": [],
+                       "note_risoluzione": "breve nota"
+                     }}
+                   ],
+                   "verified_facts": [
+                     {{
+                       "campo": "<es. prezzo biglietto intero>",
+                       "valore": "<valore_corretto>",
+                       "valori_alternativi_scartati": [],
+                       "fonte_ufficiale_url": "<url_fonte_ufficiale>",
+                       "fonte_ufficiale_certa": true,
+                       "verificato_via_grounding": true,
+                       "source_nugget_ids": [<indici_nugget>]
+                     }}
+                   ]
+                 }}
+               ]
+             }}
+
+             b) `output/verified_facts.json`
+             Deve essere una lista piatta di tutti i verified_facts estratti da tutte le macro-aree:
+             {{
+               "verified_facts": [
+                 {{
+                   "campo": "<campo>",
+                   "valore": "<valore>",
+                   "valori_alternativi_scartati": [],
+                   "fonte_ufficiale_url": "<url>",
+                   "fonte_ufficiale_certa": true,
+                   "verificato_via_grounding": true,
+                   "source_nugget_ids": [3, 9],
+                   "macro_area": "<nome_macro_area>"
+                 }}
+               ]
+             }}
+
+             c) `output/needs_human_review.json`
+             Deve contenere le statistiche globali e gli elementi non verificati:
+             {{
+               "stats": {{
+                 "totale_fatti_consolidati": <conteggio_totale>,
+                 "totale_verified_facts": <conteggio_totale>,
+                 "totale_non_verificati": <conteggio_elementi_da_revisionare>
+               }},
+               "needs_human_review": [
+                 {{
+                   "tipo": "fatto_consolidato",
+                   "macro_area": "<macro_area>",
+                   "fact": "<testo_fatto_non_verificato_o_discrepante>",
+                   "source_urls": ["..."],
+                   "verification_details": {{
+                      "motivation": "spiegazione del perché richiede una revisione umana (es. discrepanza numerica o fatto esterno non verificato)"
+                   }}
+                 }}
+               ]
+             }}
+
+          Una volta che hai scritto e salvato correttamente tutti e tre i file nella directory 'output', stampa un riepilogo testuale completo dei risultati e concludi con la riga "PIPELINE_COMPLETE".
+          """
+
+              try:
+                  # Creazione dell'interazione con l'agente Antigravity in ambiente remoto
+                  interaction = client.interactions.create(
+                      agent="antigravity-preview-05-2026",
+                      input=prompt,
+                      environment="remote"
                   )
                   
-                  print("\n=== RISPOSTA IN TEMPO REALE DA GEMINI 3.1 LIVE ===")
-                  async for response in session.receive():
-                      server_content = response.server_content
-                      if server_content:
-                          # Stampa la trascrizione testuale man mano che viene generata dall'audio nativo
-                          if server_content.output_transcription and server_content.output_transcription.text:
-                              print(server_content.output_transcription.text, end="", flush=True)
-                          
-                          # Termina la sessione quando il turno di risposta è completo
-                          if server_content.turn_complete:
-                              print("\n")
-                              break
+                  print("[ORCHESTRATOR] Output generato dall'Agente Antigravity:")
+                  print(interaction.output_text)
+                  
+                  env_id = interaction.environment_id
+                  if not env_id:
+                      print("[ORCHESTRATOR] ERRORE: L'ambiente remoto non ha restituito un ID valido.")
+                      sys.exit(1)
+                      
+                  # Scaricamento dello snapshot dell'ambiente remoto contenente i file generati
+                  print(f"[ORCHESTRATOR] Salvataggio snapshot dell'ambiente remoto ({env_id})...")
+                  download_url = f"https://generativelanguage.googleapis.com/v1beta/files/environment-{env_id}:download"
+                  
+                  response = requests.get(
+                      download_url,
+                      params={"alt": "media"},
+                      headers={"x-goog-api-key": api_key},
+                      allow_redirects=True
+                  )
+                  
+                  tar_path = "snapshot.tar"
+                  with open(tar_path, "wb") as f:
+                      f.write(response.content)
+                      
+                  print("[ORCHESTRATOR] Estrazione dei file generati dall'agente...")
+                  os.makedirs(output_dir, exist_ok=True)
+                  
+                  # Estrazione dei 3 file desiderati posizionandoli direttamente nella cartella di output
+                  extracted_files = []
+                  with tarfile.open(tar_path, "r") as tar:
+                      for member in tar.getmembers():
+                          filename = os.path.basename(member.name)
+                          if filename in ["nuggets_riconciliati.json", "verified_facts.json", "needs_human_review.json"]:
+                              member.name = filename # Rende l'estrazione piatta rispetto alle cartelle interne
+                              tar.extract(member, path=output_dir)
+                              extracted_files.append(filename)
+                              
+                  print(f"[ORCHESTRATOR] Pipeline completata con successo! File estratti in {output_dir}:")
+                  for f in extracted_files:
+                      print(f"  - {f}")
+                      
+              except Exception as e:
+                  print(f"[ORCHESTRATOR] Errore critico durante l'esecuzione dell'agente: {e}")
+                  sys.exit(1)
+
+          def main():
+              import argparse
+              parser = argparse.ArgumentParser(description="Orchestratore Antigravity Single-Turn.")
+              parser.add_argument("--input", required=True, help="Path al file JSON di input.")
+              parser.add_argument("--output-dir", default="./output", help="Directory di output.")
+              args = parser.parse_args()
+              
+              run_antigravity_pipeline(args.input, args.output_dir)
 
           if __name__ == "__main__":
-              asyncio.run(main())
+              main()
           EOF
 
-          # Esegue lo script
-          python3 live_test.py
+      - name: Creazione modulo - print_summary.py
+        run: |
+          cat << 'EOF' > print_summary.py
+          import json
+
+          try:
+              with open("./output/needs_human_review.json", "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              stats = data.get("stats", {})
+              print(f"- Fatti consolidati totali: {stats.get('totale_fatti_consolidati', 0)}")
+              print(f"- Verified facts totali: {stats.get('totale_verified_facts', 0)}")
+              print(f"- Elementi da revisionare: {stats.get('totale_non_verificati', 0)}")
+          except Exception as e:
+              print(f"Errore durante la lettura del riepilogo: {e}")
+          EOF
+
+      - name: Verifica presenza file di input
+        run: |
+          INPUT_FILE="${{ github.event.inputs.input_file }}"
+          if [ -z "$INPUT_FILE" ]; then
+            INPUT_FILE="nuggets_finale.json"
+          fi
+          echo "INPUT_FILE=$INPUT_FILE" >> $GITHUB_ENV
+          if [ ! -f "$INPUT_FILE" ]; then
+            echo "ERRORE: file di input '$INPUT_FILE' non trovato nella repo."
+            exit 1
+          fi
+          echo "File di input trovato: $INPUT_FILE"
+
+      - name: Esecuzione pipeline di riconciliazione
+        run: |
+          python -u orchestrator.py --input "${{ env.INPUT_FILE }}" --output-dir ./output
+
+      - name: Riepilogo revisione umana
+        if: always()
+        run: |
+          if [ -f "./output/needs_human_review.json" ]; then
+            echo "### Riepilogo verifica anti-allucinazione" >> $GITHUB_STEP_SUMMARY
+            python3 print_summary.py >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Artifact - Nugget Riconciliati
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuggets_Riconciliati
+          path: output/nuggets_riconciliati.json
+
+      - name: Upload Artifact - Verified Facts (dati critici da monitorare)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Verified_Facts
+          path: output/verified_facts.json
+
+      - name: Upload Artifact - Report Revisione Umana
+        uses: actions/upload-artifact@v4
+        with:
+          name: Needs_Human_Review
+          path: output/needs_human_review.json
