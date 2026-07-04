@@ -51,118 +51,33 @@ jobs:
                   print(f"[ORCHESTRATOR] ERRORE durante la lettura del file di input: {e}")
                   sys.exit(1)
 
-              # Inizializzazione del client Google GenAI SDK
               client = genai.Client(api_key=api_key)
 
-              print("[ORCHESTRATOR] Inizializzazione dell'agente Google Antigravity in background...")
+              print("[ORCHESTRATOR] Avvio dell'agente Google Antigravity in background...")
               
+              # Prompt ottimizzato al minimo per evitare cicli di programmazione e ricerche web ridondanti
               prompt = f"""
           Sei l'Agente Riconciliazione Editoriale basato su Google Antigravity.
-          Il tuo compito è elaborare una lista di nugget editoriali (fatti grezzi) ed eseguire un'intera pipeline di riconciliazione e validazione.
+          Il tuo unico compito è riordinare, pulire, accorpare i nugget forniti qui sotto, risolvere eventuali incoerenze ed identificare le fonti ufficiali per i dati volatili importanti (orari, prezzi, contatti) tramite Google Search.
 
-          Disponi di una sandbox Linux completa, puoi scrivere codice ed eseguire script Python per validare i dati e puoi usare il web search (grounding) per verificare i fatti ed eliminare conflitti.
-
-          Ecco i nugget grezzi in formato JSON da elaborare:
+          NUGGET GREZZI (JSON):
           ```json
           {raw_nuggets_content}
           ```
 
-          Esegui le seguenti attività:
+          REGOLE RIGIDE PER EVITARE SPRECO DI TOKEN:
+          1. NON scrivere, compilare o eseguire complessi script Python di test o di verifica fuzzy anti-allucinazione nella sandbox.
+          2. NON effettuare ricerche web seriali o ripetitive. Usa Google Search solo ed esclusivamente se trovi reali incongruenze nei dati dei nugget (es. prezzi discordanti sullo stesso luogo) per identificare la fonte ufficiale corretta.
+          3. Scrivi direttamente i 3 file JSON richiesti nella cartella 'output/' usando comandi di scrittura immediati (es. tramite un semplice script a riga singola o echo):
+             - `output/nuggets_riconciliati.json` (contenente la mappatura dei nugget grezzi raggruppati in max 15 macro-aree)
+             - `output/verified_facts.json` (la lista piatta dei dati volatili e dei relativi URL ufficiali verificati)
+             - `output/needs_human_review.json` (le statistiche e l'elenco dei dati rimasti incoerenti o non verificabili)
 
-          1. **Clustering Tematico**:
-             - Raggruppa i nugget in macro-aree tematiche (massimo 15). I nomi delle macro-aree devono emergere dal testo (es. "Duomo di Orvieto", "Orari e Tariffe", "Viabilità").
-             - Ogni nugget grezzo deve comparire in una sola macro-area (mappatura basata sugli ID indice o ID univoci).
-
-          2. **Riconciliazione e Grounding**:
-             - Consolida i fatti per eliminare ridondanze.
-             - Risolvi conflitti di dati (orari, cifre, date) facendo ricerche con Google Search.
-             - Per ciascun dato critico (orari, prezzi, contatti), crea un record separato in "verified_facts" e includi l'URL della fonte ufficiale in cui lo hai verificato.
-
-          3. **Verifica Anti-allucinazione Deterministica**:
-             - Scrivi ed esegui uno script Python interno nella sandbox che confronti i fatti consolidati con le "quote_originale" o "fact" del dataset originale.
-             - Controlla la corrispondenza dei numeri e la similarità del testo.
-             - Se un fatto non è supportato dalle fonti originali e non è stato verificato tramite grounding web, o se ci sono discrepanze numeriche significative, assegnalo allo stato "unverified" e includilo in "needs_human_review".
-
-          4. **Struttura degli Output Richiesti**:
-             Scrivi codice Python all'interno della sandbox per salvare esattamente questi tre file JSON nella cartella 'output':
-
-             a) `output/nuggets_riconciliati.json`
-             {{
-               "meta": {{
-                 "total_nugget_grezzi_input": <numero_totale_nugget>,
-                 "total_macro_aree": <numero_macro_aree_generate>,
-                 "tetto_macro_aree": 15
-               }},
-               "macro_aree": [
-                 {{
-                   "macro_area": "<nome_macro_area>",
-                   "fatti_consolidati": [
-                     {{
-                       "fact": "<testo_fatto_consolidato>",
-                       "category": "<categoria>",
-                       "source_nugget_ids": [<indici_nugget_grezzi_di_origine>],
-                       "source_urls": ["<url_sorgente_1>", "<url_sorgente_2>"],
-                       "conflitto_irrisolto": false,
-                       "valori_alternativi": [],
-                       "note_risoluzione": "breve nota"
-                     }}
-                   ],
-                   "verified_facts": [
-                     {{
-                       "campo": "<es. prezzo biglietto intero>",
-                       "valore": "<valore_corretto>",
-                       "valori_alternativi_scartati": [],
-                       "fonte_ufficiale_url": "<url_fonte_ufficiale>",
-                       "fonte_ufficiale_certa": true,
-                       "verificato_via_grounding": true,
-                       "source_nugget_ids": [<indici_nugget>]
-                     }}
-                   ]
-                 }}
-               ]
-             }}
-
-             b) `output/verified_facts.json`
-             {{
-               "verified_facts": [
-                 {{
-                   "campo": "<campo>",
-                   "valore": "<valore>",
-                   "valori_alternativi_scartati": [],
-                   "fonte_ufficiale_url": "<url>",
-                   "fonte_ufficiale_certa": true,
-                   "verificato_via_grounding": true,
-                   "source_nugget_ids": [3, 9],
-                   "macro_area": "<nome_macro_area>"
-                 }}
-               ]
-             }}
-
-             c) `output/needs_human_review.json`
-             {{
-               "stats": {{
-                 "totale_fatti_consolidati": <conteggio_totale>,
-                 "totale_verified_facts": <conteggio_totale>,
-                 "totale_non_verificati": <conteggio_elementi_da_revisionare>
-               }},
-               "needs_human_review": [
-                 {{
-                   "tipo": "fatto_consolidato",
-                   "macro_area": "<macro_area>",
-                   "fact": "<testo_fatto_non_verificato_o_discrepante>",
-                   "source_urls": ["..."],
-                   "verification_details": {{
-                      "motivation": "spiegazione del perché richiede una revisione umana"
-                   }}
-                 }}
-               ]
-             }}
-
-          Una volta salvati tutti e tre i file, stampa un riepilogo e concludi con la riga "PIPELINE_COMPLETE".
+          Assicurati che le strutture dei JSON rispettino esattamente i formati richiesti. Una volta scritti i 3 file, termina subito scrivendo "PIPELINE_COMPLETE".
           """
 
               try:
-                  # Creazione interazione in background (asincrona sul server di Google)
+                  # Avvio dell'interazione in background per prevenire timeout HTTP locali
                   interaction = client.interactions.create(
                       agent="antigravity-preview-05-2026",
                       input=prompt,
@@ -170,14 +85,13 @@ jobs:
                       background=True
                   )
                   
-                  print(f"[ORCHESTRATOR] Chiamata Antigravity avviata. ID Interazione: {interaction.id}")
-                  print("[ORCHESTRATOR] Inizio polling dello stato (intervallo: 15s)...")
+                  print(f"[ORCHESTRATOR] Chiamata avviata con successo. ID: {interaction.id}")
+                  print("[ORCHESTRATOR] Polling dello stato dell'agente...")
                   
-                  # Ciclo di polling per monitorare lo stato remoto ed evitare timeout del client
                   while True:
                       time.sleep(15)
                       status_res = client.interactions.get(interaction.id)
-                      print(f"[ORCHESTRATOR] Stato corrente dell'agente: {status_res.status}", flush=True)
+                      print(f"[ORCHESTRATOR] Stato corrente: {status_res.status}", flush=True)
                       
                       if status_res.status == "completed":
                           interaction = status_res
@@ -185,7 +99,7 @@ jobs:
                       elif status_res.status in ["failed", "cancelled"]:
                           print(f"[ORCHESTRATOR] ERRORE: L'interazione si è interrotta con stato: {status_res.status}")
                           if getattr(status_res, "error", None):
-                              print(f"[ORCHESTRATOR] Errore API: {status_res.error}")
+                              print(f"[ORCHESTRATOR] Dettagli errore: {status_res.error}")
                           sys.exit(1)
                   
                   print("[ORCHESTRATOR] Agente completato. Output di esecuzione:")
@@ -193,11 +107,10 @@ jobs:
                   
                   env_id = interaction.environment_id
                   if not env_id:
-                      print("[ORCHESTRATOR] ERRORE: L'ID dell'ambiente remoto non è valido.")
+                      print("[ORCHESTRATOR] ERRORE: L'ambiente remoto non ha restituito un ID valido.")
                       sys.exit(1)
                       
-                  # Scaricamento dei risultati tramite snapshot
-                  print(f"[ORCHESTRATOR] Scaricamento del tarball dell'ambiente: {env_id}...")
+                  print(f"[ORCHESTRATOR] Scaricamento dello snapshot dell'ambiente ({env_id})...")
                   download_url = f"https://generativelanguage.googleapis.com/v1beta/files/environment-{env_id}:download"
                   
                   response = requests.get(
@@ -208,15 +121,14 @@ jobs:
                   )
                   
                   if response.status_code != 200:
-                      print(f"[ORCHESTRATOR] Impossibile scaricare lo snapshot. Status HTTP: {response.status_code}")
-                      print(response.text)
+                      print(f"[ORCHESTRATOR] ERRORE durante il download dello snapshot: {response.status_code}")
                       sys.exit(1)
                       
                   tar_path = "snapshot.tar"
                   with open(tar_path, "wb") as f:
                       f.write(response.content)
                       
-                  print("[ORCHESTRATOR] Estrazione dei file JSON richiesti...")
+                  print("[ORCHESTRATOR] Estrazione dei file generati...")
                   os.makedirs(output_dir, exist_ok=True)
                   
                   extracted_files = []
@@ -228,7 +140,7 @@ jobs:
                               tar.extract(member, path=output_dir)
                               extracted_files.append(filename)
                               
-                  print(f"[ORCHESTRATOR] File generati estratti correttamente in {output_dir}:")
+                  print(f"[ORCHESTRATOR] Estrazione completata in {output_dir}:")
                   for f in extracted_files:
                       print(f"  - {f}")
                       
