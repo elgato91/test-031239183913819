@@ -10,7 +10,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
-      TARGET_TOPIC: "Orvieto"
+      TARGET_TOPIC: "Come sta andando Apple?"
     steps:
 
       - name: Installazione Font di Sistema
