@@ -321,7 +321,6 @@ jobs:
           import time
           import asyncio
           import difflib
-          import random
           import concurrent.futures
 
           from google import genai
@@ -526,14 +525,14 @@ jobs:
           # sotto carico concorrente). Non e' MAI accettabile che questo blocchi o
           # uccida il processo di scraping: se il pool non si inizializza in tempo,
           # la nugget extraction viene semplicemente disattivata per quel nodo.
+          #
+          # NOTA: l'init del pool viene lanciata come task in BACKGROUND dal chiamante
+          # (m2_step1.py / m2_step2.py), in parallelo con l'inizio dello scraping vero
+          # e proprio, non prima. Per questo qui non serve piu' alcun jitter per
+          # "diradare" nel tempo l'avvio dei vari nodi: lo scraping di ciascun nodo
+          # parte comunque subito, indipendentemente da quanto ci mette il proprio
+          # pool Gemini a essere pronto in background.
           POOL_INIT_TIMEOUT_SECONDS = 25.0
-
-          # Jitter massimo, in secondi, applicato prima di iniziare l'init del pool.
-          # Serve solo a diradare nel tempo il momento in cui i vari nodi (processi
-          # separati, senza alcuna sincronizzazione tra loro) aprono i propri canali
-          # gRPC/WebSocket verso Google, riducendo la probabilita' che capitino tutti
-          # nello stesso istante.
-          POOL_INIT_JITTER_MAX_SECONDS = 4.0
 
 
           async def crea_pool_sicuro(api_keys, node_id=None, label_step=""):
@@ -541,6 +540,11 @@ jobs:
               Costruisce un GeminiKeyPool in modo che un problema di rete/gRPC durante
               l'inizializzazione (hang, eccezione, timeout) non possa MAI interrompere
               o rallentare in modo bloccante il processo di scraping del nodo.
+
+              Va SEMPRE lanciata come task in background (asyncio.create_task), MAI
+              at await diretto prima di iniziare lo scraping: e' pensata per essere
+              "in corso" mentre il nodo scarica gia' le sue pagine, non per essere
+              aspettata all'avvio.
 
               Ritorna il GeminiKeyPool se l'inizializzazione va a buon fine entro
               POOL_INIT_TIMEOUT_SECONDS, altrimenti None (nugget extraction disattivata
@@ -550,11 +554,6 @@ jobs:
 
               if not api_keys:
                   return None
-
-              # Piccolo ritardo casuale per diradare l'init dei vari nodi nel tempo.
-              jitter = random.uniform(0.0, POOL_INIT_JITTER_MAX_SECONDS)
-              if jitter > 0:
-                  await asyncio.sleep(jitter)
 
               loop = asyncio.get_event_loop()
 
@@ -843,14 +842,30 @@ jobs:
               with open(queue_file, "r") as f:
                   targets = json.load(f)
 
+              # --- Init del pool Gemini in BACKGROUND, non bloccante ---
+              # Prima questa chiamata era un `await` diretto qui in testa a main():
+              # il nodo restava fermo (jitter + eventuale attesa di rete sul client
+              # Gemini, fino a 25s) PRIMA di aprire la sessione HTTP e fare la prima
+              # richiesta di scraping vera. Questo spostava nel tempo il momento in
+              # cui il nodo usa per la prima volta il proprio tunnel proxy WARP,
+              # introducendo un ritardo variabile che la pipeline stabile (senza
+              # nugget extraction) non aveva mai avuto, e che e' risultato essere
+              # la causa dei nuovi "errore rete" osservati in Step 1.
+              #
+              # Ora l'inizializzazione parte in un task separato SUBITO, ma il nodo
+              # NON la aspetta: apre la sessione e comincia a scrapare nello stesso
+              # istante in cui l'avrebbe fatto senza nugget extraction del tutto.
+              # Il pool verra' atteso solo dal primo nugget task che ne avra'
+              # davvero bisogno (lancia_nugget_task), il che succede solo dopo che
+              # la prima pagina e' gia' stata scaricata e validata: tempo che il
+              # pool, nel frattempo, ha gia' avuto per completare la sua init.
               api_keys = carica_gemini_api_keys()
+              pool_init_task = None
               if api_keys:
-                  # Inizializzazione protetta: mai bloccante, mai in grado di uccidere
-                  # il nodo. Se fallisce o va in timeout, key_pool resta None e lo
-                  # scraping prosegue identico, semplicemente senza nugget extraction.
-                  key_pool = await crea_pool_sicuro(api_keys, node_id=node_id, label_step="step1")
+                  pool_init_task = asyncio.create_task(
+                      crea_pool_sicuro(api_keys, node_id=node_id, label_step="step1")
+                  )
               else:
-                  key_pool = None
                   print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
 
               nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
@@ -874,10 +889,22 @@ jobs:
                   Il risultato viene scritto su disco NON APPENA arriva (mai solo
                   accumulato in RAM), cosi' un'interruzione improvvisa del job non
                   perde il lavoro gia' completato."""
-                  if key_pool is None:
+                  if pool_init_task is None:
                       return
 
                   async def _run():
+                      # Il pool viene atteso QUI, non all'avvio del nodo: se e' gia'
+                      # pronto (caso comune, visto che ha avuto tutto il tempo dello
+                      # scraping della prima pagina per completarsi) questo await
+                      # ritorna all'istante. Se non lo e' ancora, aspetta solo questo
+                      # specifico task nugget, senza mai aver rallentato lo scraping.
+                      key_pool = await pool_init_task
+                      if key_pool is None:
+                          # Pool non disponibile (init fallita/andata in timeout):
+                          # nessun nugget per questo target, lo scraping non è
+                          # comunque stato toccato in alcun modo.
+                          return
+
                       async with nugget_semaphore:
                           esito = await estrai_nuggets(
                               key_pool=key_pool,
@@ -933,14 +960,19 @@ jobs:
                   print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
                   await asyncio.gather(*nugget_tasks, return_exceptions=True)
 
-              if nugget_retry_pool and key_pool is not None:
+              # A questo punto pool_init_task, se esiste, e' sicuramente gia' risolto
+              # (tutti i nugget_tasks sopra lo hanno gia' atteso): riawaitarlo qui
+              # ritorna il risultato gia' calcolato all'istante, senza ricalcolare nulla.
+              key_pool_finale = await pool_init_task if pool_init_task is not None else None
+
+              if nugget_retry_pool and key_pool_finale is not None:
                   print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
                   retry_tasks = []
                   for url, testo_markdown in nugget_retry_pool:
                       async def _retry(url=url, testo_markdown=testo_markdown):
                           async with nugget_semaphore:
                               esito = await estrai_nuggets(
-                                  key_pool=key_pool,
+                                  key_pool=key_pool_finale,
                                   source_url=url,
                                   testo_markdown=testo_markdown,
                                   topic=TARGET_TOPIC,
@@ -1206,14 +1238,19 @@ jobs:
                                f"nodo abortito prima di iniziare\n{'#'*60}\n")
                   return
 
+              # --- Init del pool Gemini in BACKGROUND, non bloccante ---
+              # Stessa logica di m2_step1.py: l'init parte come task separato SUBITO
+              # dopo il proxy check, ma il nodo non la aspetta. Il browser viene
+              # avviato immediatamente dopo, esattamente ai tempi che avrebbe senza
+              # nugget extraction. Il pool viene atteso solo dal primo nugget task
+              # che ne avra' davvero bisogno, non dall'avvio del nodo.
               api_keys = carica_gemini_api_keys()
+              pool_init_task = None
               if api_keys:
-                  # Stessa inizializzazione protetta di Step 1: mai bloccante, mai in
-                  # grado di uccidere il nodo. Se fallisce o va in timeout, key_pool
-                  # resta None e lo scraping prosegue identico, senza nugget extraction.
-                  key_pool = await crea_pool_sicuro(api_keys, node_id=node_id, label_step="step2")
+                  pool_init_task = asyncio.create_task(
+                      crea_pool_sicuro(api_keys, node_id=node_id, label_step="step2")
+                  )
               else:
-                  key_pool = None
                   print(f"[NODO {node_id}] Nessuna GEMINI_API_KEY trovata: nugget extraction disattivata.", flush=True)
 
               nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
@@ -1221,10 +1258,14 @@ jobs:
               nugget_tasks = []
 
               async def lancia_nugget_task(url, testo_markdown):
-                  if key_pool is None:
+                  if pool_init_task is None:
                       return
 
                   async def _run():
+                      key_pool = await pool_init_task
+                      if key_pool is None:
+                          return
+
                       async with nugget_semaphore:
                           esito = await estrai_nuggets(
                               key_pool=key_pool,
@@ -1367,14 +1408,17 @@ jobs:
                       print(f"[NODO {node_id}] Attesa completamento {len(nugget_tasks)} chiamate nugget in volo...", flush=True)
                       await asyncio.gather(*nugget_tasks, return_exceptions=True)
 
-                  if nugget_retry_pool and key_pool is not None:
+                  # Stesso ragionamento di m2_step1.py: qui il pool e' gia' risolto.
+                  key_pool_finale = await pool_init_task if pool_init_task is not None else None
+
+                  if nugget_retry_pool and key_pool_finale is not None:
                       print(f"[NODO {node_id}] Retry nugget extraction su {len(nugget_retry_pool)} target falliti...", flush=True)
                       retry_tasks = []
                       for url, testo_markdown in nugget_retry_pool:
                           async def _retry(url=url, testo_markdown=testo_markdown):
                               async with nugget_semaphore:
                                   esito = await estrai_nuggets(
-                                      key_pool=key_pool,
+                                      key_pool=key_pool_finale,
                                       source_url=url,
                                       testo_markdown=testo_markdown,
                                       topic=TARGET_TOPIC,
