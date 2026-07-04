@@ -32,19 +32,17 @@ jobs:
           cat << 'EOF' > orchestrator.py
           import os
           import sys
+          import time
           import tarfile
-          import argparse
           import requests
           from google import genai
 
           def run_antigravity_pipeline(input_path, output_dir):
-              # Recupero dell'API Key di Gemini
               api_key = os.environ.get("GEMINI_API_KEY")
               if not api_key:
                   print("[ORCHESTRATOR] ERRORE: GEMINI_API_KEY non configurata.")
                   sys.exit(1)
 
-              # Lettura del file di input locale contenente i nugget
               print(f"[ORCHESTRATOR] Caricamento nugget grezzi da: {input_path}")
               try:
                   with open(input_path, "r", encoding="utf-8") as f:
@@ -56,11 +54,8 @@ jobs:
               # Inizializzazione del client Google GenAI SDK
               client = genai.Client(api_key=api_key)
 
-              print("[ORCHESTRATOR] Inizializzazione dell'agente Google Antigravity in ambiente remoto...")
+              print("[ORCHESTRATOR] Inizializzazione dell'agente Google Antigravity in background...")
               
-              # Definizione del prompt per l'agente Antigravity.
-              # Gli forniamo direttamente il dataset e gli chiediamo di eseguire l'intera elaborazione
-              # all'interno della sandbox, salvando i tre file JSON strutturati.
               prompt = f"""
           Sei l'Agente Riconciliazione Editoriale basato su Google Antigravity.
           Il tuo compito è elaborare una lista di nugget editoriali (fatti grezzi) ed eseguire un'intera pipeline di riconciliazione e validazione.
@@ -92,7 +87,6 @@ jobs:
              Scrivi codice Python all'interno della sandbox per salvare esattamente questi tre file JSON nella cartella 'output':
 
              a) `output/nuggets_riconciliati.json`
-             Deve avere questa struttura precisa:
              {{
                "meta": {{
                  "total_nugget_grezzi_input": <numero_totale_nugget>,
@@ -129,7 +123,6 @@ jobs:
              }}
 
              b) `output/verified_facts.json`
-             Deve essere una lista piatta di tutti i verified_facts estratti da tutte le macro-aree:
              {{
                "verified_facts": [
                  {{
@@ -146,7 +139,6 @@ jobs:
              }}
 
              c) `output/needs_human_review.json`
-             Deve contenere le statistiche globali e gli elementi non verificati:
              {{
                "stats": {{
                  "totale_fatti_consolidati": <conteggio_totale>,
@@ -160,33 +152,52 @@ jobs:
                    "fact": "<testo_fatto_non_verificato_o_discrepante>",
                    "source_urls": ["..."],
                    "verification_details": {{
-                      "motivation": "spiegazione del perché richiede una revisione umana (es. discrepanza numerica o fatto esterno non verificato)"
+                      "motivation": "spiegazione del perché richiede una revisione umana"
                    }}
                  }}
                ]
              }}
 
-          Una volta che hai scritto e salvato correttamente tutti e tre i file nella directory 'output', stampa un riepilogo testuale completo dei risultati e concludi con la riga "PIPELINE_COMPLETE".
+          Una volta salvati tutti e tre i file, stampa un riepilogo e concludi con la riga "PIPELINE_COMPLETE".
           """
 
               try:
-                  # Creazione dell'interazione con l'agente Antigravity in ambiente remoto
+                  # Creazione interazione in background (asincrona sul server di Google)
                   interaction = client.interactions.create(
                       agent="antigravity-preview-05-2026",
                       input=prompt,
-                      environment="remote"
+                      environment="remote",
+                      background=True
                   )
                   
-                  print("[ORCHESTRATOR] Output generato dall'Agente Antigravity:")
+                  print(f"[ORCHESTRATOR] Chiamata Antigravity avviata. ID Interazione: {interaction.id}")
+                  print("[ORCHESTRATOR] Inizio polling dello stato (intervallo: 15s)...")
+                  
+                  # Ciclo di polling per monitorare lo stato remoto ed evitare timeout del client
+                  while True:
+                      time.sleep(15)
+                      status_res = client.interactions.get(interaction.id)
+                      print(f"[ORCHESTRATOR] Stato corrente dell'agente: {status_res.status}", flush=True)
+                      
+                      if status_res.status == "completed":
+                          interaction = status_res
+                          break
+                      elif status_res.status in ["failed", "cancelled"]:
+                          print(f"[ORCHESTRATOR] ERRORE: L'interazione si è interrotta con stato: {status_res.status}")
+                          if getattr(status_res, "error", None):
+                              print(f"[ORCHESTRATOR] Errore API: {status_res.error}")
+                          sys.exit(1)
+                  
+                  print("[ORCHESTRATOR] Agente completato. Output di esecuzione:")
                   print(interaction.output_text)
                   
                   env_id = interaction.environment_id
                   if not env_id:
-                      print("[ORCHESTRATOR] ERRORE: L'ambiente remoto non ha restituito un ID valido.")
+                      print("[ORCHESTRATOR] ERRORE: L'ID dell'ambiente remoto non è valido.")
                       sys.exit(1)
                       
-                  # Scaricamento dello snapshot dell'ambiente remoto contenente i file generati
-                  print(f"[ORCHESTRATOR] Salvataggio snapshot dell'ambiente remoto ({env_id})...")
+                  # Scaricamento dei risultati tramite snapshot
+                  print(f"[ORCHESTRATOR] Scaricamento del tarball dell'ambiente: {env_id}...")
                   download_url = f"https://generativelanguage.googleapis.com/v1beta/files/environment-{env_id}:download"
                   
                   response = requests.get(
@@ -196,38 +207,41 @@ jobs:
                       allow_redirects=True
                   )
                   
+                  if response.status_code != 200:
+                      print(f"[ORCHESTRATOR] Impossibile scaricare lo snapshot. Status HTTP: {response.status_code}")
+                      print(response.text)
+                      sys.exit(1)
+                      
                   tar_path = "snapshot.tar"
                   with open(tar_path, "wb") as f:
                       f.write(response.content)
                       
-                  print("[ORCHESTRATOR] Estrazione dei file generati dall'agente...")
+                  print("[ORCHESTRATOR] Estrazione dei file JSON richiesti...")
                   os.makedirs(output_dir, exist_ok=True)
                   
-                  # Estrazione dei 3 file desiderati posizionandoli direttamente nella cartella di output
                   extracted_files = []
                   with tarfile.open(tar_path, "r") as tar:
                       for member in tar.getmembers():
                           filename = os.path.basename(member.name)
                           if filename in ["nuggets_riconciliati.json", "verified_facts.json", "needs_human_review.json"]:
-                              member.name = filename # Rende l'estrazione piatta rispetto alle cartelle interne
+                              member.name = filename
                               tar.extract(member, path=output_dir)
                               extracted_files.append(filename)
                               
-                  print(f"[ORCHESTRATOR] Pipeline completata con successo! File estratti in {output_dir}:")
+                  print(f"[ORCHESTRATOR] File generati estratti correttamente in {output_dir}:")
                   for f in extracted_files:
                       print(f"  - {f}")
                       
               except Exception as e:
-                  print(f"[ORCHESTRATOR] Errore critico durante l'esecuzione dell'agente: {e}")
+                  print(f"[ORCHESTRATOR] Errore di esecuzione: {e}")
                   sys.exit(1)
 
           def main():
               import argparse
-              parser = argparse.ArgumentParser(description="Orchestratore Antigravity Single-Turn.")
-              parser.add_argument("--input", required=True, help="Path al file JSON di input.")
-              parser.add_argument("--output-dir", default="./output", help="Directory di output.")
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--input", required=True)
+              parser.add_argument("--output-dir", default="./output")
               args = parser.parse_args()
-              
               run_antigravity_pipeline(args.input, args.output_dir)
 
           if __name__ == "__main__":
@@ -258,7 +272,7 @@ jobs:
           fi
           echo "INPUT_FILE=$INPUT_FILE" >> $GITHUB_ENV
           if [ ! -f "$INPUT_FILE" ]; then
-            echo "ERRORE: file di input '$INPUT_FILE' non trovato nella repo."
+            echo "ERRORE: file di input '$INPUT_FILE' non trovato."
             exit 1
           fi
           echo "File di input trovato: $INPUT_FILE"
