@@ -1,13 +1,13 @@
-name: Test Gemma 4 Grounding con Retry
+name: Test Gemini 3.1 Flash Live con Grounding
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-grounding:
+  test-live-grounding:
     runs-on: ubuntu-latest
     steps:
-      - name: Chiamata a Gemma 4 con Retry e Search Grounding
+      - name: Chiamata a Gemini 3.1 Flash Live con Search Grounding
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -16,52 +16,32 @@ jobs:
             exit 1
           fi
 
-          echo "Inizio dei tentativi di chiamata a gemma-4-26b-a4b-it..."
+          echo "Inizio chiamata nativa a gemini-3.1-flash-live-preview con Google Search..."
 
-          # Ciclo di retry fino a 5 tentativi con attesa di 15 secondi
-          for i in {1..15}; do
-            echo "Tentativo $i di 15..."
-
-            HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
-              "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
-              -H 'Content-Type: application/json' \
-              -X POST \
-              -d '{
-                "contents": [{
-                  "parts":[{"text": "Quali sono le notizie principali di oggi nel mondo? Rispondi in italiano in modo molto breve."}]
-                }],
-                "tools": [
-                  {
-                    "googleSearch": {}
-                  }
-                ]
-              }')
-
-            if [ "$HTTP_STATUS" -eq 200 ]; then
-              echo "Successo! Risposta ricevuta correttamente al tentativo $i."
-              break
-            else
-              echo "Errore Server ($HTTP_STATUS). Attesa di 15 secondi prima del prossimo tentativo..."
-              cat response.json
-              echo ""
-              sleep 3
-            fi
-
-            if [ "$i" -eq 15 ]; then
-              echo "Errore: il server ha fallito tutti e 5 i tentativi di chiamata."
-              exit 1
-            fi
-          done
+          # Chiamata API ufficiale con il modello Gemini 3.1 Flash Live e Google Search Grounding attivo
+          curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-live-preview:generateContent?key=${GEMINI_API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d '{
+              "contents": [{
+                "parts":[{"text": "Quali sono le ultime notizie più importanti di oggi nel mondo? Rispondi in italiano in modo molto sintetico."}]
+              }],
+              "tools": [
+                {
+                  "googleSearch": {}
+                }
+              ]
+            }' > response.json
 
           echo "=== RISPOSTA GREZZA DA GOOGLE ==="
           cat response.json
           echo ""
 
           echo "=== TESTO ESTRATTO ==="
-          # Estrae la risposta finale escludendo i blocchi di "thought"
+          # Estrae la risposta finale escludendo i blocchi di "thought" se presenti
           cat response.json | jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text' || echo "Nessun testo finale estratto."
 
           echo ""
           echo "=== METADATI DI RICERCA (VERIFICA GROUNDING) ==="
-          # Mostra le query di ricerca e le fonti reali consultate da Google
+          # Mostra i metadati reali del grounding (query effettuate e fonti consultate)
           cat response.json | jq '.candidates[0].groundingMetadata' || echo "Nessun metadato di grounding presente."
