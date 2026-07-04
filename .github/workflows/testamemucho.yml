@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      ANALYSIS_MODEL_NAME: "gemini-3.1-flash-lite"
+      MAX_RPM_ANALYSIS: "15"
     steps:
 
       - name: Checkout repository
@@ -25,156 +28,920 @@ jobs:
 
       - name: Installazione dipendenze
         run: |
-          pip install google-genai requests --break-system-packages
+          pip install google-genai --break-system-packages
 
+      - name: Creazione modulo - rate_limiter.py
+        run: |
+          cat << 'PYEOF' > rate_limiter.py
+          #
+          # Rate limiter deterministico a finestra scorrevole (sliding window) per rispettare
+          # un tetto rigido di richieste al minuto (RPM) verso il modello AI.
+          #
+          # IMPORTANTE: nel sistema questo limiter e' condiviso tra TUTTE le chiamate fatte
+          # con la stessa API key (clustering + tutte le riconciliazioni per macro-area),
+          # perche' il limite RPM di Google e' applicato per chiave/progetto, non per fase
+          # della pipeline. Un'unica istanza di RPMLimiter viene creata nell'orchestratore
+          # e passata a ogni chiamata, cosi' il conteggio e' sempre corretto in aggregato:
+          # se il clustering consuma 1 delle 15 richieste disponibili in un dato minuto,
+          # alla riconciliazione ne restano davvero solo 14 in quella stessa finestra.
+          #
+
+          import time
+          import asyncio
+          from collections import deque
+
+
+          class RPMLimiter:
+              # Limita le chiamate a max_rpm per finestra di 60 secondi, in modo esatto
+              # (sliding window), non a bucket approssimato.
+
+              def __init__(self, max_rpm: int):
+                  if max_rpm <= 0:
+                      raise ValueError("max_rpm deve essere > 0")
+                  self.max_rpm = max_rpm
+                  self._timestamps = deque()
+                  self._lock = asyncio.Lock()
+
+              async def acquire(self, label: str = ""):
+                  async with self._lock:
+                      while True:
+                          now = time.monotonic()
+                          while self._timestamps and now - self._timestamps[0] >= 60.0:
+                              self._timestamps.popleft()
+
+                          if len(self._timestamps) < self.max_rpm:
+                              self._timestamps.append(now)
+                              return
+
+                          wait_seconds = 60.0 - (now - self._timestamps[0]) + 0.05
+                          print(f"{label}[RPM-LIMITER] Limite {self.max_rpm} RPM raggiunto, "
+                                f"attendo {wait_seconds:.1f}s...", flush=True)
+                          await asyncio.sleep(max(wait_seconds, 0.1))
+
+          PYEOF
+      - name: Creazione modulo - gemini_client.py
+        run: |
+          cat << 'PYEOF' > gemini_client.py
+          #
+          # Client per il modello di analisi (Gemini 3.1 Flash-Lite, free tier, NO grounding
+          # disponibile su questo piano).
+          #
+          # Design: il rate limiter NON viene creato qui dentro. Viene creato UNA SOLA VOLTA
+          # nell'orchestratore e passato (iniettato) a ogni istanza del client, cosi' tutte
+          # le chiamate della pipeline (clustering + N riconciliazioni) condividono lo
+          # stesso conteggio RPM sulla stessa chiave, come richiesto: il limite e' per
+          # chiave/progetto, non per singola fase del programma.
+          #
+          # Nessun riferimento hardcoded a domini, lingue o dataset specifici.
+          #
+
+          import os
+          import re
+          import json
+          import asyncio
+
+          from google import genai
+          from google.genai import types
+
+          ANALYSIS_MODEL_NAME = os.environ.get("ANALYSIS_MODEL_NAME", "gemini-3.1-flash-lite")
+          ANALYSIS_TIMEOUT_SECONDS = float(os.environ.get("ANALYSIS_TIMEOUT_SECONDS", "90.0"))
+          MAX_RETRY_TRANSIENT = 3
+
+
+          class GeminiAnalysisClient:
+              # Wrapper attorno al modello di analisi. Il rate limiter va passato da
+              # fuori (condiviso tra tutte le fasi della pipeline sulla stessa chiave).
+
+              def __init__(self, api_key: str, rpm_limiter):
+                  if not api_key:
+                      raise ValueError("API key mancante per il modello di analisi")
+                  self.client = genai.Client(api_key=api_key)
+                  self.limiter = rpm_limiter
+
+              async def generate_json(self, prompt: str, label: str = "",
+                                       timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS):
+                  # Esegue una chiamata al modello richiedendo una risposta strutturata
+                  # JSON. Ritorna (parsed_json, raw_text) oppure (None, raw_text) se il
+                  # parsing fallisce dopo i retry consentiti.
+
+                  last_raw_text = None
+                  current_prompt = prompt
+
+                  for tentativo in range(MAX_RETRY_TRANSIENT):
+                      await self.limiter.acquire(label=label)
+
+                      try:
+                          raw_text = await asyncio.wait_for(
+                              self._call_model(current_prompt),
+                              timeout=timeout_seconds
+                          )
+                      except (asyncio.TimeoutError, TimeoutError):
+                          print(f"{label}[GEMINI] Timeout dopo {timeout_seconds}s "
+                                f"(tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
+                          continue
+                      except Exception as e:
+                          print(f"{label}[GEMINI] Errore chiamata modello: {e} "
+                                f"(tentativo {tentativo + 1}/{MAX_RETRY_TRANSIENT})", flush=True)
+                          await asyncio.sleep(2.0 * (tentativo + 1))
+                          continue
+
+                      last_raw_text = raw_text
+                      parsed = _estrai_json(raw_text)
+                      if parsed is not None:
+                          return parsed, raw_text
+
+                      print(f"{label}[GEMINI] Parsing JSON fallito (tentativo "
+                            f"{tentativo + 1}/{MAX_RETRY_TRANSIENT}). Richiedo correzione formato...",
+                            flush=True)
+                      current_prompt = (
+                          prompt
+                          + "\n\nATTENZIONE: la tua risposta precedente non era un JSON valido "
+                            "o non rispettava lo schema richiesto. Rispondi ESCLUSIVAMENTE con "
+                            "il JSON richiesto, senza alcun testo di commento, dentro un blocco "
+                            "```json ... ```."
+                      )
+
+                  return None, last_raw_text
+
+              async def _call_model(self, prompt: str):
+                  config = types.GenerateContentConfig(temperature=0.0)
+
+                  def _sync_call():
+                      return self.client.models.generate_content(
+                          model=ANALYSIS_MODEL_NAME,
+                          contents=prompt,
+                          config=config,
+                      )
+
+                  result = await asyncio.to_thread(_sync_call)
+
+                  text = ""
+                  if result.candidates:
+                      candidate = result.candidates[0]
+                      if candidate.content and candidate.content.parts:
+                          for part in candidate.content.parts:
+                              if getattr(part, "text", None):
+                                  text += part.text
+
+                  return text.strip()
+
+
+          def _estrai_json(raw_text):
+              if not raw_text:
+                  return None
+
+              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
+              json_str = match.group(1) if match else raw_text.strip()
+
+              try:
+                  return json.loads(json_str)
+              except Exception:
+                  alt_match = re.search(r'(\{.*\}|\[.*\])', raw_text, re.DOTALL)
+                  if not alt_match:
+                      return None
+                  try:
+                      return json.loads(alt_match.group(1))
+                  except Exception:
+                      return None
+
+          PYEOF
+      - name: Creazione modulo - clustering.py
+        run: |
+          cat << 'PYEOF' > clustering.py
+          #
+          # Fase 1 della pipeline: raggruppamento dei nugget in macro-aree/entita'.
+          #
+          # Agnosticismo totale: nessuna macro-area, categoria, localita' o lingua e'
+          # hardcoded. Il modello riceve i fatti grezzi e decide da solo quali macro-aree
+          # emergono dal contenuto, in qualsiasi lingua e per qualsiasi destinazione.
+          #
+          # IMPORTANTE (cambio rispetto alla v1): NON esiste piu' un tetto massimo sul
+          # numero di macro-aree. Il tetto storico serviva solo a contenere il numero di
+          # chiamate AI totali (1 per macro-area in fase 2) dentro il budget RPM/RPD
+          # disponibile. Dato che la qualita' del consolidamento migliora quando ogni
+          # chiamata di riconciliazione lavora su un batch piccolo e tematicamente
+          # coerente (meno nugget = piu' attenzione del modello per singolo fatto), non
+          # ha senso comprimere artificialmente macro-aree distinte in una sola: il
+          # vincolo di RPM viene gestito a runtime dal rate limiter condiviso (la
+          # pipeline aspetta quando serve, non taglia la qualita' del batching).
+          #
+          # Unico vincolo residuo: una dimensione minima di batch, per evitare che il
+          # modello produca macro-aree da 1-2 nugget quando avrebbe piu' senso accorparli
+          # a una macro-area piu' ampia gia' esistente (puro buon senso editoriale, non
+          # un limite di sistema).
+          #
+
+          import json
+
+          # Soglia minima di nugget per considerare una macro-area "a se stante".
+          # Sotto questa soglia, il post-processing deterministico tenta di accorpare
+          # il micro-cluster alla macro-area piu' affine (per ora: quella residuale).
+          MIN_NUGGET_PER_MACRO_AREA = 2
+
+
+          CLUSTERING_PROMPT_TEMPLATE = """Sei un analista editoriale specializzato in organizzazione di informazioni fattuali per articoli di viaggio/turismo/cultura, in QUALSIASI lingua e per QUALSIASI destinazione al mondo. Il tuo compito e' puramente organizzativo: NON devi riscrivere, correggere o verificare i fatti in questa fase.
+
+          Riceverai un elenco numerato di "nugget" (fatti grezzi estratti da fonti web), ciascuno con un id univoco, il testo del fatto e la categoria assegnata in fase di estrazione.
+
+          COMPITO:
+          Raggruppa questi nugget in MACRO-AREE tematiche, basandoti sull'entita' o sul sotto-argomento a cui si riferiscono (es. un monumento specifico, un tema trasversale come mobilita'/parcheggi, un tema come enogastronomia, eccetera). Le macro-aree devono emergere ESCLUSIVAMENTE dal contenuto che leggi, non da una lista predefinita: se il contenuto parla di una cattedrale, una torre, un pozzo, un museo, un evento, un'area naturale, un aspetto logistico, crea la macro-area che meglio descrive quell'insieme di nugget, usando la stessa lingua prevalente dei nugget stessi.
+
+          REGOLE:
+          1. Preferisci macro-aree granulari e tematicamente coerenti (un monumento specifico e' meglio isolato in una sua macro-area, piuttosto che mischiato con altri) piuttosto che poche macro-aree molto ampie: ogni macro-area verra' analizzata separatamente da un secondo modello, quindi la coerenza tematica del gruppo conta piu' del numero di gruppi.
+          2. Ogni nugget deve essere assegnato a ESATTAMENTE una macro-area (nessun nugget escluso, nessun nugget duplicato tra macro-aree).
+          3. Il nome di ogni macro-area deve essere breve, descrittivo, nella lingua prevalente del contenuto.
+          4. Se alcuni nugget sono generici, non correlati o troppo eterogenei per una macro-area dedicata, raggruppali in una macro-area residuale (es. equivalente locale di "Altre informazioni").
+          5. Non esiste un numero massimo di macro-aree: crea tutte quelle che servono per rappresentare bene il contenuto reale.
+
+          NUGGET DA RAGGRUPPARE:
+          {nuggets_list}
+
+          Restituisci ESCLUSIVAMENTE un JSON con questo schema, racchiuso in un blocco ```json ... ```:
+          {{
+            "macro_aree": [
+              {{
+                "nome_macro_area": "...",
+                "nugget_ids": [0, 3, 7, ...]
+              }}
+            ]
+          }}
+          Non aggiungere alcun testo al di fuori del JSON."""
+
+
+          def _formatta_nuggets_per_prompt(nuggets_indicizzati):
+              righe = []
+              for idx, n in nuggets_indicizzati:
+                  righe.append(
+                      f"[{idx}] (categoria: {n.get('category', 'altro')}) {n.get('fact', '')}"
+                  )
+              return "\n".join(righe)
+
+
+          async def clusterizza_nuggets(gemini_client, nuggets, label="[CLUSTERING] "):
+              # Riceve la lista grezza di nugget (dict) e ritorna una lista di
+              # macro-aree, ciascuna con la lista di nugget completi assegnati.
+              #
+              # Ritorna: list[dict] con {"nome_macro_area": str, "nuggets": list[dict]}
+              #
+
+              nuggets_indicizzati = list(enumerate(nuggets))
+              prompt = CLUSTERING_PROMPT_TEMPLATE.format(
+                  nuggets_list=_formatta_nuggets_per_prompt(nuggets_indicizzati)
+              )
+
+              parsed, raw_text = await gemini_client.generate_json(prompt, label=label)
+
+              if parsed is None or "macro_aree" not in parsed:
+                  print(f"{label}Clustering fallito, uso fallback per-categoria.", flush=True)
+                  return _fallback_clustering_per_categoria(nuggets)
+
+              macro_aree_raw = parsed["macro_aree"]
+
+              assegnati = {}
+              for area in macro_aree_raw:
+                  nome = str(area.get("nome_macro_area", "")).strip() or "Altre informazioni"
+                  for nid in area.get("nugget_ids", []):
+                      try:
+                          nid_int = int(nid)
+                      except (TypeError, ValueError):
+                          continue
+                      if 0 <= nid_int < len(nuggets):
+                          assegnati[nid_int] = nome
+
+              mancanti = [i for i in range(len(nuggets)) if i not in assegnati]
+              if mancanti:
+                  print(f"{label}{len(mancanti)} nugget non assegnati dal modello, "
+                        f"aggiunti a bucket residuale.", flush=True)
+                  for i in mancanti:
+                      assegnati[i] = "Altre informazioni"
+
+              macro_aree = {}
+              for idx, nome_area in assegnati.items():
+                  macro_aree.setdefault(nome_area, []).append(nuggets[idx])
+
+              risultato = [
+                  {"nome_macro_area": nome, "nuggets": lista}
+                  for nome, lista in macro_aree.items()
+              ]
+
+              risultato = _accorpa_micro_cluster(risultato)
+              return risultato
+
+
+          def _fallback_clustering_per_categoria(nuggets):
+              # Fallback deterministico, usato SOLO se la chiamata AI di clustering
+              # fallisce completamente. Raggruppa per campo 'category' gia' presente nei
+              # nugget (agnostico per costruzione, definito a monte dall'estrattore).
+              macro_aree = {}
+              for n in nuggets:
+                  cat = n.get("category", "altro") or "altro"
+                  macro_aree.setdefault(cat, []).append(n)
+              return [{"nome_macro_area": nome, "nuggets": lista} for nome, lista in macro_aree.items()]
+
+
+          def _accorpa_micro_cluster(macro_aree):
+              # Accorpa deterministicamente (senza chiamata AI) le macro-aree troppo
+              # piccole (sotto MIN_NUGGET_PER_MACRO_AREA) in un'unica macro-area
+              # residuale, per evitare chiamate di riconciliazione sprecate su batch da
+              # 1 nugget. Puro buon senso di efficienza, non un tetto massimo.
+
+              residuale_nome = "Altre informazioni"
+              grandi = []
+              piccole_nuggets = []
+
+              for area in macro_aree:
+                  if len(area["nuggets"]) < MIN_NUGGET_PER_MACRO_AREA and area["nome_macro_area"] != residuale_nome:
+                      piccole_nuggets.extend(area["nuggets"])
+                  else:
+                      grandi.append(area)
+
+              if piccole_nuggets:
+                  area_esistente = next((a for a in grandi if a["nome_macro_area"] == residuale_nome), None)
+                  if area_esistente:
+                      area_esistente["nuggets"].extend(piccole_nuggets)
+                  else:
+                      grandi.append({"nome_macro_area": residuale_nome, "nuggets": piccole_nuggets})
+
+              return grandi
+
+          PYEOF
+      - name: Creazione modulo - reconciliation.py
+        run: |
+          cat << 'PYEOF' > reconciliation.py
+          #
+          # Fase 2 della pipeline: per ogni macro-area, riconciliazione dei nugget.
+          #
+          # NESSUN GROUNDING disponibile su questo piano/modello (Gemini 3.1 Flash-Lite
+          # free tier). La risoluzione dei conflitti si basa quindi ESCLUSIVAMENTE su:
+          # 1. Ragionamento sull'autorevolezza relativa delle fonti gia' presenti nei
+          # nugget (dominio del sito ufficiale dell'entita' specifica > fonte
+          # istituzionale generica di livello superiore > blog/aggregatore).
+          # 2. Euristiche di dominio esplicite per casi frequenti e ben definiti
+          # (in particolare i prezzi, vedi sotto).
+          # 3. Se nessuna delle due permette una risoluzione con ragionevole certezza,
+          # il conflitto resta ESPLICITO nell'output (campo conflitto_irrisolto),
+          # con tutti i valori alternativi e le fonti associate. NON esiste un
+          # cestino/file separato da far guardare a un umano: il sistema e' pensato
+          # per restare completamente black-box. I conflitti irrisolti sono dati
+          # legittimi di output, destinati a essere ripresi automaticamente da una
+          # fase successiva della pipeline di deep research (che dispone di
+          # grounding e di nugget aggiuntivi provenienti da altri agenti/fonti,
+          # es. mappe, API strutturate) senza intervento umano.
+          #
+          # Il sistema resta completamente agnostico rispetto a lingua/paese/dominio
+          # editoriale: le uniche euristiche esplicite sono generiche e universali
+          # (biglietteria/prezzi), non specifiche di alcuna destinazione.
+          #
+
+          import json
+
+          RECONCILIATION_PROMPT_TEMPLATE = """Sei un fact-checker editoriale senior. Ti occupi di riconciliare informazioni raccolte da piu' fonti web su un singolo argomento/entita', in QUALSIASI lingua e per QUALSIASI destinazione al mondo. NON hai accesso a strumenti di ricerca esterni: devi lavorare esclusivamente con le fonti e i testi che ricevi qui sotto.
+
+          MACRO-AREA: {nome_macro_area}
+
+          Di seguito i nugget grezzi raccolti su questo argomento, ciascuno con: id, fatto, categoria, url sorgente, e livello di confidence assegnato in fase di estrazione (confidence = quanto la citazione originale corrisponde fedelmente al testo scrapato, NON quanto il fatto e' vero).
+
+          NUGGET GREZZI:
+          {nuggets_list}
+
+          COMPITO:
+          1. Unisci i nugget che riportano la stessa informazione in un unico "fatto consolidato". Elimina duplicati, ridondanze e informazioni superflue o irrilevanti dal punto di vista editoriale.
+
+          2. Se due o piu' nugget riportano DATI NUMERICI O FATTUALI IN CONFLITTO sullo stesso argomento, prova a risolvere il conflitto SOLO usando queste regole, in ordine di priorita':
+
+             a. AUTOREVOLEZZA DELLA FONTE SPECIFICA: se una fonte e' il sito ufficiale dell'entita' specifica a cui il dato si riferisce (es. il sito proprio del monumento/museo/attrazione/attivita' in questione), quella fonte ha priorita' su qualunque altra fonte, ANCHE SU un sito istituzionale di livello superiore (comune, ente turistico regionale, ministero). Un sito istituzionale generico NON e' automaticamente piu' autorevole del sito ufficiale specifico del luogo: spesso e' anzi meno aggiornato, perche' il gestore diretto del luogo/servizio e' chi aggiorna i propri prezzi/orari con la frequenza maggiore. Valuta l'URL delle fonti per dedurre quale sia il sito ufficiale specifico, quando possibile.
+
+             b. REGOLA SPECIFICA PER I PREZZI DI BIGLIETTERIA (prezzo intero): quando fonti diverse riportano prezzi INTERI diversi per lo stesso biglietto/servizio e non e' possibile stabilire quale fonte sia piu' recente o autorevole con il criterio (a), assumi che IL VALORE PIU' ALTO tra quelli trovati sia il piu' aggiornato e corretto: i prezzi tendono a salire nel tempo, quindi un valore piu' basso trovato su un'altra fonte e' quasi sempre un dato non aggiornato, non uno sconto "nascosto". NON confondere questa regola con i prezzi ridotti: un prezzo piu' basso va trattato come prezzo ridotto (con le sue condizioni) SOLO se il testo di origine lo qualifica esplicitamente come tale (es. "ridotto", "under 18", "over 65", "residenti", "gruppi"); altrimenti, se sembra essere semplicemente un prezzo intero alternativo e piu' basso, trattalo come dato superato dalla regola del valore piu' alto.
+
+             c. PREZZI RIDOTTI: se il testo menziona esplicitamente prezzi ridotti/agevolati, riportali SEMPRE come informazione distinta e aggiuntiva rispetto al prezzo intero, mai come sostituto di esso. Riassumi brevemente le condizioni di riduzione quando disponibili (es. eta', categoria, giorno specifico), senza inventarle se non specificate.
+
+             d. Se nessuna delle regole precedenti si applica con ragionevole certezza (es. conflitto non numerico, o su un tipo di dato diverso da un prezzo di biglietteria), NON risolvere arbitrariamente il conflitto: segnalalo come "conflitto_irrisolto": true, elencando tutti i valori alternativi trovati con le rispettive fonti. Questo e' un esito normale e accettabile, non un fallimento: una fase successiva del sistema, con strumenti di verifica esterni, si occupera' di risolverlo.
+
+          3. Per ogni fatto CONSOLIDATO che rientra in categorie ad alto valore/alta volatilita' (prezzi, orari di apertura, tariffe, contatti, indirizzi, o qualsiasi altro dato che ritieni critico da tenere aggiornato), produci ANCHE una voce separata "verified_facts": deve riportare il campo, il valore ritenuto corretto secondo le regole sopra (o, se irrisolto, il valore piu' alto/plausibile con "certezza": "bassa"), e l'URL della fonte che consideri piu' autorevole per quel dato secondo la regola (a). Imposta "fonte_ufficiale_certa" a true SOLO se sei ragionevolmente sicuro che l'URL sia il sito ufficiale specifico dell'entita' in questione, false altrimenti.
+
+          4. Ogni fatto consolidato in output deve riportare la lista degli id dei nugget grezzi da cui deriva (campo "source_nugget_ids"), per permettere una verifica automatica successiva.
+
+          5. NON INVENTARE alcun dato, numero o affermazione che non sia presente (anche solo implicitamente) nei nugget grezzi forniti. Se non sei sicuro, ometti il dato o segnalalo come "conflitto_irrisolto" invece di inventarlo.
+
+          Restituisci ESCLUSIVAMENTE un JSON con questo schema, in un blocco ```json ... ```:
+          {{
+            "macro_area": "{nome_macro_area}",
+            "fatti_consolidati": [
+              {{
+                "fact": "testo del fatto consolidato, riformulato in modo chiaro e non ridondante",
+                "category": "categoria (stessa tassonomia dei nugget di origine)",
+                "source_nugget_ids": [0, 2, 5],
+                "source_urls": ["https://...", "https://..."],
+                "conflitto_irrisolto": false,
+                "valori_alternativi": [],
+                "note_risoluzione": "breve nota su quale regola e' stata applicata per risolvere un eventuale conflitto (es. 'sito ufficiale specifico', 'valore piu alto tra i prezzi interi'), o stringa vuota se non applicabile"
+              }}
+            ],
+            "verified_facts": [
+              {{
+                "campo": "es. prezzo biglietto intero / prezzo ridotto / orario apertura / indirizzo / telefono",
+                "valore": "il valore ritenuto corretto secondo le regole",
+                "condizioni_riduzione": "breve descrizione delle condizioni se il campo e' un prezzo ridotto, altrimenti stringa vuota",
+                "valori_alternativi_scartati": [],
+                "fonte_ufficiale_url": "https://...",
+                "fonte_ufficiale_certa": true,
+                "certezza": "alta",
+                "source_nugget_ids": [3, 9]
+              }}
+            ]
+          }}
+          Non aggiungere alcun testo al di fuori del JSON."""
+
+
+          def _formatta_nuggets_per_prompt(nuggets):
+              righe = []
+              for idx, n in enumerate(nuggets):
+                  righe.append(
+                      f"[{idx}] (categoria: {n.get('category', 'altro')}, "
+                      f"confidence estrazione: {n.get('confidence', 'n/d')}, "
+                      f"fonte: {n.get('source_url', 'n/d')}) {n.get('fact', '')}"
+                  )
+              return "\n".join(righe)
+
+
+          async def riconcilia_macro_area(gemini_client, nome_macro_area, nuggets, label=""):
+              # Esegue UNA chiamata AI per riconciliare i nugget di una singola
+              # macro-area. Ritorna un dict con fatti_consolidati e verified_facts.
+
+              prompt = RECONCILIATION_PROMPT_TEMPLATE.format(
+                  nome_macro_area=nome_macro_area,
+                  nuggets_list=_formatta_nuggets_per_prompt(nuggets)
+              )
+
+              parsed, raw_text = await gemini_client.generate_json(prompt, label=label)
+
+              if parsed is None:
+                  print(f"{label}[RICONCILIAZIONE] Fallita per macro-area "
+                        f"'{nome_macro_area}'. Fallback: nessuna riconciliazione, "
+                        f"nugget grezzi mantenuti as-is (marcati come conflitto "
+                        f"irrisolto per trasparenza).", flush=True)
+                  return _fallback_nessuna_riconciliazione(nome_macro_area, nuggets)
+
+              parsed.setdefault("macro_area", nome_macro_area)
+              parsed.setdefault("fatti_consolidati", [])
+              parsed.setdefault("verified_facts", [])
+              parsed["_local_nuggets"] = nuggets  # per la rimappatura a valle (fase 3)
+              return parsed
+
+
+          def _fallback_nessuna_riconciliazione(nome_macro_area, nuggets):
+              # Fallback deterministico se la chiamata AI fallisce del tutto: i nugget
+              # grezzi vengono riportati come 'fatti consolidati' 1:1, marcati come
+              # conflitto irrisolto (per omogeneita' di schema con il resto della
+              # pipeline black-box: anche questo caso finisce nello stesso canale di
+              # 'dati da ripassare in una fase successiva', non in un cestino separato).
+              fatti = []
+              for idx, n in enumerate(nuggets):
+                  fatti.append({
+                      "fact": n.get("fact", ""),
+                      "category": n.get("category", "altro"),
+                      "source_nugget_ids": [idx],
+                      "source_urls": [n.get("source_url", "")],
+                      "conflitto_irrisolto": True,
+                      "valori_alternativi": [],
+                      "note_risoluzione": "RICONCILIAZIONE AI FALLITA: fatto riportato as-is dal nugget grezzo originale, da ripassare in una fase successiva.",
+                      "_non_riconciliato": True,
+                  })
+              return {
+                  "macro_area": nome_macro_area,
+                  "fatti_consolidati": fatti,
+                  "verified_facts": [],
+                  "_local_nuggets": nuggets,
+              }
+
+          PYEOF
+      - name: Creazione modulo - hallucination_check.py
+        run: |
+          cat << 'PYEOF' > hallucination_check.py
+          #
+          # Fase 3 della pipeline: verifica deterministica anti-allucinazione.
+          #
+          # Nessuna chiamata AI qui dentro. Solo confronto testuale/numerico tra l'output
+          # della riconciliazione e le "quote_originale" dei nugget grezzi di input,
+          # tramite fuzzy match (difflib.SequenceMatcher) esteso con un controllo
+          # specifico sui NUMERI (il punto piu' critico per prezzi/orari/misure).
+          #
+          # Filosofia (aggiornata per pipeline black-box, nessun umano nel loop): questo
+          # e' un controllo di "provenienza", non di "verita' assoluta". Se un fatto o un
+          # verified_fact non trova riscontro sufficiente nei nugget di origine, NON
+          # viene scartato (rischio di perdere dati corretti solo mal riformulati) e NON
+          # finisce in un file separato per revisione umana. Viene invece marcato con
+          # "verification_status": "unverified" DIRETTAMENTE nell'oggetto stesso, cosi'
+          # che qualunque fase successiva della pipeline (quella con grounding, che
+          # integra anche i nugget prodotti da altri agenti/fonti come mappe o API
+          # strutturate) possa filtrare e ri-processare automaticamente solo gli elementi
+          # con questo flag, senza bisogno di un file o un processo separato.
+          #
+
+          import re
+          import difflib
+
+          SIMILARITY_THRESHOLD = 0.60
+          NUMERIC_TOLERANCE_PCT = 0.02  # 2%
+
+          NUMBER_REGEX = re.compile(r"\d[\d.,]*\d|\d")
+
+
+          def _estrai_numeri(testo):
+              if not testo:
+                  return []
+              grezzi = NUMBER_REGEX.findall(testo)
+              numeri = []
+              for g in grezzi:
+                  pulito = g.strip(".,")
+                  if not pulito:
+                      continue
+                  normalizzato = pulito.replace(".", "").replace(",", ".") if pulito.count(",") == 1 and pulito.count(".") <= 1 else pulito.replace(",", "")
+                  try:
+                      numeri.append(float(normalizzato))
+                  except ValueError:
+                      continue
+              return numeri
+
+
+          def _numero_supportato(numero, numeri_sorgente):
+              for n_sorgente in numeri_sorgente:
+                  if n_sorgente == 0:
+                      if numero == 0:
+                          return True
+                      continue
+                  scostamento = abs(numero - n_sorgente) / abs(n_sorgente)
+                  if scostamento <= NUMERIC_TOLERANCE_PCT:
+                      return True
+              return False
+
+
+          def _testo_supportato_fuzzy(testo, testi_sorgente_concatenati):
+              if not testo or not testi_sorgente_concatenati:
+                  return 0.0
+              testo_norm = re.sub(r"\s+", " ", testo).strip().lower()
+              sorgente_norm = re.sub(r"\s+", " ", testi_sorgente_concatenati).strip().lower()
+
+              if testo_norm in sorgente_norm:
+                  return 1.0
+
+              finestra = min(len(testo_norm), 300)
+              if finestra < 8 or len(sorgente_norm) < finestra:
+                  return difflib.SequenceMatcher(None, testo_norm, sorgente_norm).ratio()
+
+              best_ratio = 0.0
+              step = max(1, finestra // 2)
+              for i in range(0, len(sorgente_norm) - finestra + 1, step):
+                  frammento = sorgente_norm[i:i + finestra]
+                  ratio = difflib.SequenceMatcher(None, testo_norm, frammento).ratio()
+                  if ratio > best_ratio:
+                      best_ratio = ratio
+                  if best_ratio > 0.95:
+                      break
+              return best_ratio
+
+
+          def _raccogli_quote_originali(source_nugget_ids, id_map):
+              # Raccoglie SOLO le quote_originale (testo verbatim scrapato dalla
+              # fonte) dei nugget citati, NON il campo 'fact' del nugget grezzo.
+              #
+              # Motivo: 'fact' e' gia' un'interpretazione prodotta da un primo LLM
+              # (l'estrattore). Se quell'interpretazione fosse gia' malformata o
+              # leggermente allucinata, usarla come termine di paragone per convalidare
+              # l'output di un secondo LLM (il riconciliatore) la farebbe apparire
+              # "verificata" solo perche' i due errori combaciano tra loro, non perche'
+              # combaciano con la fonte reale. La quote_originale e' l'unico riferimento
+              # verbatim disponibile ed e' quindi l'unica base valida per il controllo
+              # di provenienza, in particolare per i numeri.
+              testi = []
+              for local_id in source_nugget_ids:
+                  nugget = id_map.get(local_id)
+                  if nugget and nugget.get("quote_originale"):
+                      testi.append(nugget["quote_originale"])
+              return "\n".join(testi)
+
+
+          def verifica_fatto_consolidato(fatto_consolidato, id_map):
+              source_ids = fatto_consolidato.get("source_nugget_ids", [])
+              testo_fatto = fatto_consolidato.get("fact", "")
+
+              testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
+
+              dettagli = {
+                  "similarity_score": None,
+                  "numeri_non_supportati": [],
+                  "source_ids_invalidi": [],
+              }
+
+              for sid in source_ids:
+                  if sid not in id_map:
+                      dettagli["source_ids_invalidi"].append(sid)
+
+              if not source_ids or not testi_sorgente:
+                  fatto_consolidato["verification_status"] = "unverified"
+                  dettagli["motivo"] = "Nessun source_nugget_ids valido o quote originali non recuperabili."
+                  fatto_consolidato["verification_details"] = dettagli
+                  return fatto_consolidato
+
+              similarity = _testo_supportato_fuzzy(testo_fatto, testi_sorgente)
+              dettagli["similarity_score"] = round(similarity, 3)
+
+              numeri_fatto = _estrai_numeri(testo_fatto)
+              numeri_sorgente = _estrai_numeri(testi_sorgente)
+
+              for numero in numeri_fatto:
+                  if not _numero_supportato(numero, numeri_sorgente):
+                      dettagli["numeri_non_supportati"].append(numero)
+
+              # Un fatto consolidato e' quasi sempre una riformulazione libera (unione
+              # di piu' nugget, frase ricostruita): la similarity testuale grezza cala
+              # naturalmente anche quando il contenuto e' corretto. Il criterio decisivo
+              # e' quindi: se il fatto contiene numeri, TUTTI devono essere tracciabili
+              # verbatim (con tolleranza) nelle quote originali. Se non contiene numeri,
+              # ci si affida alla similarity testuale come unica rete di sicurezza,
+              # perche' non c'e' altro da verificare deterministicamente.
+              if numeri_fatto:
+                  is_verified = (
+                      not dettagli["numeri_non_supportati"]
+                      and not dettagli["source_ids_invalidi"]
+                  )
+              else:
+                  is_verified = (
+                      similarity >= SIMILARITY_THRESHOLD
+                      and not dettagli["source_ids_invalidi"]
+                  )
+
+              fatto_consolidato["verification_status"] = "verified" if is_verified else "unverified"
+              fatto_consolidato["verification_details"] = dettagli
+              return fatto_consolidato
+
+
+          def verifica_verified_fact(verified_fact, id_map):
+              source_ids = verified_fact.get("source_nugget_ids", [])
+              valore = str(verified_fact.get("valore", ""))
+
+              testi_sorgente = _raccogli_quote_originali(source_ids, id_map)
+
+              dettagli = {
+                  "similarity_score": None,
+                  "numeri_non_supportati": [],
+                  "source_ids_invalidi": [sid for sid in source_ids if sid not in id_map],
+              }
+
+              if not testi_sorgente:
+                  verified_fact["verification_status"] = "unverified"
+                  dettagli["motivo"] = "Nessuna quote originale disponibile per i source_nugget_ids dichiarati."
+                  verified_fact["verification_details"] = dettagli
+                  return verified_fact
+
+              similarity = _testo_supportato_fuzzy(valore, testi_sorgente)
+              dettagli["similarity_score"] = round(similarity, 3)
+
+              numeri_valore = _estrai_numeri(valore)
+              numeri_sorgente = _estrai_numeri(testi_sorgente)
+              for numero in numeri_valore:
+                  if not _numero_supportato(numero, numeri_sorgente):
+                      dettagli["numeri_non_supportati"].append(numero)
+
+              is_verified = (not dettagli["numeri_non_supportati"]) and (similarity >= SIMILARITY_THRESHOLD or not numeri_valore)
+
+              verified_fact["verification_status"] = "verified" if is_verified else "unverified"
+              verified_fact["verification_details"] = dettagli
+              return verified_fact
+
+
+          def esegui_verifica_anti_allucinazione(macro_aree_riconciliate):
+              # Entry point della fase 3. Arricchisce ogni fatto/verified_fact con i
+              # campi di verifica DIRETTAMENTE sull'oggetto (nessun file separato). Ritorna
+              # anche un piccolo report aggregato di sole statistiche, utile per il log e
+              # per il job summary, ma NON necessario al funzionamento della pipeline a
+              # valle (che legge i flag verification_status/conflitto_irrisolto
+              # direttamente dagli oggetti nel file di output principale).
+
+              totale_fatti = 0
+              totale_verified_facts = 0
+              totale_non_verificati = 0
+              totale_conflitti_irrisolti = 0
+
+              for area in macro_aree_riconciliate:
+                  local_nuggets = area.get("_local_nuggets", [])
+                  id_map = {i: n for i, n in enumerate(local_nuggets)}
+
+                  fatti_verificati = []
+                  for fatto in area.get("fatti_consolidati", []):
+                      totale_fatti += 1
+                      fatto_verificato = verifica_fatto_consolidato(fatto, id_map)
+                      fatti_verificati.append(fatto_verificato)
+                      if fatto_verificato["verification_status"] == "unverified":
+                          totale_non_verificati += 1
+                      if fatto_verificato.get("conflitto_irrisolto"):
+                          totale_conflitti_irrisolti += 1
+                  area["fatti_consolidati"] = fatti_verificati
+
+                  vf_verificati = []
+                  for vf in area.get("verified_facts", []):
+                      totale_verified_facts += 1
+                      vf_verificato = verifica_verified_fact(vf, id_map)
+                      vf_verificati.append(vf_verificato)
+                      if vf_verificato["verification_status"] == "unverified":
+                          totale_non_verificati += 1
+                  area["verified_facts"] = vf_verificati
+
+                  area.pop("_local_nuggets", None)
+
+              report = {
+                  "totale_fatti_consolidati": totale_fatti,
+                  "totale_verified_facts": totale_verified_facts,
+                  "totale_non_verificati": totale_non_verificati,
+                  "totale_conflitti_irrisolti": totale_conflitti_irrisolti,
+              }
+
+              return macro_aree_riconciliate, report
+
+          PYEOF
       - name: Creazione modulo - orchestrator.py
         run: |
-          cat << 'EOF' > orchestrator.py
+          cat << 'PYEOF' > orchestrator.py
+          #
+          # Orchestratore principale: carica i nugget grezzi, esegue clustering,
+          # riconciliazione per macro-area, verifica anti-allucinazione deterministica, e
+          # scrive UN SOLO output finale strutturato, pensato per essere consumato senza
+          # intervento umano da una fase successiva della pipeline di deep research.
+          #
+          # Uso:
+          # python orchestrator.py --input nuggets_finale.json --output-dir ./output
+          #
+          # Variabili d'ambiente richieste:
+          # GEMINI_API_KEY (round-robin opzionale con GEMINI_API_KEY_2, _3, ...)
+          #
+
           import os
           import sys
-          import time
-          import tarfile
-          import requests
-          from google import genai
+          import json
+          import argparse
+          import asyncio
 
-          def run_antigravity_pipeline(input_path, output_dir):
-              api_key = os.environ.get("GEMINI_API_KEY")
-              if not api_key:
-                  print("[ORCHESTRATOR] ERRORE: GEMINI_API_KEY non configurata.")
+          from rate_limiter import RPMLimiter
+          from gemini_client import GeminiAnalysisClient
+          from clustering import clusterizza_nuggets
+          from reconciliation import riconcilia_macro_area
+          from hallucination_check import esegui_verifica_anti_allucinazione
+
+          # Limite RPM richiesto per il piano free di Gemini 3.1 Flash-Lite. Questo
+          # limite e' UNICO e condiviso da TUTTA la pipeline (clustering + tutte le
+          # riconciliazioni per macro-area), perche' il limite e' applicato da Google
+          # per chiave/progetto, non per singola fase del nostro programma: se il
+          # clustering consuma 1 delle 15 richieste disponibili in un dato minuto, in
+          # quello stesso minuto restano davvero solo 14 richieste per la fase 2.
+          MAX_RPM = int(os.environ.get("MAX_RPM_ANALYSIS", "15"))
+
+
+          def _carica_api_keys():
+              keys = []
+              primary = os.environ.get("GEMINI_API_KEY", "").strip()
+              if primary:
+                  keys.extend([k.strip() for k in primary.split(",") if k.strip()])
+              idx = 2
+              while True:
+                  val = os.environ.get(f"GEMINI_API_KEY_{idx}", "").strip()
+                  if not val:
+                      break
+                  keys.extend([k.strip() for k in val.split(",") if k.strip()])
+                  idx += 1
+              return keys
+
+
+          def _carica_nuggets(input_path):
+              with open(input_path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+
+              if isinstance(data, dict) and "nuggets" in data:
+                  return data["nuggets"]
+              if isinstance(data, list):
+                  return data
+              raise ValueError(
+                  "Formato input non riconosciuto: atteso un oggetto con chiave "
+                  "'nuggets' (lista) oppure direttamente una lista di nugget."
+              )
+
+
+          async def esegui_pipeline(input_path, output_dir):
+              os.makedirs(output_dir, exist_ok=True)
+
+              print(f"[ORCHESTRATOR] Caricamento nugget da {input_path}...", flush=True)
+              nuggets_grezzi = _carica_nuggets(input_path)
+              print(f"[ORCHESTRATOR] {len(nuggets_grezzi)} nugget grezzi caricati.", flush=True)
+
+              if not nuggets_grezzi:
+                  print("[ORCHESTRATOR] Nessun nugget da processare. Uscita.", flush=True)
+                  _scrivi_output_vuoto(output_dir)
+                  return
+
+              api_keys = _carica_api_keys()
+              if not api_keys:
+                  print("[ORCHESTRATOR] ERRORE: nessuna GEMINI_API_KEY disponibile.", flush=True)
                   sys.exit(1)
 
-              print(f"[ORCHESTRATOR] Caricamento nugget grezzi da: {input_path}")
-              try:
-                  with open(input_path, "r", encoding="utf-8") as f:
-                      raw_nuggets_content = f.read()
-              except Exception as e:
-                  print(f"[ORCHESTRATOR] ERRORE durante la lettura del file di input: {e}")
-                  sys.exit(1)
+              # Un solo rate limiter, condiviso da tutta la pipeline sulla stessa chiave.
+              rpm_limiter = RPMLimiter(MAX_RPM)
+              gemini_client = GeminiAnalysisClient(api_key=api_keys[0], rpm_limiter=rpm_limiter)
 
-              client = genai.Client(api_key=api_key)
+              # --- FASE 1: Clustering agnostico in macro-aree (nessun tetto massimo) ---
+              print("[ORCHESTRATOR] Fase 1: clustering in macro-aree...", flush=True)
+              macro_aree = await clusterizza_nuggets(gemini_client, nuggets_grezzi)
+              print(f"[ORCHESTRATOR] {len(macro_aree)} macro-aree individuate:", flush=True)
+              for area in macro_aree:
+                  print(f"    - {area['nome_macro_area']}: {len(area['nuggets'])} nugget", flush=True)
 
-              print("[ORCHESTRATOR] Avvio dell'agente Google Antigravity in background...")
-              
-              # Prompt ottimizzato al minimo per evitare cicli di programmazione e ricerche web ridondanti
-              prompt = f"""
-          Sei l'Agente Riconciliazione Editoriale basato su Google Antigravity.
-          Il tuo unico compito è riordinare, pulire, accorpare i nugget forniti qui sotto, risolvere eventuali incoerenze ed identificare le fonti ufficiali per i dati volatili importanti (orari, prezzi, contatti) tramite Google Search.
-
-          NUGGET GREZZI (JSON):
-          ```json
-          {raw_nuggets_content}
-          ```
-
-          REGOLE RIGIDE PER EVITARE SPRECO DI TOKEN:
-          1. NON scrivere, compilare o eseguire complessi script Python di test o di verifica fuzzy anti-allucinazione nella sandbox.
-          2. NON effettuare ricerche web seriali o ripetitive. Usa Google Search solo ed esclusivamente se trovi reali incongruenze nei dati dei nugget (es. prezzi discordanti sullo stesso luogo) per identificare la fonte ufficiale corretta.
-          3. Scrivi direttamente i 3 file JSON richiesti nella cartella 'output/' usando comandi di scrittura immediati (es. tramite un semplice script a riga singola o echo):
-             - `output/nuggets_riconciliati.json` (contenente la mappatura dei nugget grezzi raggruppati in max 15 macro-aree)
-             - `output/verified_facts.json` (la lista piatta dei dati volatili e dei relativi URL ufficiali verificati)
-             - `output/needs_human_review.json` (le statistiche e l'elenco dei dati rimasti incoerenti o non verificabili)
-
-          Assicurati che le strutture dei JSON rispettino esattamente i formati richiesti. Una volta scritti i 3 file, termina subito scrivendo "PIPELINE_COMPLETE".
-          """
-
-              try:
-                  # Avvio dell'interazione in background per prevenire timeout HTTP locali
-                  interaction = client.interactions.create(
-                      agent="antigravity-preview-05-2026",
-                      input=prompt,
-                      environment="remote",
-                      background=True
+              # --- FASE 2: Riconciliazione per macro-area (1 chiamata AI per blocco) ---
+              print(f"[ORCHESTRATOR] Fase 2: riconciliazione per macro-area "
+                    f"({len(macro_aree)} chiamate, rate-limited a {MAX_RPM} RPM condivisi "
+                    f"col clustering)...", flush=True)
+              macro_aree_riconciliate = []
+              for area in macro_aree:
+                  label = f"[{area['nome_macro_area']}] "
+                  risultato = await riconcilia_macro_area(
+                      gemini_client, area["nome_macro_area"], area["nuggets"], label=label
                   )
-                  
-                  print(f"[ORCHESTRATOR] Chiamata avviata con successo. ID: {interaction.id}")
-                  print("[ORCHESTRATOR] Polling dello stato dell'agente...")
-                  
-                  while True:
-                      time.sleep(15)
-                      status_res = client.interactions.get(interaction.id)
-                      print(f"[ORCHESTRATOR] Stato corrente: {status_res.status}", flush=True)
-                      
-                      if status_res.status == "completed":
-                          interaction = status_res
-                          break
-                      elif status_res.status in ["failed", "cancelled"]:
-                          print(f"[ORCHESTRATOR] ERRORE: L'interazione si è interrotta con stato: {status_res.status}")
-                          if getattr(status_res, "error", None):
-                              print(f"[ORCHESTRATOR] Dettagli errore: {status_res.error}")
-                          sys.exit(1)
-                  
-                  print("[ORCHESTRATOR] Agente completato. Output di esecuzione:")
-                  print(interaction.output_text)
-                  
-                  env_id = interaction.environment_id
-                  if not env_id:
-                      print("[ORCHESTRATOR] ERRORE: L'ambiente remoto non ha restituito un ID valido.")
-                      sys.exit(1)
-                      
-                  print(f"[ORCHESTRATOR] Scaricamento dello snapshot dell'ambiente ({env_id})...")
-                  download_url = f"https://generativelanguage.googleapis.com/v1beta/files/environment-{env_id}:download"
-                  
-                  response = requests.get(
-                      download_url,
-                      params={"alt": "media"},
-                      headers={"x-goog-api-key": api_key},
-                      allow_redirects=True
-                  )
-                  
-                  if response.status_code != 200:
-                      print(f"[ORCHESTRATOR] ERRORE durante il download dello snapshot: {response.status_code}")
-                      sys.exit(1)
-                      
-                  tar_path = "snapshot.tar"
-                  with open(tar_path, "wb") as f:
-                      f.write(response.content)
-                      
-                  print("[ORCHESTRATOR] Estrazione dei file generati...")
-                  os.makedirs(output_dir, exist_ok=True)
-                  
-                  extracted_files = []
-                  with tarfile.open(tar_path, "r") as tar:
-                      for member in tar.getmembers():
-                          filename = os.path.basename(member.name)
-                          if filename in ["nuggets_riconciliati.json", "verified_facts.json", "needs_human_review.json"]:
-                              member.name = filename
-                              tar.extract(member, path=output_dir)
-                              extracted_files.append(filename)
-                              
-                  print(f"[ORCHESTRATOR] Estrazione completata in {output_dir}:")
-                  for f in extracted_files:
-                      print(f"  - {f}")
-                      
-              except Exception as e:
-                  print(f"[ORCHESTRATOR] Errore di esecuzione: {e}")
-                  sys.exit(1)
+                  macro_aree_riconciliate.append(risultato)
+                  print(f"{label}{len(risultato.get('fatti_consolidati', []))} fatti consolidati, "
+                        f"{len(risultato.get('verified_facts', []))} verified_facts.", flush=True)
+
+              # --- FASE 3: Verifica deterministica anti-allucinazione (integrata) ---
+              print("[ORCHESTRATOR] Fase 3: verifica anti-allucinazione deterministica...", flush=True)
+              macro_aree_verificate, report_verifica = esegui_verifica_anti_allucinazione(
+                  macro_aree_riconciliate
+              )
+              print(f"[ORCHESTRATOR] Verifica completata: "
+                    f"{report_verifica['totale_non_verificati']} elementi non verificati, "
+                    f"{report_verifica['totale_conflitti_irrisolti']} conflitti irrisolti "
+                    f"(entrambi restano nell'output principale con il relativo flag, "
+                    f"pronti per una fase successiva automatica).", flush=True)
+
+              # --- Output finale: UN SOLO file, black-box-ready ---
+              output_finale = {
+                  "meta": {
+                      "totale_nugget_grezzi_input": len(nuggets_grezzi),
+                      "totale_macro_aree": len(macro_aree_riconciliate),
+                      "stats_verifica": report_verifica,
+                  },
+                  "macro_aree": macro_aree_riconciliate,
+              }
+
+              output_path = os.path.join(output_dir, "nuggets_riconciliati.json")
+              with open(output_path, "w", encoding="utf-8") as f:
+                  json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
+              print(f"[ORCHESTRATOR] Output scritto in {output_path}", flush=True)
+
+
+          def _scrivi_output_vuoto(output_dir):
+              output_finale = {
+                  "meta": {
+                      "totale_nugget_grezzi_input": 0,
+                      "totale_macro_aree": 0,
+                      "stats_verifica": {
+                          "totale_fatti_consolidati": 0,
+                          "totale_verified_facts": 0,
+                          "totale_non_verificati": 0,
+                          "totale_conflitti_irrisolti": 0,
+                      },
+                  },
+                  "macro_aree": [],
+              }
+              with open(os.path.join(output_dir, "nuggets_riconciliati.json"), "w", encoding="utf-8") as f:
+                  json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
 
           def main():
-              import argparse
-              parser = argparse.ArgumentParser()
-              parser.add_argument("--input", required=True)
-              parser.add_argument("--output-dir", default="./output")
+              parser = argparse.ArgumentParser(description="Pipeline di riconciliazione nugget editoriali.")
+              parser.add_argument("--input", required=True, help="Path al file JSON con i nugget grezzi.")
+              parser.add_argument("--output-dir", default="./output", help="Directory di output.")
               args = parser.parse_args()
-              run_antigravity_pipeline(args.input, args.output_dir)
+
+              asyncio.run(esegui_pipeline(args.input, args.output_dir))
+
 
           if __name__ == "__main__":
               main()
-          EOF
 
+          PYEOF
       - name: Creazione modulo - print_summary.py
         run: |
-          cat << 'EOF' > print_summary.py
+          cat << 'PYEOF' > print_summary.py
           import json
 
-          try:
-              with open("./output/needs_human_review.json", "r", encoding="utf-8") as f:
-                  data = json.load(f)
-              stats = data.get("stats", {})
-              print(f"- Fatti consolidati totali: {stats.get('totale_fatti_consolidati', 0)}")
-              print(f"- Verified facts totali: {stats.get('totale_verified_facts', 0)}")
-              print(f"- Elementi da revisionare: {stats.get('totale_non_verificati', 0)}")
-          except Exception as e:
-              print(f"Errore durante la lettura del riepilogo: {e}")
-          EOF
+          with open("./output/nuggets_riconciliati.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          stats = data.get("meta", {}).get("stats_verifica", {})
+          print(f"- Macro-aree individuate: {data.get('meta', {}).get('totale_macro_aree', 0)}")
+          print(f"- Fatti consolidati totali: {stats.get('totale_fatti_consolidati', 0)}")
+          print(f"- Verified facts totali: {stats.get('totale_verified_facts', 0)}")
+          print(f"- Elementi non verificati (flag unverified): {stats.get('totale_non_verificati', 0)}")
+          print(f"- Conflitti irrisolti (da ripassare con grounding a valle): {stats.get('totale_conflitti_irrisolti', 0)}")
+
+          PYEOF
 
       - name: Verifica presenza file di input
         run: |
@@ -184,7 +951,7 @@ jobs:
           fi
           echo "INPUT_FILE=$INPUT_FILE" >> $GITHUB_ENV
           if [ ! -f "$INPUT_FILE" ]; then
-            echo "ERRORE: file di input '$INPUT_FILE' non trovato."
+            echo "ERRORE: file di input '$INPUT_FILE' non trovato nella repo."
             exit 1
           fi
           echo "File di input trovato: $INPUT_FILE"
@@ -193,28 +960,16 @@ jobs:
         run: |
           python -u orchestrator.py --input "${{ env.INPUT_FILE }}" --output-dir ./output
 
-      - name: Riepilogo revisione umana
+      - name: Riepilogo statistiche
         if: always()
         run: |
-          if [ -f "./output/needs_human_review.json" ]; then
-            echo "### Riepilogo verifica anti-allucinazione" >> $GITHUB_STEP_SUMMARY
+          if [ -f "./output/nuggets_riconciliati.json" ]; then
+            echo "### Riepilogo pipeline di riconciliazione" >> $GITHUB_STEP_SUMMARY
             python3 print_summary.py >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload Artifact - Nugget Riconciliati
+      - name: Upload Artifact - Nugget Riconciliati (output unico black-box)
         uses: actions/upload-artifact@v4
         with:
           name: Nuggets_Riconciliati
           path: output/nuggets_riconciliati.json
-
-      - name: Upload Artifact - Verified Facts (dati critici da monitorare)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Verified_Facts
-          path: output/verified_facts.json
-
-      - name: Upload Artifact - Report Revisione Umana
-        uses: actions/upload-artifact@v4
-        with:
-          name: Needs_Human_Review
-          path: output/needs_human_review.json
