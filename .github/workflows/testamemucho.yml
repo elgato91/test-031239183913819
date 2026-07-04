@@ -9,7 +9,7 @@ jobs:
     steps:
       - name: Chiamata Diretta a Gemma 4 con Search
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           if [ -z "$GOOGLE_API_KEY" ]; then
             echo "Errore: GOOGLE_API_KEY non è impostata nei Secrets."
