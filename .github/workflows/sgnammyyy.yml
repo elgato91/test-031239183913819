@@ -11,6 +11,12 @@ jobs:
       GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
       TARGET_TOPIC: "Come sta andando Apple?"
+      # Metti a "1" per forzare i 6 siti diagnostici (browserleaks, sannysoft,
+      # creepjs, pixelscan, incolumitas, deviceinfo) a saltare Step 1 e finire
+      # dritti nel fallback CloakBrowser di Step 2, cosi' il fingerprint e lo
+      # stealth vengono verificati sul browser headful vero e non sul semplice
+      # fetch HTTP di curl-cffi. Default "0": comportamento identico a sempre.
+      FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
       - name: Installazione Font di Sistema
@@ -64,28 +70,28 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
+               "https://tls.browserleaks.com/json",
+               "https://bot.sannysoft.com/",
+               "https://abrahamjuliot.github.io/creepjs/",
+               "https://pixelscan.net/",
+               "https://bot.incolumitas.com/",
+               "https://www.deviceinfo.me/",
+               "https://www.facebook.com/groups/expatsinparaguay/",
+               "https://www.google.com/search?q=cosa+vedere+roma",
+               "https://www.bing.com/search?q=cosa+vedere+roma",
+               "https://www.bloomberg.com/markets/stocks",
+               "https://www.morningstar.com/stocks/xnas/aapl/quote",
+               "https://finance.yahoo.com/quote/AAPL/key-statistics",
+               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+               "https://www.passportindex.org/passport/italy/",
+               "https://katieparla.com/budget-dining-in-rome-revised/",
+               "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+               "https://www.bing.com/search?q=migliore+carbonara+roma",
+               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+               "https://www.canadianinsider.com/money-is-moving"
           ]
 
           # Suddivisione matematica statica (Chunking) per performance ottimali
@@ -693,17 +699,25 @@ jobs:
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
           NUGGETS_OUTPUT_PATH = "nuggets_estrattore.jsonl"
 
+          # File-sentinella scritto dal workflow SOLO dopo che Step 1 E Step 2 sono
+          # entrambi completamente terminati (tutti i nodi chiusi, container fermati).
+          # Finche' questo file non esiste, l'estrattore non si ferma MAI per
+          # timeout: aspetta indefinitamente, perche' un silenzio prolungato puo'
+          # semplicemente essere la pausa fisiologica tra Step 1 e Step 2 (refresh
+          # WARP, setup code, avvio browser), non la fine dello scraping.
+          SCRAPING_DONE_FLAG_PATH = "scraping_completato.flag"
+
           # Ogni quanti secondi si ricontrolla se ci sono nuove righe nel file
           # condiviso. Un valore piccolo (1-2s) tiene la latenza di estrazione bassa
           # senza consumare CPU in modo apprezzabile con un semplice polling.
           POLL_INTERVAL_SECONDS = 2.0
 
-          # Dopo quanti secondi di INATTIVITA' del file (nessuna riga nuova) il
-          # processo si considera "lo scraper ha finito" e inizia il conto alla
-          # rovescia per chiudersi. Viene comunque sempre chiuso esplicitamente
-          # dal workflow con un timeout massimo, questo e' solo un modo per non
-          # restare in polling all'infinito se lanciato a mano.
-          IDLE_SHUTDOWN_SECONDS = 40.0
+          # Piccola finestra di sicurezza DOPO aver visto il flag di fine scraping:
+          # serve solo a dare un ultimo paio di giri di polling per righe scritte
+          # negli istanti immediatamente precedenti alla comparsa del flag stesso
+          # (nessuna dipendenza da indovinare quanto sia "abbastanza lungo": e' un
+          # margine di sicurezza minimo, non un timeout che decide la chiusura).
+          FINAL_GRACE_SECONDS = 3.0
 
           NUGGET_CONCURRENCY = 5
           TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
@@ -805,11 +819,36 @@ jobs:
                   # all'infinito durante run lunghe.
                   tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
 
-                  inattivo_da = time.monotonic() - ultima_riga_vista
-                  if inattivo_da > IDLE_SHUTDOWN_SECONDS and not tasks_in_volo:
-                      print(f"[ESTRATTORE] Nessun nuovo contenuto da {inattivo_da:.0f}s e nessun "
-                            f"task in volo: presumo che lo scraper abbia finito. Chiusura.", flush=True)
-                      break
+                  # --- Condizione di chiusura corretta ---
+                  # PRIMA questo processo si chiudeva solo in base a un timeout di
+                  # inattivita' (IDLE_SHUTDOWN_SECONDS), indovinando che "lo scraper ha
+                  # finito" dal semplice fatto di non vedere righe nuove per un po'.
+                  # Il problema: tra Step 1 e Step 2 c'e' SEMPRE una pausa fisiologica
+                  # (refresh dei container WARP, setup delle code, avvio di
+                  # CloakBrowser) che puo' tranquillamente superare quella soglia,
+                  # anche se lo scraping non e' affatto finito - anzi, Step 2 sta per
+                  # produrre proprio i risultati piu' interessanti (i target recuperati
+                  # dal fallback). Il risultato osservato: l'estrattore si chiudeva
+                  # durante quella pausa, PRIMA che Step 2 avesse scritto anche una
+                  # sola riga, perdendo cosi' tutti i contenuti recuperati in Step 2.
+                  #
+                  # La chiusura ora richiede un segnale ESPLICITO: il file
+                  # SCRAPING_DONE_FLAG_PATH, scritto dal workflow SOLO dopo che sia
+                  # Step 1 che Step 2 sono completamente terminati (nodi chiusi,
+                  # container fermati). Senza quel file, questo processo non si
+                  # ferma MAI per timeout, non importa quanto a lungo resti in
+                  # silenzio: aspetta comunque, perche' sa che lo scraping potrebbe
+                  # semplicemente essere in una pausa tra le sue fasi.
+                  scraping_e_finito = os.path.exists(SCRAPING_DONE_FLAG_PATH)
+
+                  if scraping_e_finito and not tasks_in_volo:
+                      # Diamo comunque un'ultima occasione di leggere righe scritte
+                      # negli ultimissimi istanti prima del flag, per sicurezza.
+                      inattivo_da = time.monotonic() - ultima_riga_vista
+                      if inattivo_da > FINAL_GRACE_SECONDS:
+                          print(f"[ESTRATTORE] Segnale di fine scraping ricevuto e nessun "
+                                f"task in volo: chiusura.", flush=True)
+                          break
 
                   await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
@@ -953,7 +992,22 @@ jobs:
                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
               })
 
+              # Se FORZA_DIAGNOSTICI_STEP2=1, i siti diagnostici (browserleaks, sannysoft,
+              # creepjs, pixelscan, incolumitas, deviceinfo) vengono skippati a monte in
+              # Step 1 e mandati dritti al fallback CloakBrowser, cosi' il fingerprint
+              # e lo stealth vengono testati sul browser headful vero, non sul semplice
+              # fetch HTTP di curl-cffi. Di default (variabile assente o diversa da "1")
+              # il comportamento resta IDENTICO a sempre: i diagnostici passano per
+              # Step 1 come qualsiasi altro target.
+              forza_diagnostici_step2 = os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1"
+
               for url in targets:
+                  if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
+                      print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
+                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
+                      failed_targets.append(url)
+                      continue
+
                   print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
                   try:
                       resp = await session.get(url, timeout=12)
@@ -1355,21 +1409,25 @@ jobs:
               output_node_5_step1.txt output_node_5_step2.txt \
               output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
 
-      - name: Attesa Coda Residua Estrattore Nugget (timeout massimo, non bloccante per lo scraper)
+      - name: Attesa Coda Residua Estrattore Nugget (segnale esplicito di fine scraping)
         if: always()
         run: |
           # A questo punto lo SCRAPING E' GIA' COMPLETAMENTE FINITO (lo step
           # sopra ha gia' fatto "wait" sui suoi processi e chiuso i container
-          # WARP). Questo step serve solo a dare all'estrattore, che nel
-          # frattempo ha gia' processato quasi tutto in parallelo mentre lo
-          # scraper lavorava, un margine di tempo limitato per smaltire le
-          # ultime righe rimaste in coda, senza pero' bloccare la pipeline
-          # all'infinito se per qualche motivo l'estrattore fosse ancora
-          # occupato o impallato.
+          # WARP). Prima di aspettare l'estrattore, gli mandiamo il segnale
+          # ESPLICITO che lo scraping e' concluso: senza questo file,
+          # l'estrattore non si ferma mai per un semplice timeout di
+          # inattivita', perche' un silenzio prolungato durante Step 1/Step 2
+          # puo' essere solo la pausa fisiologica tra le due fasi (refresh
+          # WARP, setup code, avvio browser) e non significa affatto che lo
+          # scraping sia finito.
+          touch scraping_completato.flag
+          echo "Segnale di fine scraping inviato all'estrattore."
+
           if [ -f estrattore_nugget.pid ]; then
             PID=$(cat estrattore_nugget.pid)
-            echo "Attendo la chiusura naturale del processo estrattore (PID $PID), max 60s..."
-            for i in {1..60}; do
+            echo "Attendo la chiusura naturale del processo estrattore (PID $PID), max 90s..."
+            for i in {1..90}; do
               if ! kill -0 "$PID" 2>/dev/null; then
                 echo "Processo estrattore terminato naturalmente dopo ${i}s."
                 break
@@ -1377,7 +1435,7 @@ jobs:
               sleep 1
             done
             if kill -0 "$PID" 2>/dev/null; then
-              echo "Timeout raggiunto: chiudo forzatamente il processo estrattore residuo."
+              echo "Timeout di sicurezza raggiunto (90s dopo il segnale): chiudo forzatamente il processo estrattore residuo."
               kill "$PID" 2>/dev/null || true
             fi
           fi
