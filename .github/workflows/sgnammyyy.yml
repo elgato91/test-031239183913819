@@ -70,36 +70,13 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
-               "https://travel.thewom.it/italia/umbria/pozzo-di-san-patrizio.html",
-               "https://trevaligie.com/orvieto-cosa-vedere-in-1-giorno/",
-               "https://www.10cose.it/orvieto/cosa-vedere-orvieto",
-               "https://www.accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
-               "https://www.alltrails.com/it-it/italy/umbria/orvieto",
-               "https://www.archeomatica.it/documentazione/il-giudizio-universale-di-luca-signorelli-nel-duomo-di-orvieto-ad-alta-definizione-e-on-line",
-               "https://www.artribune.com/arti-visive/archeologia-arte-antica/2023/09/restauro-duomo-orvieto/",
-               "https://www.comune.orvieto.tr.it/it/topics/parcheggi",
-               "https://www.coopculture.it/en/poi/pozzo-di-san-patrizio/",
-               "https://www.duomodiorvieto.it/duomo-di-orvieto/la-cappella-di-san-brizio",
-               "https://www.earthtrekkers.com/best-things-to-do-in-orvieto-italy/",
-               "https://www.esperienzaveraorvieto.com/",
-               "https://www.gamberorosso.it/notizie/rubriche/itinerari/i-migliori-ristoranti-di-orvieto-dove-mangiare-in-citta/",
-               "https://www.ilmondodifra.com/dove-mangiare-a-orvieto-umbria/",
-               "https://www.italyonair.com/luoghi/borghi/orvieto-cosa-vedere.html",
-               "https://www.lecosmopolite.it/pozzo-di-san-patrizio-a-orvieto/",
-               "https://www.lonelyplanetitalia.it/articoli/idee-per-il-weekend/visitare-orvieto",
-               "https://www.orvietoviva.com/bar-montanucci/",
-               "https://www.orvietoviva.com/arrivare-e-muoversi-ad-orvieto/",
-               "https://www.saltinourhair.com/italy/orvieto/",
-               "https://www.secretumbria.it/en/the-well-of-saint-patrick/",
-               "https://www.travelandleisure.com/best-places-to-retire-in-italy-11838928",
-               "https://www.travel365.it/orvieto-cosa-vedere.htm",
-               "https://www.theguardian.com/travel/2023/may/14/the-captivating-hilltop-city-of-orvieto",
-               "https://www.trattoriadelmoro.info/",
-               "https://www.ricksteves.com/watch-read-listen/read/articles/orvieto-what-an-italian-hill-town-should-be",
-               "https://www.itimaker.com/blog/pozzo-di-san-patrizio-orvieto",
-               "https://www.fodors.com/community/europe/day-trip-to-orvieto-where-to-park-780159/",
-               "https://www.viaggiando-italia.it/cosa-visitare-a-orvieto-e-dintorni-guida-completa-per-3-giorni/",
-               "https://www.viaggiatricecuriosa.it/2023/11/02/cappella-di-san-brizio-orvieto-beato-angelico-luca-signorelli/"
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.canadianinsider.com/money-is-moving"
           ]
 
           # Suddivisione matematica statica (Chunking) per performance ottimali
@@ -373,58 +350,25 @@ jobs:
           SOLO informazioni fattuali, dati concreti o affermazioni verificabili che
           potrebbero essere utili per un articolo editoriale sul TARGET TOPIC indicato.
 
-          REGOLE DI ESTRAZIONE:
+          REGOLE:
           1. Estrai SOLO fatti realmente presenti nel testo. Non inventare, non
              dedurre, non completare informazioni mancanti.
           2. Per ogni nugget, riporta in "quote_originale" la frase o porzione di
-             testo ESATTA (verbatim, non parafrasata e SENZA inserire ellissi tipo "..." o ". . .") 
-             da cui hai estratto il fatto. Se devi estrarre concetti distanti, crea più nugget separati 
-             invece di unire i testi con i puntini di sospensione. Questo campo verra' verificato 
-             programmaticamente contro il testo sorgente: se non corrisponde, il nugget verra' scartato.
+             testo ESATTA (verbatim, non parafrasata) da cui hai estratto il fatto.
+             Questo campo verra' verificato programmaticamente contro il testo
+             sorgente: se non corrisponde, il nugget verra' scartato.
           3. Classifica ogni nugget in una "category" tra: prezzo, orario, evento,
              storia, geografia, recensione, dato_statistico, contatto, altro.
-          4. Se sono presenti dettagli su un posto (es. attrazione, ristorante, hotel...) estrai
-             quanto più dettaglio possibile a riguardo, assicurandoti di privilegiare le informazioni
-             più specifiche rispetto a quelle banali o generiche. Se sono presenti informazioni pratiche
-             utili a un viaggiatore (es. come o dove si ottiene un determinato permesso, come si raggiunge un determinato luogo,
-             come si percorre e cosa ci si può aspettare da un determinato sentiero) queste informazioni sono
-             importanti e vanno riportare in maniera chiara e dettagliata.
-          5. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
+          4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
              array vuoto [].
-          6. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
+          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
              generico privo di dati concreti.
-          7. Non includere numeri di telefono, e-mail o indirizzi, tranne quando questi sono realmente utili (ad esempio necessari
-             per effettuare una prenotazione o per accedere a un luogo, oppure importanti per trovare un luogo di difficile accesso o
-             difficile da trovare).
-          8. VALUTAZIONE QUALITÀ FONTE: Se pensi che una fonte sia eccessivamente superficiale e generica (es. sbobba AI, contenuti seo di bassa qualità, siti di attività
-             commerciali con contenuti scarni e di bassissima qualità) non estrarre alcun contenuto, restituisci un
-             array che contiene un unico oggetto con la chiave "low-quality": true.
-          9. VALUTAZIONE AUTOREVOLEZZA: Se pensi che una fonte sia particolarmente autorevole su un argomento o sia la fonte ufficiale
-             dalla quale si possono estrarre anche dati volatili aggiornati (esempio prezzi, orari di apertura...), aggiungi a
-             CIASCUN nugget estratto la chiave "high-authority": true oppure "possible-official-source": true.
 
-          FORMATO DI OUTPUT DETTAGLIATO:
-          Restituisci ESCLUSIVAMENTE un blocco di codice JSON racchiuso in ```json ... ```. Il JSON deve essere un array di oggetti.
-
-          Caso A: La fonte è di bassa qualità (Regola 8)
+          Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
           [
-            {{
-              "low-quality": true
-            }}
+            {{"fact": "...", "category": "...", "quote_originale": "..."}}
           ]
-
-          Caso B: La fonte è valida (Regola 9)
-          [
-            {{
-              "fact": "La sosta sulle strisce blu nel centro storico è gratuita...",
-              "category": "orario",
-              "quote_originale": "Sosta gratis sulle strisce blu tutti i giorni",
-              "high-authority": true,
-              "possible-official-source": true
-            }}
-          ]
-
-          Non aggiungere alcun testo di commento o spiegazione fuori dal blocco JSON.
+          Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
 
           TARGET TOPIC:
           {topic}
@@ -567,8 +511,6 @@ jobs:
                           self._mark_cooldown(entry, label=label)
                           return None, "quota"
                       return None, f"errore: {e}"
-
-
           def _estrai_json_da_risposta(raw_text):
               if not raw_text:
                   return None
@@ -673,12 +615,6 @@ jobs:
                       for item in parsed:
                           if not isinstance(item, dict):
                               continue
-                          
-                          # Gestione Regola 8 (Low Quality)
-                          if item.get("low-quality") is True:
-                              print(f"{label}[NUGGET] Fonte saltata perché identificata come LOW-QUALITY: {source_url}", flush=True)
-                              return []
-
                           fact = str(item.get("fact", "")).strip()
                           quote = str(item.get("quote_originale", "")).strip()
                           category = str(item.get("category", "altro")).strip() or "altro"
@@ -686,24 +622,13 @@ jobs:
                               continue
 
                           confidence = _calcola_confidence(quote, testo_markdown)
-                          
-                          nugget_data = {
+                          nuggets.append({
                               "fact": fact,
                               "source_url": source_url,
                               "category": category,
                               "confidence": confidence,
                               "quote_originale": quote
-                          }
-                          
-                          # Conservazione attributi di autorevolezza (se presenti)
-                          if "high-authority" in item:
-                              nugget_data["high-authority"] = item["high-authority"]
-                          if "possible-official-source" in item:
-                              nugget_data["possible-official-source"] = item["possible-official-source"]
-                          if "possibile-official-source" in item:
-                              nugget_data["possibile-official-source"] = item["possibile-official-source"]
-
-                          nuggets.append(nugget_data)
+                          })
 
                       print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
                       return nuggets
@@ -751,7 +676,7 @@ jobs:
           sclera per qualsiasi motivo: non ha alcun modo di rallentare o rompere lo
           scraping, perche' vive in un processo separato con il proprio event loop.
 
-          Il file di stato SCRAPED_CONTENT_POSITION_PATH houdt l'historique di quante
+          Il file di stato SCRAPED_CONTENT_POSITION_PATH tiene traccia di quante
           righe sono gia' state lette, cosi' un riavvio di questo processo (se mai
           servisse) non rielabora da capo tutto quanto gia' processato.
           """
@@ -772,7 +697,7 @@ jobs:
           # senza consumare CPU in modo apprezzabile con un semplice polling.
           POLL_INTERVAL_SECONDS = 2.0
 
-          # Piccola finestra di sicurezza DOPO haver visto il flag di fine scraping:
+          # Piccola finestra di sicurezza DOPO aver visto il flag di fine scraping:
           # serve solo a dare un ultimo paio di giri di polling per righe scritte
           # negli istanti immediatamente precedenti alla comparsa del flag stesso
           # (nessuna dipendenza da indovinare quanto sia "abbastanza lungo": e' un
@@ -880,6 +805,25 @@ jobs:
                   tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
 
                   # --- Condizione di chiusura corretta ---
+                  # PRIMA questo processo si chiudeva solo in base a un timeout di
+                  # inattivita' (IDLE_SHUTDOWN_SECONDS), indovinando che "lo scraper ha
+                  # finito" dal semplice fatto di non vedere righe nuove per un po'.
+                  # Il problema: tra Step 1 e Step 2 c'e' SEMPRE una pausa fisiologica
+                  # (refresh dei container WARP, setup delle code, avvio di
+                  # CloakBrowser) che puo' tranquillamente superare quella soglia,
+                  # anche se lo scraping non e' affatto finito - anzi, Step 2 sta per
+                  # produrre proprio i risultati piu' interessanti (i target recuperati
+                  # dal fallback). Il risultato osservato: l'estrattore si chiudeva
+                  # durante quella pausa, PRIMA che Step 2 avesse scritto anche una
+                  # sola riga, perdendo cosi' tutti i contenuti recuperati in Step 2.
+                  #
+                  # La chiusura ora richiede un segnale ESPLICITO: il file
+                  # SCRAPING_DONE_FLAG_PATH, scritto dal workflow SOLO dopo che sia
+                  # Step 1 che Step 2 sono completamente terminati (nodi chiusi,
+                  # container fermati). Senza quel file, questo processo non si
+                  # ferma MAI per timeout, non importa quanto a lungo resti in
+                  # silenzio: aspetta comunque, perche' sa che lo scraping potrebbe
+                  # semplicemente essere in una pausa tra le sue fasi.
                   scraping_e_finito = os.path.exists(SCRAPING_DONE_FLAG_PATH)
 
                   if scraping_e_finito and not tasks_in_volo:
@@ -929,6 +873,11 @@ jobs:
           # contatto tra scraper ed estrattore: nessun'altra dipendenza, nessuna
           # chiamata di rete verso Gemini da qui, nessun import di client Gemini.
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
+
+          # Lock a livello di file (non di processo): piu' nodi scrivono in append
+          # sullo stesso file. append su Linux e' atomico per scritture sotto ~4KB
+          # in un colpo solo (PIPE_BUF), quindi per righe JSONL di dimensione tipica
+          # non serve altro; usiamo comunque un flush esplicito per sicurezza.
 
 
           def carica_gemini_api_keys_placeholder():
@@ -1086,6 +1035,13 @@ jobs:
 
       - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
         run: |
+          # Processo completamente separato dallo scraper: nessun import di
+          # curl-cffi/cloakbrowser/playwright al suo interno, nessuna
+          # dipendenza dai container WARP. Legge in polling il file
+          # scraped_content.jsonl che Step 1 e Step 2 riempiono via via, e
+          # produce nuggets_estrattore.jsonl per conto suo. Lanciato UNA
+          # SOLA VOLTA qui, resta vivo per tutta la durata di Step 1 e
+          # Step 2 senza che nessuno dei due lo aspetti mai.
           touch scraped_content.jsonl
           nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
           echo $! > estrattore_nugget.pid
@@ -1188,6 +1144,9 @@ jobs:
 
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
+              """Identica funzione di m2_step1.py: unico punto di contatto con
+              l'estrattore nugget, un semplice append su file. Nessuna chiamata di
+              rete verso Gemini, nessun blocco, nessuna dipendenza."""
               try:
                   riga = json.dumps({
                       "source_url": source_url,
@@ -1204,6 +1163,11 @@ jobs:
 
 
           async def verify_proxy_active(port, max_retries=6, delay=5):
+              """Health-check del proxy prima di avviare il browser: nella pipeline
+              stabile mancava in Step 2, ma il timing tutto sincrono lo rendeva
+              innocuo. Va mantenuto qui a prescindere da qualsiasi discorso su
+              Gemini, perche' risolve un problema di timing tra Docker/WARP e
+              CloakBrowser che non ha nulla a che fare con la nugget extraction."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for tentativo in range(max_retries):
@@ -1222,6 +1186,9 @@ jobs:
 
 
           def validate_html(html, url, status_code):
+              """Validazione sull'HTML grezzo, PRIMA di qualunque conversione a
+              markdown: la conversione resta un post-processing per l'output finale
+              e non deve mai influenzare la decisione di successo/fallimento."""
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
@@ -1266,10 +1233,25 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
+              # --- Seed di fingerprint deterministico, non piu' random ad ogni run ---
+              # La doc di CloakBrowser e' esplicita: un seed random ad ogni lancio fa
+              # sembrare ogni sessione un dispositivo fisico diverso. Colpendo piu'
+              # volte gli stessi domini (bing, google, yahoo...) da un pool di soli 6
+              # IP WARP in rotazione, un seed sempre nuovo per lo stesso IP e' proprio
+              # il pattern che i sistemi di scoring comportamentale (reCAPTCHA v3
+              # Enterprise e simili) segnalano come sospetto. Dato che il profilo
+              # (profile_dir) e' gia' persistente per node_id, il seed deriva in modo
+              # deterministico dallo stesso node_id: ogni nodo mantiene la STESSA
+              # identita' fingerprint da un'esecuzione del workflow all'altra, invece
+              # di cambiarla ogni volta. Restano comunque 6 identita' diverse fra
+              # loro (una per nodo), non un'unica identita' condivisa.
+              fingerprint_seed = 100000 + (node_id * 137)  # deterministico, range valido 100000-999999
+
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
+                  f"--fingerprint={fingerprint_seed}",
+                  "--fingerprint-platform=windows",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
@@ -1312,7 +1294,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                  await search_box.fill(query_to_search)
+                                  await search_box.type(query_to_search, delay=50)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1322,7 +1304,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input#q").first
-                                  await search_box.fill(query_to_search)
+                                  await search_box.type(query_to_search, delay=50)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1332,7 +1314,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input[name=q]").first
-                                  await search_box.fill(query_to_search)
+                                  await search_box.type(query_to_search, delay=50)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1340,10 +1322,16 @@ jobs:
                           else:
                               await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                          try:
-                              await page.wait_for_load_state("networkidle", timeout=12000)
-                          except Exception:
-                              pass
+                          # --- Rimosso wait_for_load_state("networkidle") ---
+                          # La doc di CloakBrowser segnala che page.wait_for_timeout()
+                          # invia comandi CDP che reCAPTCHA rileva, e raccomanda di
+                          # minimizzare ogni chiamata Playwright che passa per CDP a
+                          # interrogare lo stato della pagina prima che un check
+                          # anti-bot scatti. wait_for_load_state("networkidle") non è
+                          # un semplice sleep lato client: e' comunque una query
+                          # attiva sullo stato di rete via CDP. La sostituiamo con
+                          # un'attesa nativa piu' lunga, invisibile al browser.
+                          await asyncio.sleep(8)
 
                           await asyncio.sleep(6)
 
@@ -1430,6 +1418,15 @@ jobs:
       - name: Attesa Coda Residua Estrattore Nugget (segnale esplicito di fine scraping)
         if: always()
         run: |
+          # A questo punto lo SCRAPING E' GIA' COMPLETAMENTE FINITO (lo step
+          # sopra ha gia' fatto "wait" sui suoi processi e chiuso i container
+          # WARP). Prima di aspettare l'estrattore, gli mandiamo il segnale
+          # ESPLICITO che lo scraping e' concluso: senza questo file,
+          # l'estrattore non si ferma mai per un semplice timeout di
+          # inattivita', perche' un silenzio prolungato durante Step 1/Step 2
+          # puo' essere solo la pausa fisiologica tra le due fasi (refresh
+          # WARP, setup code, avvio browser) e non significa affatto che lo
+          # scraping sia finito.
           touch scraping_completato.flag
           echo "Segnale di fine scraping inviato all'estrattore."
 
@@ -1460,6 +1457,11 @@ jobs:
           import os
           import glob
 
+          # Con l'architettura disaccoppiata c'e' un SOLO file di output nugget,
+          # scritto dal processo estrattore indipendente (nuggets_estrattore.jsonl),
+          # non piu' un file per nodo/step come nella versione precedente. Il glob
+          # resta comunque utile per compatibilita' con eventuali run parziali o
+          # rilanci dello stesso file.
           jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
 
           merged_nuggets = []
@@ -1479,6 +1481,8 @@ jobs:
                               merged_nuggets.append(nugget)
                               count += 1
                           except json.JSONDecodeError:
+                              # Riga scritta a meta' (es. processo interrotto durante
+                              # il flush): la scartiamo senza far fallire tutto il merge.
                               corrotte += 1
               except Exception as e:
                   print(f"Errore lettura {filename}: {e}", flush=True)
@@ -1487,6 +1491,7 @@ jobs:
               if corrotte:
                   print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
 
+          # Deduplica su (fact, source_url) normalizzati
           seen = set()
           nuggets_deduplicati = []
           for n in merged_nuggets:
