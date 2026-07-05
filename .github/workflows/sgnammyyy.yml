@@ -1335,7 +1335,7 @@ jobs:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
 
                           else:
-                              await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                              await page.goto(url, wait_until="domcontentloaded", timeout=80000)
 
                           # --- Rimosso wait_for_load_state("networkidle") ---
                           # La doc di CloakBrowser segnala che page.wait_for_timeout()
