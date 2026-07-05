@@ -10,13 +10,13 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
-      TARGET_TOPIC: "Come sta andando Apple?"
+      TARGET_TOPIC: "Orvieto"
       # Metti a "1" per forzare i 6 siti diagnostici (browserleaks, sannysoft,
       # creepjs, pixelscan, incolumitas, deviceinfo) a saltare Step 1 e finire
       # dritti nel fallback CloakBrowser di Step 2, cosi' il fingerprint e lo
       # stealth vengono verificati sul browser headful vero e non sul semplice
       # fetch HTTP di curl-cffi. Default "0": comportamento identico a sempre.
-      FORZA_DIAGNOSTICI_STEP2: "1"
+      FORZA_DIAGNOSTICI_STEP2: "0"
     steps:
 
       - name: Installazione Font di Sistema
@@ -70,28 +70,36 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
-               "https://tls.browserleaks.com/json",
-               "https://bot.sannysoft.com/",
-               "https://abrahamjuliot.github.io/creepjs/",
-               "https://pixelscan.net/",
-               "https://bot.incolumitas.com/",
-               "https://www.deviceinfo.me/",
-               "https://www.facebook.com/groups/expatsinparaguay/",
-               "https://www.google.com/search?q=cosa+vedere+roma",
-               "https://www.bing.com/search?q=cosa+vedere+roma",
-               "https://www.bloomberg.com/markets/stocks",
-               "https://www.morningstar.com/stocks/xnas/aapl/quote",
-               "https://finance.yahoo.com/quote/AAPL/key-statistics",
-               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-               "https://www.passportindex.org/passport/italy/",
-               "https://katieparla.com/budget-dining-in-rome-revised/",
-               "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-               "https://www.bing.com/search?q=migliore+carbonara+roma",
-               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-               "https://www.canadianinsider.com/money-is-moving"
+               "https://travel.thewom.it/italia/umbria/pozzo-di-san-patrizio.html",
+               "https://trevaligie.com/orvieto-cosa-vedere-in-1-giorno/",
+               "https://www.10cose.it/orvieto/cosa-vedere-orvieto",
+               "https://www.accessibilitacentristorici.it/ztl/umbria/orvieto/parcheggio_orvieto.html",
+               "https://www.alltrails.com/it-it/italy/umbria/orvieto",
+               "https://www.archeomatica.it/documentazione/il-giudizio-universale-di-luca-signorelli-nel-duomo-di-orvieto-ad-alta-definizione-e-on-line",
+               "https://www.artribune.com/arti-visive/archeologia-arte-antica/2023/09/restauro-duomo-orvieto/",
+               "https://www.comune.orvieto.tr.it/it/topics/parcheggi",
+               "https://www.coopculture.it/en/poi/pozzo-di-san-patrizio/",
+               "https://www.duomodiorvieto.it/duomo-di-orvieto/la-cappella-di-san-brizio",
+               "https://www.earthtrekkers.com/best-things-to-do-in-orvieto-italy/",
+               "https://www.esperienzaveraorvieto.com/",
+               "https://www.gamberorosso.it/notizie/rubriche/itinerari/i-migliori-ristoranti-di-orvieto-dove-mangiare-in-citta/",
+               "https://www.ilmondodifra.com/dove-mangiare-a-orvieto-umbria/",
+               "https://www.italyonair.com/luoghi/borghi/orvieto-cosa-vedere.html",
+               "https://www.lecosmopolite.it/pozzo-di-san-patrizio-a-orvieto/",
+               "https://www.lonelyplanetitalia.it/articoli/idee-per-il-weekend/visitare-orvieto",
+               "https://www.orvietoviva.com/bar-montanucci/",
+               "https://www.orvietoviva.com/arrivare-e-muoversi-ad-orvieto/",
+               "https://www.saltinourhair.com/italy/orvieto/",
+               "https://www.secretumbria.it/en/the-well-of-saint-patrick/",
+               "https://www.travelandleisure.com/best-places-to-retire-in-italy-11838928",
+               "https://www.travel365.it/orvieto-cosa-vedere.htm",
+               "https://www.theguardian.com/travel/2023/may/14/the-captivating-hilltop-city-of-orvieto",
+               "https://www.trattoriadelmoro.info/",
+               "https://www.ricksteves.com/watch-read-listen/read/articles/orvieto-what-an-italian-hill-town-should-be",
+               "https://www.itimaker.com/blog/pozzo-di-san-patrizio-orvieto",
+               "https://www.fodors.com/community/europe/day-trip-to-orvieto-where-to-park-780159/",
+               "https://www.viaggiando-italia.it/cosa-visitare-a-orvieto-e-dintorni-guida-completa-per-3-giorni/",
+               "https://www.viaggiatricecuriosa.it/2023/11/02/cappella-di-san-brizio-orvieto-beato-angelico-luca-signorelli/"
           ]
 
           # Suddivisione matematica statica (Chunking) per performance ottimali
@@ -374,10 +382,25 @@ jobs:
              sorgente: se non corrisponde, il nugget verra' scartato.
           3. Classifica ogni nugget in una "category" tra: prezzo, orario, evento,
              storia, geografia, recensione, dato_statistico, contatto, altro.
-          4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
+          4. Se sono presenti dettagli su un posto (es. attrazione, ristorante, hotel...) estrai
+             quanto più dettaglio possibile a riguardo, assicurandoti di privilegiare le informazioni
+             più specifiche rispetto a quelle banali o generiche. Se sono presenti informazioni pratiche
+             utili a un viaggiatore (es. come o dove si ottiene un determinato permesso, come si raggiunge un determinato luogo,
+             come si percorre e cosa ci si può aspettare da un determinato sentiero) queste informazioni sono
+             importanti e vanno riportare in maniera chiara e dettagliata.
+          5. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
              array vuoto [].
-          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
+          6. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
              generico privo di dati concreti.
+          7. Non includere numeri di telefono, e-mail o indirizzi, tranne quando questi sono realmente utili (ad esempio necessari
+             per effettuare una prenotazione o per accedere a un luogo, oppure importanti per trovare un luogo di difficile accesso o
+             difficile da trovare).
+          8. Se pensi che una fonte sia eccessivamente superficiale e generica (es. sbobba AI, contenuti seo di bassa qualità, siti di attività
+             commerciali con contenuti scarni e di bassissima qualità) non estrarre alcun contenuto, restituisci un
+             array che contiene un campo: "low-quality": true e per il resto è vuoto [].
+          9. Se pensi che una fonte sia particolarmente autorevole su un argomento o sia la fonte ufficiale
+             dalla quale si possono estrarre anche dati volatili aggiornati (esempio prezzi, orari di apertura...), aggiungi un
+             campo: "high-authority": true oppure "possibile-official-source": true.
 
           Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
           [
