@@ -1203,19 +1203,36 @@ jobs:
           def validate_html(html, url, status_code):
               """Validazione sull'HTML grezzo, PRIMA di qualunque conversione a
               markdown: la conversione resta un post-processing per l'output finale
-              e non deve mai influenzare la decisione di successo/fallimento."""
+              e non deve mai influenzare la decisione di successo/fallimento.
+
+              IMPORTANTE: il controllo delle frasi di blocco avviene sul testo
+              TRONCATO a 5000 caratteri, esattamente come nell'originale stabile.
+              Motivo verificato concretamente: pagine come i risultati di ricerca
+              di Google includono un fallback <noscript> standard, presente su
+              OGNI pagina (bloccata o no), con testo tipo "se non vieni reindirizzato
+              automaticamente, clicca qui" - un elemento tecnico di compatibilita',
+              non un segnale di blocco. Questo frammento si trova tipicamente in
+              fondo al documento HTML, dopo i risultati di ricerca veri. Validare
+              sul testo COMPLETO (non troncato) fa si' che il controllo raggiunga
+              sempre quel frammento innocuo, marcando come "bloccate" pagine con
+              contenuto reale e valido gia' presente nei primi 5000 caratteri.
+              Troncare PRIMA del check, come faceva l'originale, evita il problema:
+              se i risultati veri ci sono, sono gia' abbondantemente dentro quella
+              soglia; il rumore tecnico in fondo pagina resta fuori dal controllo.
+              """
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
                   return False, "HTML vuoto"
 
               soup = BeautifulSoup(html, "html.parser")
-              text_grezzo = soup.get_text(separator=' ', strip=True)
+              text_grezzo_completo = soup.get_text(separator=' ', strip=True)
+              text_per_check = text_grezzo_completo[:5000]
 
-              if len(text_grezzo) <= 150:
+              if len(text_per_check) <= 150:
                   return False, "Contenuto insufficiente"
 
-              low_text = text_grezzo.lower()
+              low_text = text_per_check.lower()
               for ind in BLOCKING_INDICATORS:
                   if ind in low_text:
                       return False, f"WAF/Captcha rilevato: {ind}"
