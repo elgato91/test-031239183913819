@@ -16,7 +16,7 @@ jobs:
       # dritti nel fallback CloakBrowser di Step 2, cosi' il fingerprint e lo
       # stealth vengono verificati sul browser headful vero e non sul semplice
       # fetch HTTP di curl-cffi. Default "0": comportamento identico a sempre.
-      FORZA_DIAGNOSTICI_STEP2: "0"
+      FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
       - name: Installazione Font di Sistema
