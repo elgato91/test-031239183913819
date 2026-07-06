@@ -11,17 +11,15 @@ jobs:
       GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
       TARGET_TOPIC: "Orvieto"
-      # Metti a "1" per forzare i 6 siti diagnostici (browserleaks, sannysoft,
-      # creepjs, pixelscan, incolumitas, deviceinfo) a saltare Step 1 e finire
-      # dritti nel fallback CloakBrowser di Step 2, cosi' il fingerprint e lo
-      # stealth vengono verificati sul browser headful vero e non sul semplice
-      # fetch HTTP di curl-cffi. Default "0": comportamento identico a sempre.
       FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
-      - name: Installazione Font di Sistema
+      - name: Installazione Font di Sistema e Windows 11 Reali
         run: |
           sudo apt-get update
+          # Installazione di cabextract, xfonts-utils e unzip (fondamentali per scompattare i font)
+          sudo apt-get install -y cabextract xfonts-utils unzip wget
+          
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
@@ -30,6 +28,12 @@ jobs:
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          
+          # Scarichiamo un archivio reale dei font nativi di Windows 11 (Segoe UI, Calibri, ecc.) per una consistenza totale
+          wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
+          unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
+          find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
+          
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -110,16 +114,6 @@ jobs:
           Modulo condiviso tra Step 1 e Step 2.
           Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
           retry, validazione WAF o altra logica di scraping.
-
-          Pulizia link basata esclusivamente su urllib (libreria standard, nessuna
-          dipendenza aggiuntiva):
-            1. Relativi -> assoluti (urljoin)
-            2. Rimozione parametri di tracciamento dalla query string
-            3. Rimozione ancore interne pure (#frammento sulla stessa pagina)
-            4. Rimozione link a social/junk noti
-            5. Rimozione link che puntano alla pagina stessa (self-link)
-          Il testo pulito viene poi convertito in Markdown con markdownify,
-          mantenendo i link superstiti nel formato [Testo](URL).
           """
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
@@ -127,11 +121,9 @@ jobs:
           from bs4 import BeautifulSoup
           from markdownify import markdownify as md_convert
 
-          # Tag strutturali che non portano contenuto editoriale utile
           STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
                                       "form", "noscript", "iframe", "svg"]
 
-          # Parametri di query da rimuovere sempre (tracciamento marketing/analytics)
           TRACKING_PARAMS_PREFIXES = ("utm_",)
           TRACKING_PARAMS_EXACT = {
               "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
@@ -141,8 +133,6 @@ jobs:
               "share", "share_id", "si"
           }
 
-          # Domini social/junk: i link verso questi domini vengono despogliati
-          # (restano come testo semplice, non come link markdown)
           JUNK_LINK_DOMAINS = (
               "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
               "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
@@ -177,11 +167,6 @@ jobs:
 
 
           def clean_link_href(raw_href, page_url):
-              """
-              Ritorna l'URL assoluto e ripulito, oppure None se il link va
-              despogliato (ancora interna, self-link, social/junk, vuoto,
-              javascript:, mailto: senza indirizzo valido).
-              """
               if not raw_href:
                   return None
 
@@ -191,7 +176,6 @@ jobs:
               if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
                   return None
 
-              # Assolutizza (gestisce anche i protocol-relative //host/path)
               try:
                   absolute = urljoin(page_url, raw_href)
               except Exception:
@@ -208,7 +192,6 @@ jobs:
               if parts.scheme == "mailto":
                   return None
 
-              # Ancora pura sulla stessa pagina (stesso path, solo #frammento)
               page_parts = urlsplit(page_url)
               same_path = (parts.netloc == page_parts.netloc and
                            parts.path.rstrip("/") == page_parts.path.rstrip("/"))
@@ -216,21 +199,14 @@ jobs:
               if same_path and parts.fragment and not parts.query:
                   return None
 
-              # Social / junk
               if _is_junk_domain(parts.netloc, absolute):
                   return None
 
-              # Pulizia query string dai parametri di tracciamento
               cleaned_query = _clean_query(parts.query)
 
-              # Ricostruzione URL: rimuove sempre il fragment (ancore interne)
-              # a meno che non punti a una pagina diversa con un frammento
-              # significativo (raro nei casi editoriali, quindi lo scartiamo
-              # comunque per pulizia).
               rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
                                      cleaned_query, ""))
 
-              # Self-link: stesso URL (dopo pulizia) della pagina sorgente
               page_rebuilt_parts = urlsplit(page_url)
               page_cleaned_query = _clean_query(page_rebuilt_parts.query)
               page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
@@ -247,16 +223,10 @@ jobs:
 
 
           def _strip_anchor_tag(a_tag):
-              """Sostituisce un <a> con il suo solo testo, senza rimuoverlo dal DOM."""
               a_tag.replace_with(a_tag.get_text())
 
 
           def html_to_clean_markdown(html, page_url):
-              """
-              Pipeline unica: rimuove tag strutturali, pulisce i link chirurgicamente
-              con urllib, converte in Markdown con markdownify.
-              Ritorna il markdown completo (nessun troncamento).
-              """
               soup = BeautifulSoup(html, "html.parser")
 
               for tag_name in STRUCTURAL_TAGS_TO_STRIP:
@@ -270,7 +240,6 @@ jobs:
                       _strip_anchor_tag(a_tag)
                   else:
                       a_tag["href"] = cleaned
-                      # Rimuove eventuali attributi di tracciamento superflui
                       for attr in list(a_tag.attrs):
                           if attr not in ("href", "title"):
                               del a_tag[attr]
@@ -282,7 +251,6 @@ jobs:
                   strip=["img"],
               )
 
-              # Collassa 3+ righe vuote consecutive in 2, pulisce i bordi
               markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
               markdown_text = markdown_text.strip()
 
@@ -293,39 +261,8 @@ jobs:
         run: |
           cat << 'EOF' > nugget_extractor.py
           """
-          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati
-          tramite Gemini Live API (gemini-3.1-flash-live-preview).
-
-          Segue lo stesso pattern del middleware filtro URL (url_screener.py):
-            - client.aio.live.connect con response_modalities=["AUDIO"] +
-              output_audio_transcription per ottenere testo dalla sessione Live
-            - timeout di sicurezza con asyncio.wait_for
-            - parsing JSON robusto con fallback su regex ```json ... ```
-
-          Principio non-negoziabile (coerente con ARIA):
-            la "confidence" NON e' mai auto-riportata dal modello. Viene derivata
-            deterministicamente confrontando la quote_originale dichiarata dal
-            modello con il testo sorgente realmente scrapato (fuzzy match).
-
-          GESTIONE LIMITI ENTERPRISE (v2):
-            1. Token bucket per-chiave: il limite dichiarato e' TPM 65K. Ogni
-               GeminiKeyPool.acquire() stima i token del payload e attende finche'
-               non c'e' budget sufficiente nel bucket della chiave corrente, con
-               un margine di sicurezza (75% del limite dichiarato) perche' la stima
-               token e' approssimata (~4 char/token) e non il vero tokenizer.
-            2. Multi-key round-robin con cooldown: se una chiave sforra comunque
-               (risposta 1011 / "exceeded your current quota"), viene marcata in
-               cooldown per COOLDOWN_SECONDS e il pool passa automaticamente alla
-               chiave successiva disponibile. Funziona anche con una sola chiave:
-               in quel caso il "pool" ha un solo elemento e la chiave va semplicemente
-               in attesa che il proprio bucket si ricarichi.
-            3. Scrittura incrementale JSONL: ogni nugget estratto viene appeso
-               immediatamente su disco (una riga = un oggetto JSON completo), NON
-               accumulato solo in RAM. Se il processo viene interrotto (timeout job,
-               kill, crash), tutto cio' che era stato scritto fino a quel momento
-               resta valido e recuperabile.
+          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
           """
-
           import json
           import re
           import os
@@ -345,18 +282,12 @@ jobs:
 
           NUGGET_TIMEOUT_SECONDS = 40.0
 
-          # Limite dichiarato dal piano: TPM 65.000. Usiamo un margine di sicurezza
-          # perche' la stima token e' approssimata (char/4), non il tokenizer reale.
           TPM_LIMIT_DICHIARATO = 65_000
           TPM_SAFETY_MARGIN = 0.75
-          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)  # 48.750
+          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)
 
-          # Quanto tempo una chiave resta "in cooldown" dopo aver sforato il limite
-          # (segnale ricevuto direttamente dall'errore 1011 di Gemini, non dedotto)
           COOLDOWN_SECONDS = 65.0
 
-          # Segnali testuali che identificano un errore di quota/rate-limit nella
-          # risposta d'errore della Live API (messaggio WebSocket 1011)
           QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
 
           NUGGET_PROMPT_TEMPLATE = """
@@ -397,25 +328,17 @@ jobs:
 
 
           def _stima_token(testo):
-              """Stima approssimata dei token (~4 caratteri/token per testo misto
-              italiano/inglese). Deliberatamente prudente: meglio sovrastimare che
-              sforare il limite reale."""
               if not testo:
                   return 0
               return max(1, len(testo) // 4)
 
 
           class TokenBucket:
-              """Token bucket a ricarica continua per il rate limiting TPM di una
-              singola API key. Non e' un pacing a intervallo fisso: permette raffiche
-              quando il budget e' pieno e rallenta automaticamente quando si avvicina
-              al limite, aspettando solo il tempo necessario a liberare budget."""
-
               def __init__(self, capacity_tokens, refill_period_seconds=60.0):
                   self.capacity = capacity_tokens
                   self.tokens = capacity_tokens
                   self.refill_period = refill_period_seconds
-                  self.refill_rate = capacity_tokens / refill_period_seconds  # token/secondo
+                  self.refill_rate = capacity_tokens / refill_period_seconds
                   self.last_refill = time.monotonic()
                   self._lock = asyncio.Lock()
 
@@ -427,8 +350,7 @@ jobs:
                       self.last_refill = now
 
               async def acquire(self, needed_tokens, label=""):
-                  """Attende finche' non c'e' budget sufficiente, poi lo consuma."""
-                  needed_tokens = min(needed_tokens, self.capacity)  # non bloccare mai indefinitamente
+                  needed_tokens = min(needed_tokens, self.capacity)
                   async with self._lock:
                       while True:
                           self._refill()
@@ -437,7 +359,7 @@ jobs:
                               return
                           deficit = needed_tokens - self.tokens
                           wait_seconds = deficit / self.refill_rate
-                          wait_seconds = min(wait_seconds, 20.0)  # non aspettare mai troppo in un colpo solo
+                          wait_seconds = min(wait_seconds, 20.0)
                           print(f"{label}[TPM-BUCKET] Budget insufficiente "
                                 f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
                                 flush=True)
@@ -445,11 +367,6 @@ jobs:
 
 
           class GeminiKeyPool:
-              """Gestisce una o piu' API key Gemini con round-robin, token bucket
-              indipendente per chiave, e cooldown automatico sulle chiavi che
-              sforano il limite. Funziona in modo trasparente anche con una sola
-              chiave configurata."""
-
               def __init__(self, api_keys):
                   api_keys = [k for k in api_keys if k]
                   if not api_keys:
@@ -467,9 +384,6 @@ jobs:
                   self._lock = asyncio.Lock()
 
               async def _pick_entry(self, label=""):
-                  """Sceglie la prossima chiave disponibile (non in cooldown) in
-                  round-robin. Se tutte sono in cooldown, aspetta quella che si
-                  libera per prima."""
                   async with self._lock:
                       n = len(self.entries)
                       while True:
@@ -493,11 +407,6 @@ jobs:
                         f"(quota TPM superata)", flush=True)
 
               async def esegui_con_pool(self, payload, timeout_seconds, label=""):
-                  """Sceglie una chiave disponibile, attende budget TPM sufficiente
-                  sul suo bucket, esegue la chiamata Live. Un SOLO tentativo su UNA
-                  chiave: la logica di retry su piu' chiavi vive nel chiamante
-                  (estrai_nuggets), non qui."""
-
                   entry = await self._pick_entry(label)
                   stima = _stima_token(payload)
                   await entry["bucket"].acquire(stima, label=label)
@@ -526,6 +435,7 @@ jobs:
                           self._mark_cooldown(entry, label=label)
                           return None, "quota"
                       return None, f"errore: {e}"
+
           def _estrai_json_da_risposta(raw_text):
               if not raw_text:
                   return None
@@ -541,7 +451,6 @@ jobs:
 
 
           def _calcola_confidence(quote_originale, testo_sorgente):
-              """Confidence derivata STRUTTURALMENTE, mai auto-riportata dal modello."""
               if not quote_originale or not testo_sorgente:
                   return "low"
 
@@ -577,9 +486,6 @@ jobs:
 
 
           def scrivi_nuggets_jsonl(nuggets, jsonl_path):
-              """Scrittura incrementale: ogni nugget e' una riga JSON append-only.
-              Se il file non esiste viene creato. Nessuna riscrittura del file intero:
-              ogni chiamata aggiunge solo le righe nuove."""
               if not nuggets:
                   return
               with open(jsonl_path, "a", encoding="utf-8") as f:
@@ -590,18 +496,6 @@ jobs:
           async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
                                     node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
                                     max_key_attempts=None):
-              """
-              Estrae nugget strutturati da un singolo testo gia' scrapato, tramite
-              Gemini Live, usando il pool di chiavi con token bucket TPM.
-
-              Se una chiave sforra la quota, riprova automaticamente su un'altra
-              chiave del pool (fino a max_key_attempts, default = numero di chiavi
-              nel pool). Non solleva mai eccezioni verso il chiamante.
-
-              Ritorna: lista di dict nugget con schema
-                {fact, source_url, category, confidence, quote_originale}
-              oppure None in caso di fallimento totale (tutte le chiavi esaurite/timeout).
-              """
               if not testo_markdown or len(testo_markdown.strip()) < 50:
                   return []
 
@@ -678,47 +572,11 @@ jobs:
 
           from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
 
-          """
-          Processo COMPLETAMENTE INDIPENDENTE dallo scraper. Gira in background,
-          lanciato in parallelo con Step 1 e (poi) Step 2, sulla stessa macchina ma
-          come processo a se stante: potrebbe girare identico su una macchina
-          diversa, l'unico contatto con lo scraper e' il file scraped_content.jsonl,
-          che legge in sola lettura via polling.
-
-          Nessun import di curl_cffi, cloakbrowser, playwright: questo processo non
-          sa nulla di WARP, proxy, browser headful o validazione HTML. Riceve solo
-          testo gia' pronto e lo passa a Gemini. Se Gemini e' lento, va in timeout,
-          sclera per qualsiasi motivo: non ha alcun modo di rallentare o rompere lo
-          scraping, perche' vive in un processo separato con il proprio event loop.
-
-          Il file di stato SCRAPED_CONTENT_POSITION_PATH tiene traccia di quante
-          righe sono gia' state lette, cosi' un riavvio di questo processo (se mai
-          servisse) non rielabora da capo tutto quanto gia' processato.
-          """
-
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
           NUGGETS_OUTPUT_PATH = "nuggets_estrattore.jsonl"
-
-          # File-sentinella scritto dal workflow SOLO dopo che Step 1 E Step 2 sono
-          # entrambi completamente terminati (tutti i nodi chiusi, container fermati).
-          # Finche' questo file non esiste, l'estrattore non si ferma MAI per
-          # timeout: aspetta indefinitamente, perche' un silenzio prolungato puo'
-          # semplicemente essere la pausa fisiologica tra Step 1 e Step 2 (refresh
-          # WARP, setup code, avvio browser), non la fine dello scraping.
           SCRAPING_DONE_FLAG_PATH = "scraping_completato.flag"
-
-          # Ogni quanti secondi si ricontrolla se ci sono nuove righe nel file
-          # condiviso. Un valore piccolo (1-2s) tiene la latenza di estrazione bassa
-          # senza consumare CPU in modo apprezzabile con un semplice polling.
           POLL_INTERVAL_SECONDS = 2.0
-
-          # Piccola finestra di sicurezza DOPO aver visto il flag di fine scraping:
-          # serve solo a dare un ultimo paio di giri di polling per righe scritte
-          # negli istanti immediatamente precedenti alla comparsa del flag stesso
-          # (nessuna dipendenza da indovinare quanto sia "abbastanza lungo": e' un
-          # margine di sicurezza minimo, non un timeout che decide la chiusura).
           FINAL_GRACE_SECONDS = 3.0
-
           NUGGET_CONCURRENCY = 5
           TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
 
@@ -751,18 +609,15 @@ jobs:
               api_keys = carica_gemini_api_keys()
               if not api_keys:
                   print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato "
-                        "immediatamente (nessun impatto sullo scraper).", flush=True)
+                        "immediatamente.", flush=True)
                   return
 
-              # Qui l'init del pool puo' tranquillamente essere un await diretto:
-              # se si blocca o fallisce, blocca SOLO questo processo indipendente,
-              # mai lo scraper, che gira altrove e non aspetta nessuno.
               try:
                   key_pool = GeminiKeyPool(api_keys)
                   print(f"[ESTRATTORE] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
               except Exception as e:
                   print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. "
-                        f"Processo terminato (nessun impatto sullo scraper).", flush=True)
+                        f"Processo terminato.", flush=True)
                   return
 
               nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
@@ -801,10 +656,6 @@ jobs:
                           try:
                               record = json.loads(riga)
                           except json.JSONDecodeError:
-                              # Riga scritta a meta' da un nodo (raro, ma possibile se
-                              # capita esattamente nell'istante del polling): la si
-                              # rilegge al giro successivo, quindi qui la si salta e
-                              # NON si avanza righe_lette per questa specifica riga.
                               continue
 
                           source_url = record.get("source_url")
@@ -815,35 +666,10 @@ jobs:
 
                       righe_lette = len(tutte_le_righe)
 
-                  # Pulizia dei task gia' completati per non far crescere la lista
-                  # all'infinito durante run lunghe.
                   tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
-
-                  # --- Condizione di chiusura corretta ---
-                  # PRIMA questo processo si chiudeva solo in base a un timeout di
-                  # inattivita' (IDLE_SHUTDOWN_SECONDS), indovinando che "lo scraper ha
-                  # finito" dal semplice fatto di non vedere righe nuove per un po'.
-                  # Il problema: tra Step 1 e Step 2 c'e' SEMPRE una pausa fisiologica
-                  # (refresh dei container WARP, setup delle code, avvio di
-                  # CloakBrowser) che puo' tranquillamente superare quella soglia,
-                  # anche se lo scraping non e' affatto finito - anzi, Step 2 sta per
-                  # produrre proprio i risultati piu' interessanti (i target recuperati
-                  # dal fallback). Il risultato osservato: l'estrattore si chiudeva
-                  # durante quella pausa, PRIMA che Step 2 avesse scritto anche una
-                  # sola riga, perdendo cosi' tutti i contenuti recuperati in Step 2.
-                  #
-                  # La chiusura ora richiede un segnale ESPLICITO: il file
-                  # SCRAPING_DONE_FLAG_PATH, scritto dal workflow SOLO dopo che sia
-                  # Step 1 che Step 2 sono completamente terminati (nodi chiusi,
-                  # container fermati). Senza quel file, questo processo non si
-                  # ferma MAI per timeout, non importa quanto a lungo resti in
-                  # silenzio: aspetta comunque, perche' sa che lo scraping potrebbe
-                  # semplicemente essere in una pausa tra le sue fasi.
                   scraping_e_finito = os.path.exists(SCRAPING_DONE_FLAG_PATH)
 
                   if scraping_e_finito and not tasks_in_volo:
-                      # Diamo comunque un'ultima occasione di leggere righe scritte
-                      # negli ultimissimi istanti prima del flag, per sicurezza.
                       inattivo_da = time.monotonic() - ultima_riga_vista
                       if inattivo_da > FINAL_GRACE_SECONDS:
                           print(f"[ESTRATTORE] Segnale di fine scraping ricevuto e nessun "
@@ -872,6 +698,7 @@ jobs:
           import os
           import json
           import asyncio
+          from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
           from extraction_utils import html_to_clean_markdown
 
@@ -882,23 +709,10 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          # File JSONL condiviso tra TUTTI i nodi di Step 1 e letto in parallelo
-          # dall'estrattore di nugget (processo completamente separato). Ogni riga e'
-          # un oggetto {"source_url": ..., "testo_markdown": ...}. E' l'UNICO punto di
-          # contatto tra scraper ed estrattore: nessun'altra dipendenza, nessuna
-          # chiamata di rete verso Gemini da qui, nessun import di client Gemini.
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
-
-          # Lock a livello di file (non di processo): piu' nodi scrivono in append
-          # sullo stesso file. append su Linux e' atomico per scritture sotto ~4KB
-          # in un colpo solo (PIPE_BUF), quindi per righe JSONL di dimensione tipica
-          # non serve altro; usiamo comunque un flush esplicito per sicurezza.
 
 
           def carica_gemini_api_keys_placeholder():
-              # Mantenuto per compatibilita' di firma, non usato: lo scraper non sa
-              # nulla di Gemini. Rimane qui solo come promemoria che le chiavi vivono
-              # esclusivamente nel processo estrattore.
               pass
 
 
@@ -919,43 +733,50 @@ jobs:
 
 
           def validate_html(html, url, status_code):
-              if status_code >= 400:
+              """
+              Validatore robusto per l'HTML grezzo in Step 1.
+              Controlla il tag <title> e analizza solo il testo effettivamente visibile a schermo,
+              escludendo blocchi <script>, <style> e <noscript> per azzerare i falsi positivi.
+              """
+              if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
                   return False, "HTML vuoto"
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  return True, ""
+                  
+              soup = BeautifulSoup(html, "html.parser")
+              
+              # 1. Controlliamo se nel titolo del documento ci sono diciture WAF bloccanti
+              title = (soup.title.string or "").strip().lower() if soup.title else ""
+              waf_titles = ["access denied", "attention required", "just a moment", "checking your browser", "cloudflare"]
+              for wt in waf_titles:
+                  if wt in title:
+                      return False, f"WAF rilevato nel titolo della pagina: {title}"
 
-              low_html = html.lower()
+              # 2. Decomponiamo i tag non testuali per evitare falsi positivi strutturali
+              for element in soup(["script", "style", "noscript"]):
+                  element.decompose()
+                  
+              visible_text = soup.get_text(separator=' ', strip=True).lower()
+
+              # 3. Controlliamo solo gli indicatori WAF e Captcha reali
               blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
-                  "just a moment", "security verification", "please enable js", "enable javascript",
-                  "are you a robot", "please wait for verification", "we've detected unusual activity",
-                  "if you are not redirected", "unusual traffic from your computer network",
-                  "checking your browser", "prove your humanity", "captcha verification",
-                  "please enter in the characters you see below", "access to this page is forbidden",
-                  "error 1020", "you have been blocked", "pardon our interruption",
-                  "se non vieni reindirizzato", "se hai problemi ad accedere",
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
-                  "checking the site connection", "verifying you are human", "ray id"
+                  "are you a robot", "prove your humanity", "captcha verification",
+                  "unusual traffic from your computer network", "robot challenge screen",
+                  "verifica di sicurezza", "verifying you are human", "challenge-platform"
               ]
 
               for ind in blocking_indicators:
-                  if ind in low_html:
-                      return False, f"WAF/Captcha rilevato: {ind}"
+                  if ind in visible_text:
+                      return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
+
+              # 4. Verifica della lunghezza minima del testo reale caricato
+              if len(visible_text) < 150:
+                  return False, f"Contenuto della pagina insufficiente ({len(visible_text)} caratteri)"
+
               return True, ""
 
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
-              """
-              Scrive una riga JSONL sul file condiviso, letto in parallelo dal
-              processo estrattore. Questa e' l'UNICA interazione tra scraper ed
-              estrattore: un append su un file di testo. Nessuna chiamata di rete
-              verso Gemini avviene qui, nessuna attesa, nessun blocco: se il file
-              non si riesce a scrivere per qualsiasi motivo, l'eccezione viene
-              ignorata (lo scraping non deve MAI fermarsi per un problema
-              dell'estrazione nugget a valle).
-              """
               try:
                   riga = json.dumps({
                       "source_url": source_url,
@@ -967,8 +788,7 @@ jobs:
                       f.write(riga + "\n")
                       f.flush()
               except Exception as e:
-                  print(f"[NODO {node_id}] Attenzione: impossibile pubblicare contenuto per "
-                        f"l'estrattore nugget ({e}). Lo scraping prosegue comunque.", flush=True)
+                  print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
 
           async def main():
@@ -992,13 +812,6 @@ jobs:
                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
               })
 
-              # Se FORZA_DIAGNOSTICI_STEP2=1, i siti diagnostici (browserleaks, sannysoft,
-              # creepjs, pixelscan, incolumitas, deviceinfo) vengono skippati a monte in
-              # Step 1 e mandati dritti al fallback CloakBrowser, cosi' il fingerprint
-              # e lo stealth vengono testati sul browser headful vero, non sul semplice
-              # fetch HTTP di curl-cffi. Di default (variabile assente o diversa da "1")
-              # il comportamento resta IDENTICO a sempre: i diagnostici passano per
-              # Step 1 come qualsiasi altro target.
               forza_diagnostici_step2 = os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1"
 
               for url in targets:
@@ -1028,7 +841,7 @@ jobs:
                       else:
                           print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
                           failed_targets.append(url)
-                  except Exception:
+                  except Exception as e:
                       print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
                       failed_targets.append(url)
 
@@ -1050,13 +863,6 @@ jobs:
 
       - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
         run: |
-          # Processo completamente separato dallo scraper: nessun import di
-          # curl-cffi/cloakbrowser/playwright al suo interno, nessuna
-          # dipendenza dai container WARP. Legge in polling il file
-          # scraped_content.jsonl che Step 1 e Step 2 riempiono via via, e
-          # produce nuggets_estrattore.jsonl per conto suo. Lanciato UNA
-          # SOLA VOLTA qui, resta vivo per tutta la durata di Step 1 e
-          # Step 2 senza che nessuno dei due lo aspetti mai.
           touch scraped_content.jsonl
           nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
           echo $! > estrattore_nugget.pid
@@ -1132,19 +938,6 @@ jobs:
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
-          BLOCKING_INDICATORS = [
-              "challenge-platform", "access denied", "403 forbidden", "cloudflare",
-              "just a moment", "security verification", "please enable js", "enable javascript",
-              "are you a robot", "please wait for verification", "we've detected unusual activity",
-              "if you are not redirected", "unusual traffic from your computer network",
-              "checking your browser", "prove your humanity", "captcha verification",
-              "please enter in the characters you see below", "access to this page is forbidden",
-              "error 1020", "you have been blocked", "pardon our interruption",
-              "se non vieni reindirizzato", "se hai problemi ad accedere",
-              "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
-              "checking the site connection", "verifying you are human", "ray id"
-          ]
-
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -1159,9 +952,6 @@ jobs:
 
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
-              """Identica funzione di m2_step1.py: unico punto di contatto con
-              l'estrattore nugget, un semplice append su file. Nessuna chiamata di
-              rete verso Gemini, nessun blocco, nessuna dipendenza."""
               try:
                   riga = json.dumps({
                       "source_url": source_url,
@@ -1173,16 +963,10 @@ jobs:
                       f.write(riga + "\n")
                       f.flush()
               except Exception as e:
-                  print(f"[NODO {node_id}] Attenzione: impossibile pubblicare contenuto per "
-                        f"l'estrattore nugget ({e}). Lo scraping prosegue comunque.", flush=True)
+                  print(f"[NODO {node_id}] Impossibile registrare il record per l'estrattore: {e}", flush=True)
 
 
           async def verify_proxy_active(port, max_retries=6, delay=5):
-              """Health-check del proxy prima di avviare il browser: nella pipeline
-              stabile mancava in Step 2, ma il timing tutto sincrono lo rendeva
-              innocuo. Va mantenuto qui a prescindere da qualsiasi discorso su
-              Gemini, perche' risolve un problema di timing tra Docker/WARP e
-              CloakBrowser che non ha nulla a che fare con la nugget extraction."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for tentativo in range(max_retries):
@@ -1201,24 +985,9 @@ jobs:
 
 
           def validate_html(html, url, status_code):
-              """Validazione sull'HTML grezzo, PRIMA di qualunque conversione a
-              markdown: la conversione resta un post-processing per l'output finale
-              e non deve mai influenzare la decisione di successo/fallimento.
-
-              IMPORTANTE: il controllo delle frasi di blocco avviene sul testo
-              TRONCATO a 5000 caratteri, esattamente come nell'originale stabile.
-              Motivo verificato concretamente: pagine come i risultati di ricerca
-              di Google includono un fallback <noscript> standard, presente su
-              OGNI pagina (bloccata o no), con testo tipo "se non vieni reindirizzato
-              automaticamente, clicca qui" - un elemento tecnico di compatibilita',
-              non un segnale di blocco. Questo frammento si trova tipicamente in
-              fondo al documento HTML, dopo i risultati di ricerca veri. Validare
-              sul testo COMPLETO (non troncato) fa si' che il controllo raggiunga
-              sempre quel frammento innocuo, marcando come "bloccate" pagine con
-              contenuto reale e valido gia' presente nei primi 5000 caratteri.
-              Troncare PRIMA del check, come faceva l'originale, evita il problema:
-              se i risultati veri ci sono, sono gia' abbondantemente dentro quella
-              soglia; il rumore tecnico in fondo pagina resta fuori dal controllo.
+              """
+              Validatore strutturale per l'HTML dello Step 2.
+              Analizza solo il testo visibile per evitare falsi positivi su tag script/style/noscript.
               """
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
@@ -1226,16 +995,30 @@ jobs:
                   return False, "HTML vuoto"
 
               soup = BeautifulSoup(html, "html.parser")
-              text_grezzo_completo = soup.get_text(separator=' ', strip=True)
-              text_per_check = text_grezzo_completo[:5000]
+              
+              title = (soup.title.string or "").strip().lower() if soup.title else ""
+              waf_titles = ["access denied", "attention required", "just a moment", "checking your browser", "cloudflare"]
+              for wt in waf_titles:
+                  if wt in title:
+                      return False, f"WAF rilevato nel titolo della pagina: {title}"
 
-              if len(text_per_check) <= 150:
-                  return False, "Contenuto insufficiente"
+              for element in soup(["script", "style", "noscript"]):
+                  element.decompose()
+                  
+              visible_text = soup.get_text(separator=' ', strip=True).lower()
 
-              low_text = text_per_check.lower()
-              for ind in BLOCKING_INDICATORS:
-                  if ind in low_text:
-                      return False, f"WAF/Captcha rilevato: {ind}"
+              blocking_indicators = [
+                  "are you a robot", "prove your humanity", "captcha verification",
+                  "unusual traffic from your computer network", "robot challenge screen",
+                  "verifica di sicurezza", "verifying you are human", "challenge-platform"
+              ]
+
+              for ind in blocking_indicators:
+                  if ind in visible_text:
+                      return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
+
+              if len(visible_text) < 150:
+                  return False, f"Contenuto visibile insufficiente ({len(visible_text)} caratteri)"
 
               return True, ""
 
@@ -1254,36 +1037,28 @@ jobs:
                   return
 
               if not await verify_proxy_active(INITIAL_PORT):
-                  print(f"[NODO {node_id}] Proxy MAI diventato attivo sulla porta {INITIAL_PORT}. "
-                        f"Nodo abortito, i target restano falliti.", flush=True)
+                  print(f"[NODO {node_id}] Proxy non attivo sulla porta {INITIAL_PORT}.", flush=True)
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                       f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: proxy non disponibile, "
-                               f"nodo abortito prima di iniziare\n{'#'*60}\n")
+                               f"nodo abortito\n{'#'*60}\n")
                   return
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              # --- Ripristinato seed random, esattamente come nell'originale ---
-              # Avevo introdotto un seed deterministico legato al node_id basandomi
-              # sulla doc di CloakBrowser (utile per reCAPTCHA v3 Enterprise, dove
-              # un'identita' coerente nel tempo aiuta lo scoring). Ma un test
-              # comparativo diretto (stesso identico codice, stesso giorno, stessi
-              # IP WARP, ripetuto due volte) ha mostrato che con il seed random il
-              # codice ORIGINALE otteneva successo su Google in entrambi i test,
-              # mentre con il seed fisso il fallimento su Google e' sistematico.
-              # Ipotesi piu' plausibile: un fingerprint che ritorna sempre identico
-              # da un pool di soli 6 IP WARP condivisi (stessa infrastruttura
-              # Cloudflare) e' PIU' riconoscibile nel tempo per un sistema di
-              # scoring come quello di Google Search, non meno - l'opposto di
-              # quanto vale per reCAPTCHA v3 Enterprise. Si torna al comportamento
-              # originale, verificato empiricamente stabile.
+              # Configurazione geometrica e strutturale per consistenza del fingerprint (Windows 11)
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}",
+                  "--fingerprint-screen-width=1920",
+                  "--fingerprint-screen-height=1080",
+                  "--fingerprint-taskbar-height=48",
+                  "--fingerprint-storage-quota=5000",
+                  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                  "--fingerprint-webrtc-ip=auto"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -1296,17 +1071,15 @@ jobs:
                           profile_dir,
                           headless=False,
                           humanize=True,
-                          human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
+                          human_preset="careful",
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
-                          viewport={"width": 1920, "height": 1080},
+                          viewport={"width": 1920, "height": 940},
                           args=base_args
                       )
                       page = await context.new_page()
 
                       await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-                      await asyncio.sleep(2)
-                      await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
                       await asyncio.sleep(2)
 
                   except Exception as e:
@@ -1325,7 +1098,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                  await search_box.type(query_to_search, delay=50)
+                                  await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1335,7 +1108,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input#q").first
-                                  await search_box.type(query_to_search, delay=50)
+                                  await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1345,7 +1118,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input[name=q]").first
-                                  await search_box.type(query_to_search, delay=50)
+                                  await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1353,30 +1126,12 @@ jobs:
                           else:
                               await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                          # --- Ripristinato wait_for_load_state dinamico ---
-                          # Lo sleep fisso a 10s (motivato dalla doc CloakBrowser sul
-                          # minimizzare traffico CDP) tagliava la lettura della pagina
-                          # SEMPRE allo stesso punto, indipendentemente da quando la
-                          # pagina aveva davvero finito di caricare. Su una pagina che
-                          # passa per uno stato di transizione/redirect prima del
-                          # contenuto finale (tipico di alcune query dirette), uno
-                          # sleep fisso rischia di catturare lo snapshot HTML proprio
-                          # durante quello stato intermedio. wait_for_load_state
-                          # aspetta che la rete si stabilizzi DAVVERO (fino al timeout
-                          # massimo, ma spesso molto meno), com'era nell'originale.
                           try:
                               await page.wait_for_load_state("networkidle", timeout=12000)
                           except Exception:
                               pass
 
-                          await asyncio.sleep(6)
-
-                          # Un solo scroll basta a far scattare il lazy-loading dei
-                          # contenuti sotto il fold. humanize=True intercetta gia'
-                          # questa keyboard.press e la sostituisce con un pattern
-                          # umano (curve, timing) - il doppio PageDown con sleep
-                          # manuali era ridondante rispetto a quello che il flag
-                          # gia' fa da solo.
+                          await asyncio.sleep(4)
                           await page.keyboard.press("PageDown")
                           await asyncio.sleep(2)
 
@@ -1458,15 +1213,6 @@ jobs:
       - name: Attesa Coda Residua Estrattore Nugget (segnale esplicito di fine scraping)
         if: always()
         run: |
-          # A questo punto lo SCRAPING E' GIA' COMPLETAMENTE FINITO (lo step
-          # sopra ha gia' fatto "wait" sui suoi processi e chiuso i container
-          # WARP). Prima di aspettare l'estrattore, gli mandiamo il segnale
-          # ESPLICITO che lo scraping e' concluso: senza questo file,
-          # l'estrattore non si ferma mai per un semplice timeout di
-          # inattivita', perche' un silenzio prolungato durante Step 1/Step 2
-          # puo' essere solo la pausa fisiologica tra le due fasi (refresh
-          # WARP, setup code, avvio browser) e non significa affatto che lo
-          # scraping sia finito.
           touch scraping_completato.flag
           echo "Segnale di fine scraping inviato all'estrattore."
 
@@ -1497,11 +1243,6 @@ jobs:
           import os
           import glob
 
-          # Con l'architettura disaccoppiata c'e' un SOLO file di output nugget,
-          # scritto dal processo estrattore indipendente (nuggets_estrattore.jsonl),
-          # non piu' un file per nodo/step come nella versione precedente. Il glob
-          # resta comunque utile per compatibilita' con eventuali run parziali o
-          # rilanci dello stesso file.
           jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
 
           merged_nuggets = []
@@ -1521,8 +1262,6 @@ jobs:
                               merged_nuggets.append(nugget)
                               count += 1
                           except json.JSONDecodeError:
-                              # Riga scritta a meta' (es. processo interrotto durante
-                              # il flush): la scartiamo senza far fallire tutto il merge.
                               corrotte += 1
               except Exception as e:
                   print(f"Errore lettura {filename}: {e}", flush=True)
@@ -1531,7 +1270,6 @@ jobs:
               if corrotte:
                   print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
 
-          # Deduplica su (fact, source_url) normalizzati
           seen = set()
           nuggets_deduplicati = []
           for n in merged_nuggets:
@@ -1564,7 +1302,6 @@ jobs:
               json.dump(output_finale, f, indent=2, ensure_ascii=False)
 
           print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
-                f"(da {len(merged_nuggets)} grezzi, {len(jsonl_files)} file letti) "
                 f"salvati in nuggets_finale.json", flush=True)
           print(f"Distribuzione confidence: {confidence_counts}", flush=True)
           EOF
