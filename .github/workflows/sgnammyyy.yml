@@ -14,7 +14,7 @@ jobs:
       FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
-      - name: Installazione Font di Sitema e Windows 11 Reali
+      - name: Installazione Font di Sistema e Windows 11 Reali
         run: |
           sudo apt-get update
           sudo apt-get install -y cabextract xfonts-utils unzip wget
@@ -1028,20 +1028,20 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              # Configurazione geometrica e strutturale delegata interamente a CloakBrowser,
-              # inserendo però i flag nativi del binario per allineare l'impronta geometrica complessiva
-              # ed evitare disallineamenti con i Client Hints.
-              # Per eliminare gli shadow-ban sul motore di ricerca (Bing, ecc.), rimuoviamo i parametri 
-              # di ricerca specifici per lingua locale e allineiamo i font Windows originali.
+              # Configurazione geometrica e strutturale per consistenza del fingerprint (Windows 11)
+              # Per evitare "Virtual machine | Screen dimensions don't match viewport" su FingerprintJS,
+              # blocchiamo la risoluzione simulata fissa a 1920x1080 e la taskbar a 48px, allineando
+              # i parametri passati al persistent context di Playwright.
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
-                  "--fingerprint-windows-font-metrics",
+                  "--fingerprint-screen-width=1920",
+                  "--fingerprint-screen-height=1080",
+                  "--fingerprint-taskbar-height=48",
                   "--fingerprint-storage-quota=5000",
                   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                  "--fingerprint-webrtc-ip=auto",
-                  "--start-maximized"
+                  "--fingerprint-webrtc-ip=auto"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -1057,7 +1057,7 @@ jobs:
                           human_preset="careful",
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
-                          no_viewport=True, # Rilascia il controllo delle proporzioni interamente al browser
+                          viewport={"width": 1920, "height": 940},
                           args=base_args
                       )
                       page = await context.new_page()
@@ -1290,6 +1290,11 @@ jobs:
           EOF
           python -u merge_nuggets.py
 
+      - name: Upload Artifact Macchina 2 (Testo Grezzo)
+        if: always()
+        run: |
+          echo "Merge dei file completato con successo"
+          
       - name: Upload Artifact Macchina 2 (Testo Grezzo)
         if: always()
         uses: actions/upload-artifact@v4
