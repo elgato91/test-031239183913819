@@ -355,23 +355,23 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          async def verify_proxy_ready(port, max_retries=10, delay=2):
-              """Check fulmineo e a prova di bomba tramite cdn-cgi/trace di Cloudflare"""
+          async def verify_proxy_ready(port, max_retries=15, delay=2):
+              """Check fulmineo e robustissimo con ipv6.icanhazip.com (no rate limits)"""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
-                      resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=6)
+                      resp = await test_session.get("https://ipv6.icanhazip.com", timeout=6)
                       if resp.status_code == 200:
-                          ip_line = next((line for line in resp.text.split('\n') if line.startswith('ip=')), '')
-                          ip = ip_line.split('=')[1] if ip_line else 'Sconosciuto'
-                          print(f"[NODO {node_id}] Proxy fulmineo confermato. IP Uscita: {ip}", flush=True)
-                          await test_session.close()
-                          return True
+                          ip = resp.text.strip()
+                          if ":" in ip:
+                              print(f"[NODO {node_id}] IPv6 NAT Pronto. IP Uscita: {ip}", flush=True)
+                              await test_session.close()
+                              return True
                   except: pass
                   await asyncio.sleep(delay)
               await test_session.close()
-              print(f"[NODO {node_id}] FALLIMENTO: Proxy sulla porta {port} non risponde.", flush=True)
+              print(f"[NODO {node_id}] FALLIMENTO: Nessuna rotta IPv6 disponibile sulla porta {port}.", flush=True)
               return False
 
           def validate_html(html, url, status_code):
@@ -453,9 +453,14 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
+      - name: Refresh IP Container per lo STEP 2
+        run: |
+          echo "Riavvio container per forzare l'assegnazione di un NUOVO IPv6 da WARP..."
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          sleep 6
+
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
-          # NIENTE RESTART DEI CONTAINER WARP QUI. I TUNNEL RESTANO STABILI ED OPERATIVI.
           cat << 'EOF' > m2_step2_setup.py
           import json, os
           merged_failed = []
@@ -471,7 +476,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, disaccoppiato da Gemini)
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio, sys, random, os, json
@@ -484,18 +489,23 @@ jobs:
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
 
-          async def verify_proxy_ready(port, max_retries=10, delay=2):
+          async def verify_proxy_ready(port, max_retries=15, delay=2):
+              """Check fulmineo e robustissimo con ipv6.icanhazip.com (no rate limits)"""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
-                      resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=6)
+                      resp = await test_session.get("https://ipv6.icanhazip.com", timeout=6)
                       if resp.status_code == 200:
-                          await test_session.close()
-                          return True
+                          ip = resp.text.strip()
+                          if ":" in ip:
+                              print(f"[NODO {node_id}] IPv6 NAT Pronto (Post-Restart). IP Uscita: {ip}", flush=True)
+                              await test_session.close()
+                              return True
                   except: pass
                   await asyncio.sleep(delay)
               await test_session.close()
+              print(f"[NODO {node_id}] FALLIMENTO: Nessuna rotta IPv6 disponibile sulla porta {port} dopo il restart.", flush=True)
               return False
 
           def validate_html(html, url, status_code):
@@ -527,9 +537,8 @@ jobs:
               home_dir = os.path.expanduser("~")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Configurazione esatta e minimale per la massima detection evasion
               base_args = [
-                  f"--fingerprint={100000 + node_id}",  # Identity tracking persistence
+                  f"--fingerprint={100000 + node_id}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
                   "--disable-dev-shm-usage"
               ]
