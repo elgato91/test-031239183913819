@@ -32,7 +32,6 @@ jobs:
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
           
-          # Copia sia i ttf che gli otf correttamente
           find /tmp/win11-fonts-extracted -type f \( -iname "*.ttf" -o -iname "*.otf" \) -exec cp {} ~/.local/share/fonts/windows/ \;
           
           fc-cache -f -v
@@ -51,7 +50,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6)
+      - name: Setup Container WARP (IPv6 Nativi)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -64,7 +63,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+            sleep 1
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
@@ -99,7 +98,6 @@ jobs:
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
-          # Suddivisione matematica statica (Chunking)
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
@@ -343,7 +341,7 @@ jobs:
           if __name__ == "__main__": asyncio.run(main())
           EOF
 
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, no update header)
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi + Self-Healing Proxy)
         run: |
           cat << 'EOF' > m2_step1.py
           import time, sys, random, os, json, asyncio
@@ -357,24 +355,34 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          async def verify_proxy_ipv6(port, max_retries=15, delay=3):
-              """Testa IPv6 con ipv6.icanhazip.com per garantire rotta corretta senza rate limit"""
+          async def verify_proxy_ipv6(port, max_restarts=4):
+              """Check con autoriparazione. Se il container WARP si blocca o dà IPv4, lo riavvia."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for i in range(max_retries):
-                  try:
-                      resp = await test_session.get("https://ipv6.icanhazip.com", timeout=6)
-                      if resp.status_code == 200:
-                          ip = resp.text.strip()
-                          if ":" in ip:
-                              print(f"[NODO {node_id}] IPv6 confermato ({ip}) sulla porta {port}.", flush=True)
-                              await test_session.close()
-                              return True
-                  except: pass
-                  print(f"[NODO {node_id}] Attesa IPv6 sulla porta {port} (tentativo {i+1}/{max_retries})...", flush=True)
-                  await asyncio.sleep(delay)
+              
+              for restart_count in range(max_restarts):
+                  for check in range(4):
+                      try:
+                          resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=5)
+                          if resp.status_code == 200:
+                              ip_line = next((line for line in resp.text.split('\n') if line.startswith('ip=')), '')
+                              ip = ip_line.split('=')[1] if ip_line else ''
+                              if ":" in ip:
+                                  print(f"[NODO {node_id}] IPv6 NAT Pronto. IP Uscita: {ip}", flush=True)
+                                  await test_session.close()
+                                  return True
+                              else:
+                                  print(f"[NODO {node_id}] IP assegnato e' IPv4 ({ip}), attendo IPv6...", flush=True)
+                      except Exception:
+                          pass
+                      await asyncio.sleep(2)
+                  
+                  print(f"[NODO {node_id}] Proxy bloccato o senza IPv6. Autoriparazione: riavvio container warproxy-{node_id}...", flush=True)
+                  os.system(f"docker restart warproxy-{node_id} > /dev/null 2>&1")
+                  await asyncio.sleep(5)
+                  
               await test_session.close()
-              print(f"[NODO {node_id}] FALLIMENTO CRITICO: Timeout IPv6.", flush=True)
+              print(f"[NODO {node_id}] FALLIMENTO CRITICO: Nessun IPv6 dopo i riavvii. Nodo annullato.", flush=True)
               return False
 
           def validate_html(html, url, status_code):
@@ -406,19 +414,14 @@ jobs:
 
               session = curl_requests.AsyncSession(impersonate="chrome120")
               session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-              # ATTENZIONE: non fare session.headers.update(), distrugge l'ordine pseudo-headers e genera lo shadowban di Bing!
-
-              forza_diagnostici_step2 = os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1"
 
               for url in targets:
-                  if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
-                      print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2.", flush=True)
+                  if os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1" and any(site in url for site in DIAGNOSTIC_SITES):
                       failed_targets.append(url)
                       continue
 
-                  print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
                   try:
-                      resp = await session.get(url, timeout=12)
+                      resp = await session.get(url, timeout=15)
                       is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                       
                       if is_ok:
@@ -428,16 +431,13 @@ jobs:
                           else:
                               text = html_to_clean_markdown(resp.text, url)
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                          print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                           
                           if not any(site in url for site in DIAGNOSTIC_SITES):
                               with open("scraped_content.jsonl", "a", encoding="utf-8") as f:
                                   f.write(json.dumps({"source_url": url, "testo_markdown": text, "node_id": node_id, "step": "step1"}, ensure_ascii=False) + "\n")
                       else:
-                          print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
                           failed_targets.append(url)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                  except:
                       failed_targets.append(url)
                   await asyncio.sleep(random.uniform(1.0, 2.0))
               
@@ -467,7 +467,7 @@ jobs:
 
       - name: Refresh IP Container per lo STEP 2
         run: |
-          echo 'Riavvio dei container per forzare la rotazione degli IPv6 su WARP per lo Step 2...'
+          echo "Riavvio container per forzare l'assegnazione di un NUOVO IPv6 da WARP..."
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
           sleep 6
 
@@ -516,23 +516,31 @@ jobs:
               except: pass
               return default
 
-          async def verify_proxy_ipv6(port, max_retries=15, delay=3):
+          async def verify_proxy_ipv6(port, max_restarts=4):
+              """Check con autoriparazione. Identico allo Step 1."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for i in range(max_retries):
-                  try:
-                      resp = await test_session.get("https://ipv6.icanhazip.com", timeout=6)
-                      if resp.status_code == 200:
-                          ip = resp.text.strip()
-                          if ":" in ip:
-                              print(f"[NODO {node_id}] IPv6 NAT Pronto. IP Uscita: {ip}", flush=True)
-                              await test_session.close()
-                              return True
-                  except: pass
-                  print(f"[NODO {node_id}] Attesa IPv6 sulla porta {port} (tentativo {i+1}/{max_retries})...", flush=True)
-                  await asyncio.sleep(delay)
+              for restart_count in range(max_restarts):
+                  for check in range(4):
+                      try:
+                          resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=5)
+                          if resp.status_code == 200:
+                              ip_line = next((line for line in resp.text.split('\n') if line.startswith('ip=')), '')
+                              ip = ip_line.split('=')[1] if ip_line else ''
+                              if ":" in ip:
+                                  print(f"[NODO {node_id}] IPv6 NAT Pronto (Post-Restart). IP Uscita: {ip}", flush=True)
+                                  await test_session.close()
+                                  return True
+                              else:
+                                  print(f"[NODO {node_id}] IP assegnato e' IPv4 ({ip}), attendo IPv6...", flush=True)
+                      except Exception:
+                          pass
+                      await asyncio.sleep(2)
+                  print(f"[NODO {node_id}] Proxy bloccato o senza IPv6. Autoriparazione: riavvio container warproxy-{node_id}...", flush=True)
+                  os.system(f"docker restart warproxy-{node_id} > /dev/null 2>&1")
+                  await asyncio.sleep(5)
               await test_session.close()
-              print(f"[NODO {node_id}] FALLIMENTO CRITICO: Timeout IPv6.", flush=True)
+              print(f"[NODO {node_id}] FALLIMENTO CRITICO: Nessun IPv6 dopo i riavvii.", flush=True)
               return False
 
           def validate_html(html, url, status_code):
@@ -551,6 +559,17 @@ jobs:
 
               if len(visible_text) < 150: return False, "Contenuto insufficiente"
               return True, ""
+
+          async def bypass_waf_and_wait(page):
+              """Esegue azioni umane minimali per risolvere eventuali WAF interattivi invisibili"""
+              try:
+                  await page.mouse.move(random.randint(300, 600), random.randint(300, 600))
+                  await asyncio.sleep(1)
+                  await page.mouse.wheel(0, 500)
+                  await asyncio.sleep(3)
+                  await page.keyboard.press("PageDown")
+                  await asyncio.sleep(2)
+              except: pass
 
           async def main():
               if not os.path.exists(f"/tmp/step2_queue_{node_id}.json"): return
@@ -588,7 +607,6 @@ jobs:
                           human_preset="careful",
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
-                          viewport={"width": 1920, "height": 940},
                           args=base_args
                       )
                       page = await context.new_page()
@@ -598,7 +616,7 @@ jobs:
 
                   for url in targets:
                       try:
-                          print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
+                          print(f"[NODO {node_id}] Navigazione organica/diretta verso: {url}", flush=True)
                           query_to_search = get_query_from_url(url)
 
                           if "bing.com" in url:
@@ -631,21 +649,29 @@ jobs:
                               except:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
 
+                          elif "google.com" in url and "search" in url:
+                              await page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.5, 4.0))
+                              try:
+                                  consent = page.locator("button:has-text('Accept all'), button:has-text('Accetta tutto')").first
+                                  if await consent.is_visible(timeout=2000):
+                                      await consent.click()
+                                      await asyncio.sleep(1)
+                              except: pass
+                              try:
+                                  search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                  await search_box.type(query_to_search, delay=60)
+                                  await page.keyboard.press("Enter")
+                              except:
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
                           else:
-                              # Mantengo Google intatto con URL originale gbv=1
                               await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
                           try: await page.wait_for_load_state("networkidle", timeout=12000)
                           except: pass
 
-                          # Interazione organica per risolvere sfide WAF nascoste (Turnstile/Datadome)
-                          await page.mouse.move(random.randint(300, 600), random.randint(300, 600))
-                          await asyncio.sleep(1)
-                          await page.mouse.wheel(0, 500)
-                          
-                          await asyncio.sleep(3)
-                          await page.keyboard.press("PageDown")
-                          await asyncio.sleep(2)
+                          await bypass_waf_and_wait(page)
 
                           raw_html = await page.content()
                           current_url = page.url
