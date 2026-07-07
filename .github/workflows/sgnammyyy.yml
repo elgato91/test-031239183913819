@@ -192,69 +192,22 @@ jobs:
               if parts.scheme == "mailto":
                   return None
 
-              page_parts = urlsplit(page_url)
-              same_path = (parts.netloc == page_parts.netloc and
-                           parts.path.rstrip("/") == page_parts.path.rstrip("/"))
-
-              if same_path and parts.fragment and not parts.query:
-                  return None
-
+              page_url_parts = urlsplit(page_url)
               if _is_junk_domain(parts.netloc, absolute):
                   return None
 
-              cleaned_query = _clean_query(parts.query)
-
-              rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
-                                     cleaned_query, ""))
-
-              page_rebuilt_parts = urlsplit(page_url)
-              page_cleaned_query = _clean_query(page_rebuilt_parts.query)
-              page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
-                                          page_rebuilt_parts.netloc,
-                                          page_rebuilt_parts.path.rstrip("/"),
-                                          page_cleaned_query, ""))
-              rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc,
-                                                 parts.path.rstrip("/"),
-                                                 cleaned_query, ""))
-              if rebuilt_no_trailing == page_rebuilt:
-                  return None
-
-              return rebuilt
+              # Mantieni i percorsi relativi o assoluti dello stesso dominio
+              return absolute
 
 
-          def _strip_anchor_tag(a_tag):
-              a_tag.replace_with(a_tag.get_text())
-
-
-          def html_to_clean_markdown(html, page_url):
+          def html_to_clean_markdown(html, url):
+              if not html:
+                  return ""
               soup = BeautifulSoup(html, "html.parser")
-
-              for tag_name in STRUCTURAL_TAGS_TO_STRIP:
-                  for tag in soup.find_all(tag_name):
-                      tag.decompose()
-
-              for a_tag in soup.find_all("a"):
-                  href = a_tag.get("href")
-                  cleaned = clean_link_href(href, page_url)
-                  if cleaned is None:
-                      _strip_anchor_tag(a_tag)
-                  else:
-                      a_tag["href"] = cleaned
-                      for attr in list(a_tag.attrs):
-                          if attr not in ("href", "title"):
-                              del a_tag[attr]
-
-              markdown_text = md_convert(
-                  str(soup),
-                  heading_style="ATX",
-                  bullets="-",
-                  strip=["img"],
-              )
-
-              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
-              markdown_text = markdown_text.strip()
-
-              return markdown_text
+              for tag in soup(STRUCTURAL_TAGS_TO_STRIP):
+                  tag.decompose()
+              markdown = md_convert(str(soup), heading_style="ATX")
+              return markdown
           EOF
 
       - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
@@ -1072,7 +1025,7 @@ jobs:
                           headless=False,
                           humanize=True,
                           human_preset="careful",
-                          proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                          proxy=f"socks5h://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
                           viewport={"width": 1920, "height": 940},
                           args=base_args
