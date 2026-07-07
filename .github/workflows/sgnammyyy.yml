@@ -50,10 +50,11 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6 Nativi)
+      - name: Setup Container WARP (IPv6 Nativi con avvio scaglionato)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
+          # Avvio controllato con delay per evitare collisioni di socket sulla rete host dell'runner
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -63,7 +64,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 1
+            sleep 3
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
@@ -98,6 +99,7 @@ jobs:
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
+          # Suddivisione matematica statica (Chunking)
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
@@ -356,12 +358,12 @@ jobs:
           ACTIVE_PORT = 40000 + node_id
 
           async def verify_proxy_ipv6(port, max_restarts=4):
-              """Check con autoriparazione. Se il container WARP si blocca o dà IPv4, lo riavvia."""
+              """Check con autoriparazione. Se il container si blocca o dà IPv4, esegue un riavvio istantaneo."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               
               for restart_count in range(max_restarts):
-                  for check in range(4):
+                  for check in range(6): # 6 controlli x 2s = 12 secondi complessivi di tolleranza prima di riavviare
                       try:
                           resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=5)
                           if resp.status_code == 200:
@@ -372,14 +374,15 @@ jobs:
                                   await test_session.close()
                                   return True
                               else:
-                                  print(f"[NODO {node_id}] IP assegnato e' IPv4 ({ip}), attendo IPv6...", flush=True)
+                                  print(f"[NODO {node_id}] IP assegnato e' IPv4 ({ip}), attendo IPv6 (check {check+1}/6)...", flush=True)
                       except Exception:
                           pass
                       await asyncio.sleep(2)
                   
+                  # Se dopo 12s non ha agganciato l'IPv6, forziamo il restart solo del singolo container difettoso
                   print(f"[NODO {node_id}] Proxy bloccato o senza IPv6. Autoriparazione: riavvio container warproxy-{node_id}...", flush=True)
                   os.system(f"docker restart warproxy-{node_id} > /dev/null 2>&1")
-                  await asyncio.sleep(5)
+                  await asyncio.sleep(8) # 8 secondi di cooldown post-restart per consentire a WARP di registrarsi e stabilizzare il tunnel
                   
               await test_session.close()
               print(f"[NODO {node_id}] FALLIMENTO CRITICO: Nessun IPv6 dopo i riavvii. Nodo annullato.", flush=True)
@@ -420,8 +423,9 @@ jobs:
                       failed_targets.append(url)
                       continue
 
+                  print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
                   try:
-                      resp = await session.get(url, timeout=15)
+                      resp = await session.get(url, timeout=12)
                       is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                       
                       if is_ok:
@@ -431,13 +435,16 @@ jobs:
                           else:
                               text = html_to_clean_markdown(resp.text, url)
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                          print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                           
                           if not any(site in url for site in DIAGNOSTIC_SITES):
                               with open("scraped_content.jsonl", "a", encoding="utf-8") as f:
                                   f.write(json.dumps({"source_url": url, "testo_markdown": text, "node_id": node_id, "step": "step1"}, ensure_ascii=False) + "\n")
                       else:
+                          print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
                           failed_targets.append(url)
-                  except:
+                  except Exception as e:
+                      print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
                       failed_targets.append(url)
                   await asyncio.sleep(random.uniform(1.0, 2.0))
               
@@ -465,10 +472,14 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Refresh IP Container per lo STEP 2
+      - name: Refresh IP Container per lo STEP 2 (Scaglionato)
         run: |
-          echo "Riavvio container per forzare l'assegnazione di un NUOVO IPv6 da WARP..."
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          echo "Riavvio controllato dei container per forzare la rotazione degli IPv6..."
+          for i in {1..6}; do
+            echo "Riavvio warproxy-$i..."
+            docker restart warproxy-$i
+            sleep 3
+          done
           sleep 6
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
@@ -492,6 +503,7 @@ jobs:
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
+          import time
           import sys
           import random
           import os
@@ -516,12 +528,26 @@ jobs:
               except: pass
               return default
 
+          def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
+              try:
+                  riga = json.dumps({
+                      "source_url": source_url,
+                      "testo_markdown": testo_markdown,
+                      "node_id": node_id,
+                      "step": step_label
+                  }, ensure_ascii=False)
+                  with open(SCRAPED_CONTENT_PATH, "a", encoding="utf-8") as f:
+                      f.write(riga + "\n")
+                      f.flush()
+              except Exception as e:
+                  print(f"[NODO {node_id}] Impossibile registrare il record per l'estrattore: {e}", flush=True)
+
           async def verify_proxy_ipv6(port, max_restarts=4):
-              """Check con autoriparazione. Identico allo Step 1."""
+              """Check con autoriparazione post-restart."""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for restart_count in range(max_restarts):
-                  for check in range(4):
+                  for check in range(6):
                       try:
                           resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=5)
                           if resp.status_code == 200:
@@ -532,13 +558,13 @@ jobs:
                                   await test_session.close()
                                   return True
                               else:
-                                  print(f"[NODO {node_id}] IP assegnato e' IPv4 ({ip}), attendo IPv6...", flush=True)
+                                  print(f"[NODO {node_id}] IP assegnato e' IPv4 ({ip}), attendo IPv6 (check {check+1}/6)...", flush=True)
                       except Exception:
                           pass
                       await asyncio.sleep(2)
                   print(f"[NODO {node_id}] Proxy bloccato o senza IPv6. Autoriparazione: riavvio container warproxy-{node_id}...", flush=True)
                   os.system(f"docker restart warproxy-{node_id} > /dev/null 2>&1")
-                  await asyncio.sleep(5)
+                  await asyncio.sleep(8)
               await test_session.close()
               print(f"[NODO {node_id}] FALLIMENTO CRITICO: Nessun IPv6 dopo i riavvii.", flush=True)
               return False
@@ -561,7 +587,6 @@ jobs:
               return True, ""
 
           async def bypass_waf_and_wait(page):
-              """Esegue azioni umane minimali per risolvere eventuali WAF interattivi invisibili"""
               try:
                   await page.mouse.move(random.randint(300, 600), random.randint(300, 600))
                   await asyncio.sleep(1)
@@ -607,6 +632,7 @@ jobs:
                           human_preset="careful",
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
+                          viewport={"width": 1920, "height": 940},
                           args=base_args
                       )
                       page = await context.new_page()
@@ -616,7 +642,7 @@ jobs:
 
                   for url in targets:
                       try:
-                          print(f"[NODO {node_id}] Navigazione organica/diretta verso: {url}", flush=True)
+                          print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                           query_to_search = get_query_from_url(url)
 
                           if "bing.com" in url:
@@ -662,7 +688,7 @@ jobs:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
                                   await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
-                              except:
+                              except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
 
                           else:
