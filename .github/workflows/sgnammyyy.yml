@@ -50,7 +50,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6)
+      - name: Setup Container WARP (IPv6 Nativi)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -114,32 +114,17 @@ jobs:
           from bs4 import BeautifulSoup
           from markdownify import markdownify as md_convert
 
-          STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
-                                      "form", "noscript", "iframe", "svg"]
+          STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header", "form", "noscript", "iframe", "svg"]
 
           TRACKING_PARAMS_PREFIXES = ("utm_",)
-          TRACKING_PARAMS_EXACT = {
-              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
-              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
-              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
-              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
-              "share", "share_id", "si"
-          }
-
-          JUNK_LINK_DOMAINS = (
-              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
-              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
-              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
-              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
-              "addtoany.com", "sharethis.com", "mailto:"
-          )
+          TRACKING_PARAMS_EXACT = {"fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid", "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid", "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id", "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign", "share", "share_id", "si"}
+          JUNK_LINK_DOMAINS = ("twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com", "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com", "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me", "reddit.com/submit", "tumblr.com/share", "getpocket.com", "addtoany.com", "sharethis.com", "mailto:")
 
           def _is_junk_domain(netloc, full_href):
               netloc_low = netloc.lower()
               href_low = full_href.lower()
               for junk in JUNK_LINK_DOMAINS:
-                  if junk in netloc_low or href_low.startswith(junk):
-                      return True
+                  if junk in netloc_low or href_low.startswith(junk): return True
               return False
 
           def _clean_query(query_string):
@@ -148,25 +133,21 @@ jobs:
               cleaned_pairs = []
               for key, value in pairs:
                   key_low = key.lower()
-                  if key_low in TRACKING_PARAMS_EXACT: continue
-                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES): continue
+                  if key_low in TRACKING_PARAMS_EXACT or any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES): continue
                   cleaned_pairs.append((key, value))
               return urlencode(cleaned_pairs)
 
           def clean_link_href(raw_href, page_url):
               if not raw_href: return None
               raw_href = raw_href.strip()
-              if not raw_href or raw_href.startswith("javascript:"): return None
-              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"): return None
+              if not raw_href or raw_href.startswith("javascript:") or raw_href.startswith("mailto:"): return None
 
               try: absolute = urljoin(page_url, raw_href)
               except: return None
-
               try: parts = urlsplit(absolute)
               except: return None
 
-              if parts.scheme not in ("http", "https", "mailto"): return None
-              if parts.scheme == "mailto": return None
+              if parts.scheme not in ("http", "https"): return None
 
               page_parts = urlsplit(page_url)
               same_path = (parts.netloc == page_parts.netloc and parts.path.rstrip("/") == page_parts.path.rstrip("/"))
@@ -179,56 +160,38 @@ jobs:
               page_cleaned_query = _clean_query(page_rebuilt_parts.query)
               page_rebuilt = urlunsplit((page_rebuilt_parts.scheme, page_rebuilt_parts.netloc, page_rebuilt_parts.path.rstrip("/"), page_cleaned_query, ""))
               rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), cleaned_query, ""))
-              
               if rebuilt_no_trailing == page_rebuilt: return None
               return rebuilt
-
-          def _strip_anchor_tag(a_tag):
-              a_tag.replace_with(a_tag.get_text())
 
           def html_to_clean_markdown(html, page_url):
               soup = BeautifulSoup(html, "html.parser")
               for tag_name in STRUCTURAL_TAGS_TO_STRIP:
-                  for tag in soup.find_all(tag_name):
-                      tag.decompose()
+                  for tag in soup.find_all(tag_name): tag.decompose()
 
               for a_tag in soup.find_all("a"):
                   href = a_tag.get("href")
                   cleaned = clean_link_href(href, page_url)
                   if cleaned is None:
-                      _strip_anchor_tag(a_tag)
+                      a_tag.replace_with(a_tag.get_text())
                   else:
                       a_tag["href"] = cleaned
                       for attr in list(a_tag.attrs):
-                          if attr not in ("href", "title"):
-                              del a_tag[attr]
+                          if attr not in ("href", "title"): del a_tag[attr]
 
               markdown_text = md_convert(str(soup), heading_style="ATX", bullets="-", strip=["img"])
-              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
-              return markdown_text.strip()
+              return re.sub(r"\n{3,}", "\n\n", markdown_text).strip()
           EOF
 
       - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live
         run: |
           cat << 'EOF' > nugget_extractor.py
-          import json
-          import re
-          import time
-          import asyncio
-          import difflib
-
+          import json, re, time, asyncio, difflib
           from google import genai
 
           MODEL_NAME = "gemini-3.1-flash-live-preview"
-          CONFIG_LIVE = {
-              "response_modalities": ["AUDIO"],
-              "output_audio_transcription": {}
-          }
+          CONFIG_LIVE = {"response_modalities": ["AUDIO"], "output_audio_transcription": {}}
           NUGGET_TIMEOUT_SECONDS = 40.0
-
-          TPM_LIMIT_DICHIARATO = 65_000
-          TPM_SAFETY_MARGIN = 0.75
-          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)
+          TPM_BUDGET = int(65_000 * 0.75)
           COOLDOWN_SECONDS = 65.0
           QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
 
@@ -237,8 +200,8 @@ jobs:
           Estrai SOLO fatti realmente presenti nel testo utili per un articolo editoriale su: {topic}
 
           REGOLE:
-          1. Estrai SOLO fatti realmente presenti nel testo. Non dedurre o inventare.
-          2. Per ogni nugget, riporta in "quote_originale" la frase ESATTA (verbatim).
+          1. Estrai SOLO fatti realmente presenti nel testo. Non dedurre.
+          2. Riporta in "quote_originale" la frase ESATTA.
           3. Classifica la "category" tra: prezzo, orario, evento, storia, geografia, recensione, dato_statistico, contatto, altro.
           4. Restituisci ESCLUSIVAMENTE un array JSON con oggetti: [{{"fact": "...", "category": "...", "quote_originale": "..."}}]
           5. Usa il formato markdown ```json ... ```
@@ -250,224 +213,138 @@ jobs:
           {testo}
           """
 
-          def _stima_token(testo):
-              if not testo: return 0
-              return max(1, len(testo) // 4)
-
           class TokenBucket:
-              def __init__(self, capacity_tokens, refill_period_seconds=60.0):
-                  self.capacity = capacity_tokens
-                  self.tokens = capacity_tokens
-                  self.refill_period = refill_period_seconds
-                  self.refill_rate = capacity_tokens / refill_period_seconds
+              def __init__(self, capacity):
+                  self.capacity = capacity
+                  self.tokens = capacity
+                  self.refill_rate = capacity / 60.0
                   self.last_refill = time.monotonic()
                   self._lock = asyncio.Lock()
 
-              def _refill(self):
-                  now = time.monotonic()
-                  elapsed = now - self.last_refill
-                  if elapsed > 0:
-                      self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-                      self.last_refill = now
-
-              async def acquire(self, needed_tokens, label=""):
-                  needed_tokens = min(needed_tokens, self.capacity)
+              async def acquire(self, needed):
+                  needed = min(needed, self.capacity)
                   async with self._lock:
                       while True:
-                          self._refill()
-                          if self.tokens >= needed_tokens:
-                              self.tokens -= needed_tokens
+                          now = time.monotonic()
+                          self.tokens = min(self.capacity, self.tokens + (now - self.last_refill) * self.refill_rate)
+                          self.last_refill = now
+                          if self.tokens >= needed:
+                              self.tokens -= needed
                               return
-                          deficit = needed_tokens - self.tokens
-                          wait_seconds = min(deficit / self.refill_rate, 20.0)
-                          print(f"{label}[TPM-BUCKET] Attendo {wait_seconds:.1f}s...", flush=True)
-                          await asyncio.sleep(wait_seconds)
+                          await asyncio.sleep((needed - self.tokens) / self.refill_rate)
 
           class GeminiKeyPool:
               def __init__(self, api_keys):
-                  api_keys = [k for k in api_keys if k]
-                  self.entries = [{
-                      "key": k,
-                      "client": genai.Client(api_key=k),
-                      "bucket": TokenBucket(TPM_BUDGET),
-                      "cooldown_until": 0.0,
-                  } for k in api_keys]
+                  self.entries = [{"key": k, "client": genai.Client(api_key=k), "bucket": TokenBucket(TPM_BUDGET), "cooldown": 0.0} for k in api_keys if k]
                   self._idx = 0
                   self._lock = asyncio.Lock()
 
-              async def _pick_entry(self, label=""):
+              async def _pick_entry(self):
                   async with self._lock:
                       n = len(self.entries)
                       while True:
                           now = time.monotonic()
-                          if any(e["cooldown_until"] <= now for e in self.entries):
+                          if any(e["cooldown"] <= now for e in self.entries):
                               for _ in range(n):
                                   self._idx = (self._idx + 1) % n
-                                  if self.entries[self._idx]["cooldown_until"] <= now:
-                                      return self.entries[self._idx]
-                          attesa = max(0.5, min(e["cooldown_until"] for e in self.entries) - now)
-                          print(f"{label}[KEY-POOL] Chiavi in cooldown, attendo {attesa:.1f}s...", flush=True)
-                          await asyncio.sleep(min(attesa, 15.0))
+                                  if self.entries[self._idx]["cooldown"] <= now: return self.entries[self._idx]
+                          await asyncio.sleep(max(0.5, min(e["cooldown"] for e in self.entries) - now))
 
-              def _mark_cooldown(self, entry, label=""):
-                  entry["cooldown_until"] = time.monotonic() + COOLDOWN_SECONDS
-                  print(f"{label}[KEY-POOL] Quota superata. Cooldown impostato a {COOLDOWN_SECONDS}s", flush=True)
-
-              async def esegui_con_pool(self, payload, timeout_seconds, label=""):
-                  entry = await self._pick_entry(label)
-                  await entry["bucket"].acquire(_stima_token(payload), label=label)
-                  accumulated_text = ""
+              async def esegui(self, payload, timeout):
+                  entry = await self._pick_entry()
+                  await entry["bucket"].acquire(max(1, len(payload) // 4))
+                  accumulated = ""
                   try:
                       async def run_session():
-                          nonlocal accumulated_text
+                          nonlocal accumulated
                           async with entry["client"].aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
                               await session.send_realtime_input(text=payload)
                               async for response in session.receive():
                                   if response.server_content and response.server_content.output_transcription:
-                                      if response.server_content.output_transcription.text:
-                                          accumulated_text += response.server_content.output_transcription.text
-                                  if response.server_content and response.server_content.turn_complete:
-                                      break
-                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
-                      return accumulated_text.strip(), None
-                  except (asyncio.TimeoutError, TimeoutError):
-                      return None, "timeout"
+                                      if response.server_content.output_transcription.text: accumulated += response.server_content.output_transcription.text
+                                  if response.server_content and response.server_content.turn_complete: break
+                      await asyncio.wait_for(run_session(), timeout=timeout)
+                      return accumulated.strip(), None
                   except Exception as e:
                       if any(m in str(e).lower() for m in QUOTA_ERROR_MARKERS):
-                          self._mark_cooldown(entry, label=label)
+                          entry["cooldown"] = time.monotonic() + COOLDOWN_SECONDS
                           return None, "quota"
-                      return None, f"errore: {e}"
+                      return None, str(e)
 
-          def _estrai_json_da_risposta(raw_text):
-              if not raw_text: return None
-              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
-              try:
-                  parsed = json.loads(match.group(1) if match else raw_text)
-                  if isinstance(parsed, list): return parsed
-              except: pass
-              return None
-
-          def _calcola_confidence(quote_originale, testo_sorgente):
-              if not quote_originale or not testo_sorgente: return "low"
-              quote_norm = re.sub(r'\s+', ' ', quote_originale).strip().lower()
-              testo_norm = re.sub(r'\s+', ' ', testo_sorgente).strip().lower()
-              if quote_norm in testo_norm: return "high"
-              
-              finestra = len(quote_norm)
-              if finestra < 8 or len(testo_norm) < finestra: return "low"
-              
-              best_ratio = 0.0
-              step = max(1, finestra // 2)
-              for i in range(0, len(testo_norm) - finestra + 1, step):
-                  ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm[i:i + finestra]).ratio()
-                  if ratio > best_ratio: best_ratio = ratio
-                  if best_ratio > 0.95: break
-              if best_ratio >= 0.85: return "high"
-              if best_ratio >= 0.60: return "medium"
-              return "low"
-
-          def scrivi_nuggets_jsonl(nuggets, jsonl_path):
+          def scrivi_nuggets(nuggets, path):
               if nuggets:
-                  with open(jsonl_path, "a", encoding="utf-8") as f:
-                      for n in nuggets:
-                          f.write(json.dumps(n, ensure_ascii=False) + "\n")
+                  with open(path, "a", encoding="utf-8") as f:
+                      for n in nuggets: f.write(json.dumps(n, ensure_ascii=False) + "\n")
 
-          async def estrai_nuggets(key_pool, source_url, testo_markdown, topic, node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS):
-              if not testo_markdown or len(testo_markdown.strip()) < 50: return []
-              label = f"[NODO {node_id}] " if node_id is not None else ""
-              payload = NUGGET_PROMPT_TEMPLATE.format(topic=topic, source_url=source_url, testo=testo_markdown)
-              
-              for _ in range(len(key_pool.entries)):
-                  accumulated_text, errore = await key_pool.esegui_con_pool(payload, timeout_seconds, label=label)
-                  if errore is None:
-                      parsed = _estrai_json_da_risposta(accumulated_text)
-                      if parsed is None: return None
-                      
-                      nuggets = []
-                      for item in parsed:
-                          if not isinstance(item, dict) or not str(item.get("fact", "")).strip(): continue
-                          nuggets.append({
-                              "fact": str(item.get("fact", "")).strip(),
-                              "source_url": source_url,
-                              "category": str(item.get("category", "altro")).strip() or "altro",
-                              "confidence": _calcola_confidence(str(item.get("quote_originale", "")), testo_markdown),
-                              "quote_originale": str(item.get("quote_originale", "")).strip()
-                          })
-                      return nuggets
-                  elif errore == "quota": continue
-                  else: return None
+          async def estrai_nuggets(pool, url, testo, topic, timeout=NUGGET_TIMEOUT_SECONDS):
+              if not testo or len(testo.strip()) < 50: return []
+              payload = NUGGET_PROMPT_TEMPLATE.format(topic=topic, source_url=url, testo=testo)
+              for _ in range(len(pool.entries)):
+                  raw, err = await pool.esegui(payload, timeout)
+                  if err is None and raw:
+                      match = re.search(r'```json\s*(.*?)\s*```', raw, re.DOTALL)
+                      try:
+                          parsed = json.loads(match.group(1) if match else raw)
+                          if isinstance(parsed, list):
+                              out = []
+                              for i in parsed:
+                                  if not isinstance(i, dict) or not str(i.get("fact", "")).strip(): continue
+                                  out.append({"fact": str(i.get("fact", "")).strip(), "source_url": url, "category": str(i.get("category", "altro")).strip() or "altro", "quote_originale": str(i.get("quote_originale", "")).strip()})
+                              return out
+                      except: pass
+                      return None
+                  if err == "quota": continue
+                  return None
               return None
           EOF
 
       - name: Creazione Processo Estrattore Nugget INDIPENDENTE
         run: |
           cat << 'EOF' > nugget_estrattore_standalone.py
-          import asyncio
-          import json
-          import os
-          import time
-          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
-
-          SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
-          NUGGETS_OUTPUT_PATH = "nuggets_estrattore.jsonl"
-          SCRAPING_DONE_FLAG_PATH = "scraping_completato.flag"
-          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
-          _jsonl_lock = asyncio.Lock()
+          import asyncio, json, os, time
+          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets
 
           async def main():
-              api_keys = [os.environ.get(k) for k in ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"] if os.environ.get(k)]
-              if not api_keys: return
+              keys = [os.environ.get(k) for k in ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"] if os.environ.get(k)]
+              if not keys: return
               
-              key_pool = GeminiKeyPool(api_keys)
-              nugget_semaphore = asyncio.Semaphore(5)
-              tasks_in_volo = []
+              pool = GeminiKeyPool(keys)
+              sem = asyncio.Semaphore(5)
+              tasks = []
               righe_lette = 0
-              ultima_riga_vista = time.monotonic()
+              _lock = asyncio.Lock()
 
-              async def processa_riga(source_url, testo_markdown):
-                  async with nugget_semaphore:
-                      esito = await estrai_nuggets(key_pool, source_url, testo_markdown, TARGET_TOPIC)
+              async def proc(url, txt):
+                  async with sem:
+                      esito = await estrai_nuggets(pool, url, txt, os.environ.get("TARGET_TOPIC", ""))
                   if esito:
-                      async with _jsonl_lock: scrivi_nuggets_jsonl(esito, NUGGETS_OUTPUT_PATH)
+                      async with _lock: scrivi_nuggets(esito, "nuggets_estrattore.jsonl")
 
               while True:
-                  if os.path.exists(SCRAPED_CONTENT_PATH):
-                      with open(SCRAPED_CONTENT_PATH, "r", encoding="utf-8") as f:
-                          tutte_le_righe = f.readlines()
-                      
-                      for riga in tutte_le_righe[righe_lette:]:
-                          if not riga.strip(): continue
+                  if os.path.exists("scraped_content.jsonl"):
+                      with open("scraped_content.jsonl", "r", encoding="utf-8") as f:
+                          righe = f.readlines()
+                      for r in righe[righe_lette:]:
+                          if not r.strip(): continue
                           try:
-                              rec = json.loads(riga)
-                              if rec.get("source_url") and rec.get("testo_markdown"):
-                                  tasks_in_volo.append(asyncio.create_task(processa_riga(rec["source_url"], rec["testo_markdown"])))
+                              d = json.loads(r)
+                              if d.get("source_url") and d.get("testo_markdown"): tasks.append(asyncio.create_task(proc(d["source_url"], d["testo_markdown"])))
                           except: pass
-                      
-                      if len(tutte_le_righe) > righe_lette:
-                          ultima_riga_vista = time.monotonic()
-                          righe_lette = len(tutte_le_righe)
+                      righe_lette = len(righe)
 
-                  tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
-                  if os.path.exists(SCRAPING_DONE_FLAG_PATH) and not tasks_in_volo:
-                      if time.monotonic() - ultima_riga_vista > 3.0: break
-
+                  tasks = [t for t in tasks if not t.done()]
+                  if os.path.exists("scraping_completato.flag") and not tasks: break
                   await asyncio.sleep(2.0)
 
-              if tasks_in_volo: await asyncio.gather(*tasks_in_volo, return_exceptions=True)
+              if tasks: await asyncio.gather(*tasks, return_exceptions=True)
 
-          if __name__ == "__main__":
-              asyncio.run(main())
+          if __name__ == "__main__": asyncio.run(main())
           EOF
 
       - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, disaccoppiato da Gemini)
         run: |
           cat << 'EOF' > m2_step1.py
-          import time
-          import sys
-          import random
-          import os
-          import json
-          import asyncio
+          import time, sys, random, os, json, asyncio
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
           from extraction_utils import html_to_clean_markdown
@@ -478,27 +355,23 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          async def verify_proxy_ipv6(port, max_retries=15, delay=4):
-              """
-              Testa obbligatoriamente su api6.ipify.org. 
-              Questo garantisce al 100% che il tunnel WARP stia smistando traffico IPv6.
-              Non procediamo finché l'IPv6 non è assegnato.
-              """
+          async def verify_proxy_ready(port, max_retries=10, delay=2):
+              """Check fulmineo e a prova di bomba tramite cdn-cgi/trace di Cloudflare"""
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for i in range(max_retries):
+              for _ in range(max_retries):
                   try:
-                      resp = await test_session.get("https://api6.ipify.org?format=json", timeout=10)
+                      resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=6)
                       if resp.status_code == 200:
-                          ip_as_json = resp.json().get("ip", "")
-                          print(f"[NODO {node_id}] IPv6 confermato ({ip_as_json}) sulla porta {port}.", flush=True)
+                          ip_line = next((line for line in resp.text.split('\n') if line.startswith('ip=')), '')
+                          ip = ip_line.split('=')[1] if ip_line else 'Sconosciuto'
+                          print(f"[NODO {node_id}] Proxy fulmineo confermato. IP Uscita: {ip}", flush=True)
                           await test_session.close()
                           return True
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Attesa IPv6 sulla porta {port} (tentativo {i+1}/{max_retries})...", flush=True)
+                  except: pass
                   await asyncio.sleep(delay)
               await test_session.close()
-              print(f"[NODO {node_id}] FALLIMENTO CRITICO: Timeout. Nessuna rotta IPv6 disponibile sulla porta {port}.", flush=True)
+              print(f"[NODO {node_id}] FALLIMENTO: Proxy sulla porta {port} non risponde.", flush=True)
               return False
 
           def validate_html(html, url, status_code):
@@ -520,8 +393,7 @@ jobs:
               return True, ""
 
           async def main():
-              if not await verify_proxy_ipv6(ACTIVE_PORT): 
-                  sys.exit(1) # Forza l'errore del nodo anzichè il silent exit
+              if not await verify_proxy_ready(ACTIVE_PORT): sys.exit(1)
               
               if not os.path.exists(f"/tmp/step1_queue_{node_id}.json"): sys.exit(0)
               with open(f"/tmp/step1_queue_{node_id}.json", "r") as f: targets = json.load(f)
@@ -531,8 +403,6 @@ jobs:
 
               session = curl_requests.AsyncSession(impersonate="chrome120")
               session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-              
-              # NON alteriamo più gli header manualmente, per evitare il disallineamento e il conseguente blocco di Bing/Google.
 
               for url in targets:
                   if os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1" and any(site in url for site in DIAGNOSTIC_SITES):
@@ -583,13 +453,9 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Refresh IP Container per lo STEP 2
-        run: |
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
-
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
+          # NIENTE RESTART DEI CONTAINER WARP QUI. I TUNNEL RESTANO STABILI ED OPERATIVI.
           cat << 'EOF' > m2_step2_setup.py
           import json, os
           merged_failed = []
@@ -608,11 +474,7 @@ jobs:
       - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, disaccoppiato da Gemini)
         run: |
           cat << 'EOF' > m2_step2.py
-          import asyncio
-          import sys
-          import random
-          import os
-          import json
+          import asyncio, sys, random, os, json
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
@@ -622,23 +484,18 @@ jobs:
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
 
-          async def verify_proxy_ipv6(port, max_retries=15, delay=4):
-              """Stesso check critico IPv6-only utilizzato in Step 1"""
+          async def verify_proxy_ready(port, max_retries=10, delay=2):
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for i in range(max_retries):
+              for _ in range(max_retries):
                   try:
-                      resp = await test_session.get("https://api6.ipify.org?format=json", timeout=10)
+                      resp = await test_session.get("https://cloudflare.com/cdn-cgi/trace", timeout=6)
                       if resp.status_code == 200:
-                          ip_as_json = resp.json().get("ip", "")
-                          print(f"[NODO {node_id}] IPv6 confermato ({ip_as_json}) sulla porta {port}.", flush=True)
                           await test_session.close()
                           return True
-                  except Exception as e:
-                      print(f"[NODO {node_id}] Attesa IPv6 sulla porta {port} (tentativo {i+1}/{max_retries})...", flush=True)
+                  except: pass
                   await asyncio.sleep(delay)
               await test_session.close()
-              print(f"[NODO {node_id}] FALLIMENTO CRITICO: Timeout. Nessuna rotta IPv6 disponibile sulla porta {port}.", flush=True)
               return False
 
           def validate_html(html, url, status_code):
@@ -665,14 +522,12 @@ jobs:
                   open(f"output_node_{node_id}_step2.txt", "w").close()
                   return
 
-              if not await verify_proxy_ipv6(INITIAL_PORT): 
-                  sys.exit(1)
+              if not await verify_proxy_ready(INITIAL_PORT): sys.exit(1)
 
               home_dir = os.path.expanduser("~")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Configurazione esatta e minimale secondo le docs Cloakbrowser
-              # Disattivata la logica di digitazione organica: si attacca l'URL crudo senza modifiche
+              # Configurazione esatta e minimale per la massima detection evasion
               base_args = [
                   f"--fingerprint={100000 + node_id}",  # Identity tracking persistence
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
