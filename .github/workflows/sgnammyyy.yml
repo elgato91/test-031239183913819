@@ -54,11 +54,21 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
+          # Configurazione gai.conf per forzare la precedenza IPv6 a livello di sistema operativo
+          sudo tee /etc/gai.conf << 'EOF'
+          precedence  ::1/128       50
+          precedence  ::/0          40
+          precedence  2002::/16     30
+          precedence  ::/96         20
+          precedence  ::ffff:0:0/96 10
+          EOF
+
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             docker run --name warproxy-$i \
               --network host \
+              -v /etc/gai.conf:/etc/gai.conf:ro \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
@@ -125,89 +135,51 @@ jobs:
                                       "form", "noscript", "iframe", "svg"]
 
           TRACKING_PARAMS_PREFIXES = ("utm_",)
-          TRACKING_PARAMS_EXACT = {
-              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
-              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
-              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
-              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
-              "share", "share_id", "si"
-          }
+          TRACKING_PARAMS_CONTAIN = ("gclid", "fbclid")
+          TRACKING_PARAMS_EXACT = ("sigpd", "fclid", "sca_esv", "fbs", "srsltid", "sstk", "sigpd")
 
-          JUNK_LINK_DOMAINS = (
-              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
-              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
-              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
-              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
-              "addtoany.com", "sharethis.com", "mailto:"
-          )
-
-
-          def _is_junk_domain(netloc, full_href):
-              netloc_low = netloc.lower()
-              href_low = full_href.lower()
-              for junk in JUNK_LINK_DOMAINS:
-                  if junk in netloc_low or href_low.startswith(junk):
-                      return True
-              return False
-
-
-          def _clean_query(query_string):
-              if not query_string:
-                  return ""
-              pairs = parse_qsl(query_string, keep_blank_values=True)
-              cleaned_pairs = []
-              for key, value in pairs:
-                  key_low = key.lower()
-                  if key_low in TRACKING_PARAMS_EXACT:
-                      continue
-                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES):
-                      continue
-                  cleaned_pairs.append((key, value))
-              return urlencode(cleaned_pairs)
-
-
-          def clean_link_href(raw_href, page_url):
-              if not raw_href:
-                  return None
-
-              raw_href = raw_href.strip()
-              if not raw_href or raw_href.startswith("javascript:"):
-                  return None
-              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
-                  return None
-
+          def filter_query_params(url):
               try:
-                  absolute = urljoin(page_url, raw_href)
+                  parsed = urlsplit(url)
+                  if not parsed.query:
+                      return url
+                  params = parse_qsl(parsed.query, keep_blank_values=True)
+                  filtered = []
+                  for k, v in params:
+                      k_lower = k.lower()
+                      if any(k_lower.startswith(p) for p in TRACKING_PARAMS_PREFIXES):
+                          continue
+                      if any(p in k_lower for p in TRACKING_PARAMS_CONTAIN):
+                          continue
+                      if k_lower in TRACKING_PARAMS_EXACT:
+                          continue
+                      filtered.append((k, v))
+                  
+                  new_query = urlencode(filtered)
+                  return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
               except Exception:
-                  return None
+                  return url
 
-              try:
-                  parts = urlsplit(absolute)
-              except Exception:
-                  return None
-
-              if parts.scheme not in ("http", "https", "mailto"):
-                  return None
-
-              if parts.scheme == "mailto":
-                  return None
-
-              page_url_parts = urlsplit(page_url)
-              if _is_junk_domain(parts.netloc, absolute):
-                  return None
-
-              # Mantieni i percorsi relativi o assoluti dello stesso dominio
-              return absolute
-
-
-          def html_to_clean_markdown(html, url):
-              if not html:
+          def clean_html_to_markdown(html_content, base_url=None):
+              if not html_content:
                   return ""
-              soup = BeautifulSoup(html, "html.parser")
+              soup = BeautifulSoup(html_content, "html.parser")
               for tag in soup(STRUCTURAL_TAGS_TO_STRIP):
                   tag.decompose()
-              markdown = md_convert(str(soup), heading_style="ATX")
-              return markdown
+              
+              for a in soup.find_all("a", href=True):
+                  raw_href = a["href"]
+                  if base_url:
+                      try:
+                          raw_href = urljoin(base_url, raw_href)
+                      except Exception:
+                          pass
+                  cleaned_href = filter_query_params(raw_href)
+                  a["href"] = cleaned_href
+              
+              md = md_convert(str(soup), heading_style="ATX")
+              md = re.sub(r'\n{3,}', '\n\n', md)
+              return md.strip()
           EOF
 
       - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
@@ -653,7 +625,7 @@ jobs:
           import asyncio
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
-          from extraction_utils import html_to_clean_markdown
+          from extraction_utils import clean_html_to_markdown
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -770,7 +742,7 @@ jobs:
               for url in targets:
                   if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
                       print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
-                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
+                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP directo.", flush=True)
                       failed_targets.append(url)
                       continue
 
@@ -785,7 +757,7 @@ jobs:
                               soup = BeautifulSoup(resp.text, 'html.parser')
                               text = soup.get_text(separator=' ', strip=True)
                           else:
-                              text = html_to_clean_markdown(resp.text, url)
+                              text = clean_html_to_markdown(resp.text, url)
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
 
@@ -882,7 +854,7 @@ jobs:
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
-          from extraction_utils import html_to_clean_markdown
+          from extraction_utils import clean_html_to_markdown
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -1025,7 +997,7 @@ jobs:
                           headless=False,
                           humanize=True,
                           human_preset="careful",
-                          proxy=f"socks5h://127.0.0.1:{INITIAL_PORT}",
+                          proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
                           viewport={"width": 1920, "height": 940},
                           args=base_args
@@ -1094,7 +1066,7 @@ jobs:
                           is_ok, err_msg = validate_html(raw_html, current_url, None)
 
                           if is_ok:
-                              text_for_output = html_to_clean_markdown(raw_html, current_url)
+                              text_for_output = clean_html_to_markdown(raw_html, current_url)
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
                               print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
 
