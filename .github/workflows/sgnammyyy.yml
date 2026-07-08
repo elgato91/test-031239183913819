@@ -887,8 +887,12 @@ jobs:
       - name: Refresh IP Container per lo STEP 2
         run: |
           echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
+          docker restart warproxy-1 && sleep 10
+          docker restart warproxy-2 && sleep 10
+          docker restart warproxy-3 && sleep 10
+          docker restart warproxy-4 && sleep 10
+          docker restart warproxy-5 && sleep 10
+          docker restart warproxy-6 && sleep 6
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
