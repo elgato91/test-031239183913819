@@ -56,18 +56,26 @@ jobs:
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            echo "Avvio container warproxy-$i isolato sulla porta host $PORT..."
+            
+            # 1. Rimossa l'opzione --network host per forzare l'isolamento dello stack di rete.
+            # 2. Mappata la porta interna 1080 sulla porta corrispondente dell'host ($PORT).
+            # 3. Inserito il DNS dual-stack (IPv6 + IPv4) per consentire la risoluzione dei nomi
+            #    nella rete bridge di Docker in ambiente GitHub Actions.
             docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -p $PORT:1080 \
+              -e SOCKS5_PORT=1080 \
+              -e DNS=2606:4700:4700::1111,1.1.1.1 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 10.5
+            
+            # Pausa di 12 secondi per prevenire il rate-limit di Cloudflare durante la registrazione
+            # e impedire l'accorpamento delle sessioni sullo stesso indirizzo IP di uscita.
+            sleep 12
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          sleep 15
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -888,7 +896,9 @@ jobs:
         run: |
           echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
+          # Incrementiamo il tempo di attesa dopo il riavvio dei container per consentire
+          # il completamento degli handshake Wireguard in parallelo.
+          sleep 18
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
