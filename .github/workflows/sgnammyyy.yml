@@ -1,474 +1,376 @@
-"""
-scraper.py — USS Ultimate Stealth Scraper
-
-Discovery layer: esegue ricerche su Startpage + DuckDuckGo attraverso
-5 nodi Cloudflare WARP e raccoglie URL unici.
-
-Output: raw_urls.json nella directory corrente.
-Formato: lista di oggetti {"url": ..., "query": ..., "engine": ...}
-
-I log vengono scritti su stderr (visibili in GitHub Actions).
-raw_urls.json viene scritto su disco (non su stdout) per evitare
-qualsiasi problema di buffering con redirect shell.
-"""
-
-import json
-import re
-import sys
-import time
-import random
-import threading
-import subprocess
-from pathlib import Path
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, quote
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from curl_cffi import requests
-
-
-# ==========================================
-# CORE: LOGGING & CLEANUP
-# ==========================================
-
-def log(message: str):
-    sys.stderr.write(message + "\n")
-    sys.stderr.flush()
-
-
-def clean_url(url: str) -> str:
-    try:
-        parsed = urlparse(url)
-        query_params = parse_qsl(parsed.query)
-        filtered_params = [
-            (k, v) for k, v in query_params
-            if k.lower() not in ["srsltid", "gclid", "fbclid"]
-            and not k.lower().startswith("utm_")
-        ]
-        new_query = urlencode(filtered_params)
-        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-    except Exception:
-        return url
-
-
-def normalize_url(url: str) -> str:
-    """Normalizza URL per deduplicazione: lowercase, rimuove www, trailing slash, ordina params."""
-    try:
-        url_lower = url.lower().rstrip("/")
-        parsed = urlparse(url_lower)
-        netloc = parsed.netloc
-        if netloc.startswith("www."):
-            netloc = netloc[4:]
-        scheme = "https"
-        params = sorted(parse_qsl(parsed.query))
-        return urlunparse((scheme, netloc, parsed.path, "", urlencode(params), ""))
-    except Exception:
-        return url
-
-
-# ==========================================
-# ANTI-BOT: HUMAN MIMICRY (GAUSSIAN SLEEP)
-# ==========================================
-
-def human_sleep(mean: float, std_dev: float):
-    """Genera un ritardo realistico usando una distribuzione a campana (Gaussiana)."""
-    sleep_time = max(0.5, random.gauss(mean, std_dev))
-    time.sleep(sleep_time)
-
-
-# ==========================================
-# ENGINE: SELF-HEALING PROXY POOL
-# ==========================================
-
-class ProxyPool:
-    def __init__(self, ports):
-        self.ports = ports
-        self.active_ports = set(ports)
-        self.lock = threading.Lock()
-
-    def get_proxy(self):
-        with self.lock:
-            if not self.active_ports:
-                return None
-            return random.choice(list(self.active_ports))
-
-    def mark_sick_and_heal(self, port):
-        with self.lock:
-            if port in self.active_ports:
-                self.active_ports.remove(port)
-                log(f"     [PROXY POOL] ⚠️ Porta {port} bruciata. Messa in quarantena. Auto-cura in corso...")
-                threading.Thread(target=self._heal_proxy_background, args=(port,), daemon=True).start()
-
-    def _heal_proxy_background(self, port):
-        warp_id = port - 1080
-        container = f"warp_{warp_id}"
-        try:
-            subprocess.run(["docker", "restart", container], capture_output=True, text=True, timeout=15)
-            time.sleep(6)
-            with self.lock:
-                self.active_ports.add(port)
-                log(f"     [PROXY POOL] ♻️ Auto-cura completata. Porta {port} reintegrata nel pool.")
-        except Exception:
-            log(f"     [PROXY POOL] ❌ Fallimento critico riavvio porta {port}. Nodo perso definitivamente.")
-
-
-# Pool globale: 5 nodi WARP
-PROXY_POOL = ProxyPool([1081, 1082, 1083, 1084, 1085])
-
-# Semaforo anti-burst: impedisce ai thread di interrogare Startpage nello stesso istante
-STARTPAGE_LOCK = threading.Lock()
-
-ACCEPT_LANGUAGES = [
-    "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-    "it-IT,it;q=0.9",
-    "en-US,en;q=0.9,it;q=0.8",
-    "it,en-US;q=0.9,en;q=0.8",
-    "it-IT,it;q=0.8,en;q=0.6",
-    "en-GB,en;q=0.9",
-    "en-US,en;q=0.9",
-]
-
-BROWSER_PROFILES = {
-    "chrome": {
-        "impersonate": "chrome120",
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    },
-    "edge": {
-        "impersonate": "chrome120",
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    },
-    "safari": {
-        "impersonate": "safari17_0",
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-}
-
-
-def get_minimal_headers(browser: str) -> dict:
-    profile = BROWSER_PROFILES[browser]
-    return {
-        "user-agent": profile["ua"],
-        "accept": profile["accept"],
-        "accept-language": random.choice(ACCEPT_LANGUAGES),
-        "accept-encoding": "gzip, deflate, br",
-    }
-
-
-# ==========================================
-# WARM-UP SESSIONE
-# ==========================================
-
-def warm_up_session(session: requests.Session, browser: str):
-    headers = get_minimal_headers(browser)
-    try:
-        session.get("https://www.startpage.com/", headers=headers, timeout=6.0)
-        human_sleep(mean=1.2, std_dev=0.3)
-        session.get("https://www.startpage.com/en/", headers=headers, timeout=6.0)
-    except Exception:
-        pass
-
-
-# ==========================================
-# MOTORI DI RICERCA
-# ==========================================
-
-def fetch_startpage(session: requests.Session, query: str, browser: str) -> list[str] | None:
-    headers = get_minimal_headers(browser)
-    human_sleep(mean=1.2, std_dev=0.4)
-
-    with STARTPAGE_LOCK:
-        try:
-            response_get = session.get("https://www.startpage.com/", headers=headers, timeout=8.0)
-            if response_get.status_code != 200:
-                return None
-            sc_match = (
-                re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
-                or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
-            )
-            sc_token = sc_match.group(1) if sc_match else ""
-        except Exception:
-            return None
-
-        time.sleep(random.uniform(0.8, 1.5))
-
-        payload = {
-            "query": query,
-            "sc": sc_token,
-            "cat": "web",
-            "t": "device",
-            "language": "italiano",
-            "lui": "english",
-            "qadf": "moderate",
-        }
-
-        headers_post = headers.copy()
-        headers_post.update({
-            "origin": "https://www.startpage.com",
-            "referer": "https://www.startpage.com/",
-            "content-type": "application/x-www-form-urlencoded",
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-        })
-
-        try:
-            response_post = session.post(
-                "https://www.startpage.com/sp/search",
-                headers=headers_post,
-                data=payload,
-                timeout=8.0,
-            )
-            if (
-                response_post.status_code != 200
-                or "captcha" in response_post.text.lower()
-                or "sorry" in response_post.text.lower()
-            ):
-                return None
-
-            links = []
-            data = extract_react_json(response_post.text)
-            if data:
-                mainline = (
-                    data.get("render", {})
-                    .get("presenter", {})
-                    .get("regions", {})
-                    .get("mainline", [])
-                )
-                for section in mainline:
-                    if section.get("display_type") == "web-google" and "results" in section:
-                        for item in section["results"]:
-                            if "clickUrl" in item:
-                                c = clean_url(item["clickUrl"].strip())
-                                if c:
-                                    links.append(c)
-            return links
-        except Exception:
-            return None
-
-
-def fetch_duckduckgo(session: requests.Session, query: str, browser: str) -> list[str] | None:
-    headers = get_minimal_headers(browser)
-    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-    try:
-        response = session.get(url, headers=headers, timeout=8.0)
-        if response.status_code != 200 or "captcha" in response.text.lower():
-            return None
-
-        links = []
-        for match in re.finditer(r'uddg=([^&"\'>\s]+)', response.text):
-            try:
-                real_url = unquote(match.group(1))
-                if real_url.startswith("http") and "duckduckgo.com" not in real_url:
-                    c = clean_url(real_url.strip())
-                    if c:
-                        links.append(c)
-            except Exception:
-                pass
-        return links if links else None
-    except Exception:
-        return None
-
-
-def extract_react_json(html_content: str) -> dict | None:
-    start_str = '{"render":'
-    idx = html_content.find(start_str)
-    if idx == -1:
-        return None
-    brace_count, json_end = 0, -1
-    for i in range(idx, len(html_content)):
-        if html_content[i] == "{":
-            brace_count += 1
-        elif html_content[i] == "}":
-            brace_count -= 1
-        if brace_count == 0:
-            json_end = i
-            break
-    if json_end == -1:
-        return None
-    try:
-        return json.loads(html_content[idx : json_end + 1])
-    except Exception:
-        return None
-
-
-# ==========================================
-# WORKER PROCESS
-# ==========================================
-
-def process_single_query(
-    query: str, query_index: int, total_queries: int
-) -> list[dict]:
-    """
-    Processa una singola query su Startpage + DuckDuckGo.
-    Restituisce lista di dict {url, query, engine} con metadata di provenienza.
-    """
-    max_retries = 3
-
-    for attempt in range(1, max_retries + 1):
-        port = PROXY_POOL.get_proxy()
-        if not port:
-            log(f"[{query_index:02d}/{total_queries}] Nessun proxy sano disponibile. Attesa...")
-            human_sleep(3.0, 0.5)
-            continue
-
-        browser = random.choice(["chrome", "edge", "safari"])
-        impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
-        proxies = {
-            "http": f"socks5h://127.0.0.1:{port}",
-            "https": f"socks5h://127.0.0.1:{port}",
-        }
-
-        session = requests.Session(impersonate=impersonate_target, proxies=proxies)
-
-        log(f"[{query_index:02d}/{total_queries}] (Port {port}, {impersonate_target}) {query} (Tentativo {attempt})")
-
-        warm_up_session(session, browser)
-        human_sleep(mean=1.0, std_dev=0.3)
-
-        sp_links = fetch_startpage(session, query, browser)
-        ddg_links = fetch_duckduckgo(session, query, browser)
-
-        # Shadow ban detection
-        if sp_links is not None and len(sp_links) == 0:
-            sp_links = None
-        if ddg_links is not None and len(ddg_links) == 0:
-            ddg_links = None
-
-        if sp_links is not None:
-            log(f"  └─ [OK] Startpage: {len(sp_links)} risultati")
-        else:
-            log(f"  └─ [WARN] Startpage bloccato o shadow-ban.")
-
-        if ddg_links is not None:
-            log(f"  └─ [OK] DuckDuckGo: {len(ddg_links)} risultati")
-        else:
-            log(f"  └─ [WARN] DuckDuckGo bloccato o shadow-ban.")
-
-        # Se entrambi falliscono: proxy bruciato → kill & retry
-        if sp_links is None and ddg_links is None:
-            PROXY_POOL.mark_sick_and_heal(port)
-            human_sleep(mean=2.5, std_dev=0.5)
-            continue
-
-        # Almeno uno ha funzionato: costruiamo i record con metadata
-        result_items: list[dict] = []
-
-        # Tagga le sorgenti
-        sp_set = set(sp_links or [])
-        ddg_set = set(ddg_links or [])
-        all_urls = sp_set | ddg_set
-
-        for url in all_urls:
-            if url in sp_set and url in ddg_set:
-                engine = "both"
-            elif url in sp_set:
-                engine = "startpage"
-            else:
-                engine = "duckduckgo"
-            result_items.append({"url": url, "query": query, "engine": engine})
-
-        human_sleep(mean=3.5, std_dev=0.8)
-        return result_items
-
-    log(f"[{query_index:02d}/{total_queries}] ❌ FALLIMENTO DEFINITIVO: {query}")
-    return []
-
-
-# ==========================================
-# QUERY GENERATOR
-# ==========================================
-
-def generate_queries() -> list[str]:
-    """
-    Genera le query di ricerca.
-    Personalizza questa funzione per ogni progetto editoriale.
-    """
-    locs = ["Trastevere", "Testaccio", "Monti", "Prati", "Campo de Fiori"]
-    queries = []
-    for loc in locs:
-        queries.extend([
-            f"best restaurants in {loc} Rome",
-            f"best restaurants in {loc} Rome reviews blog",
-            f"where to eat in {loc} Rome local recommendations",
-            f"best traditional trattorias and osterias in {loc} Rome",
-            f"cheap eats and street food in {loc} Rome",
-            f"hidden gem restaurants in {loc} Rome",
-            f"best historic restaurants in {loc} Rome",
-            f"best pasta and pizza in {loc} Rome favorites",
-            f"authentic local restaurants {loc} Rome",
-            f"where do locals eat in {loc} Rome",
-        ])
-    return queries
-
-
-# ==========================================
-# MAIN
-# ==========================================
-
-def main():
-    OUTPUT_FILE = Path("raw_urls.json")
-
-    log("====================================================")
-    log("AVVIO SCRAPER ULTIMATE - SEMAFORO ANTI-BURST & AUTO-CURA")
-    log("====================================================")
-
-    queries = generate_queries()
-    all_link_items: list[dict] = []
-
-    # max_workers=4 su 5 proxy: manteniamo 1 proxy libero per auto-cura in background
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(process_single_query, q, idx + 1, len(queries)): q
-            for idx, q in enumerate(queries)
-        }
-        for future in as_completed(futures):
-            try:
-                items = future.result()
-                all_link_items.extend(items)
-            except Exception as e:
-                log(f"[CRITICAL ERROR] Fallimento nel ThreadPool: {e}")
-
-    # Deduplicazione con normalizzazione URL
-    seen_normalized: set[str] = set()
-    deduped_items: list[dict] = []
-
-    for item in all_link_items:
-        raw_url = item.get("url", "")
-        if not raw_url:
-            continue
-        # Rimuove caratteri invisibili
-        cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", raw_url).strip()
-        if not cleaned.startswith("http") or len(cleaned) < 12:
-            continue
-
-        norm = normalize_url(cleaned)
-        if norm not in seen_normalized:
-            seen_normalized.add(norm)
-            deduped_items.append({
-                "url": cleaned,
-                "query": item.get("query"),
-                "engine": item.get("engine"),
-            })
-
-    # Ordina per URL per output deterministico
-    deduped_items.sort(key=lambda x: x["url"])
-
-    # Scrittura su file (NON su stdout — evita problemi di buffering con redirect shell)
-    OUTPUT_FILE.write_text(
-        json.dumps(deduped_items, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    log("")
-    log("================================================")
-    log(f"=== REPORT FINALE: {len(deduped_items)} URL UNICI ESTRATTI ===")
-    log("================================================")
-    for idx, item in enumerate(deduped_items, 1):
-        log(f"  {idx:03d}. [{item['engine']:10s}] {item['url']}")
-    log("================================================")
-    log(f"Output scritto in: {OUTPUT_FILE.resolve()}")
-
-
-if __name__ == "__main__":
-    main()
+name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  machine2_cdp_insocket:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          # COPIA DEI FONT WINDOWS PER CLOAKBROWSER (Essenziale per sistemi Linux minimi)
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
+
+      - name: Installazione Dipendenze Scraper
+        run: |
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]"
+          playwright install-deps chromium
+
+      - name: Setup 6 WARProxy Docker Containers (IPv6)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+
+            if [ $i -lt 6 ]; then
+              DELAY=$((3 + RANDOM % 2))
+              echo "Attesa scaglionata di $DELAY secondi per il prossimo container..."
+              sleep $DELAY
+            fi
+          done
+
+          echo "Attesa finale inizializzazione dei tunnel..."
+          sleep 10
+
+      - name: Verifica IP IPv6 con Auto-healing (socks5h)
+        run: |
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "=================================================="
+            echo "VERIFICA E AUTO-HEALING CONTAINER $i (PORTA $PORT):"
+            
+            DELAY=$((3 + RANDOM % 2))
+            sleep $DELAY
+
+            SUCCESS=false
+            for tentativo in {1..5}; do
+              echo "Tentativo $tentativo/5 per container $i..."
+              IP=$(curl -s --max-time 10 --proxy socks5h://127.0.0.1:$PORT https://api6.ipify.org?format=json)
+              
+              if [ $? -eq 0 ] && [ ! -z "$IP" ]; then
+                echo "Container $i pronto! IP: $IP"
+                SUCCESS=true
+                break
+              else
+                echo "Container $i non risponde. Riavvio in corso..."
+                docker restart warproxy-$i
+                sleep 5
+              fi
+            done
+
+            if [ "$SUCCESS" = "false" ]; then
+              echo "ERRORE CRITICO: Il container $i non è hackerabile o raggiungibile dopo 5 riavvii."
+              exit 1
+            fi
+          done
+          echo "=================================================="
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
+      - name: Creazione script Python (Profile Warming HTTP/1.1 -> HTTP/2)
+        run: |
+          cat << 'EOF' > m2_insocket.py
+          import time
+          import sys
+          import random
+          import math
+          import os
+          from cloakbrowser import launch_persistent_context
+          from bs4 import BeautifulSoup
+          from urllib.parse import urlparse, parse_qs
+
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
+          WARMUP_QUERIES = [
+              "weather tomorrow", "world news today", "how to cook pasta", 
+              "best movies 2026", "wikipedia space exploration", "historical events today"
+          ]
+
+          if len(sys.argv) < 2:
+              sys.exit(1)
+
+          node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
+
+          num_nodes = 6
+          slice_size = math.ceil(len(TARGETS) / num_nodes)
+          MY_TARGETS = TARGETS[(node_id-1)*slice_size : node_id*slice_size]
+
+          def extract_text(html_content, url):
+              soup = BeautifulSoup(html_content, 'html.parser')
+              text = soup.get_text(separator=' ', strip=True)
+              if any(site in url for site in DIAGNOSTIC_SITES):
+                  return text
+              return text[:5000]
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
+
+          def get_safe_content(page, retries=3):
+              for attempt in range(retries):
+                  try:
+                      return page.content()
+                  except Exception as e:
+                      if "navigating" in str(e).lower() or "execution context" in str(e).lower():
+                          time.sleep(3)
+                      else:
+                          break
+              return ""
+
+          def run_warmup_phase_http1(profile_dir, active_port, extra_args_base, node_id):
+              """Avvia temporaneamente il browser in HTTP/1.1 per aggirare i controlli TLS e riscaldare i cookie."""
+              print(f"[NODO {node_id}] [Warmup HTTP/1.1] Inizializzazione profilo...", flush=True)
+              warmup_args = extra_args_base + ["--disable-http2"] # Disabilita HTTP/2 per la sessione iniziale
+              
+              try:
+                  context = launch_persistent_context(
+                      profile_dir,
+                      headless=False,
+                      humanize=True,
+                      human_config={
+                          "typing_delay": 120,
+                          "mistype_chance": 0.03,
+                          "idle_between_actions": True
+                      },
+                      proxy=f"socks5://127.0.0.1:{active_port}",
+                      geoip=True,
+                      viewport={"width": 1920, "height": 1080},
+                      args=warmup_args
+                  )
+                  
+                  page = context.new_page()
+                  
+                  # 1. Visita la home page di Reddit in HTTP/1.1 (Specifica richiesta)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Navigazione su Reddit Home...", flush=True)
+                  try:
+                      page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(random.uniform(8, 12)) # Tempo per depositare i cookie primari
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Reddit: {e}", flush=True)
+                      
+                  # 2. Visita Google in HTTP/1.1 ed esegue una query
+                  query = random.choice(WARMUP_QUERIES)
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Ricerca Google: '{query}'", flush=True)
+                  try:
+                      page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=30000)
+                      time.sleep(random.uniform(2, 4))
+                      accept_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
+                      if accept_btn.is_visible(timeout=2000):
+                          accept_btn.click()
+                          time.sleep(2)
+                      
+                      page.type("textarea[name='q'], input[name='q']", query)
+                      page.keyboard.press("Enter")
+                      time.sleep(random.uniform(5, 8))
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore su Google: {e}", flush=True)
+
+                  page.close()
+                  context.close()
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Completato. Cookie registrati.", flush=True)
+              except Exception as e:
+                  print(f"[NODO {node_id}] [Warmup HTTP/1.1] Errore critico: {e}", flush=True)
+
+          # --- INIZIO SCRIPT NORMALE ---
+          random_seed = str(random.randint(100000, 999999))
+          home_dir = os.path.expanduser("~")
+          windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+          profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}")
+
+          extra_args_base = [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              f"--fingerprint={random_seed}",
+              f"--fingerprint-fonts-dir={windows_fonts_dir}"
+          ]
+
+          # Fase 1: Esecuzione del riscaldamento in HTTP/1.1 (Reddit + Google)
+          run_warmup_phase_http1(profile_dir, ACTIVE_PORT, extra_args_base, node_id)
+
+          # Pausa di assestamento tra le sessioni
+          time.sleep(3)
+
+          # Fase 2: Avvio dello Scraping principale in HTTP/2 (Nessun flag --disable-http2 passato)
+          print(f"[NODO {node_id}] [Scraping HTTP/2] Avvio sessione principale...", flush=True)
+          context = launch_persistent_context(
+              profile_dir,
+              headless=False,
+              humanize=True,
+              human_config={
+                  "typing_delay": 100,
+                  "mistype_chance": 0.03,
+                  "idle_between_actions": True
+              },
+              proxy=f"socks5://127.0.0.1:{ACTIVE_PORT}",
+              geoip=True,
+              viewport={"width": 1920, "height": 1080},
+              args=extra_args_base
+          )
+
+          results = f"\n{'#'*60}\nREPORT NODO {node_id} (PORTA {ACTIVE_PORT})\n{'#'*60}\n"
+
+          for url in MY_TARGETS:
+              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
+              print(f"[NODO {node_id}] -> {url}", flush=True)
+              page = None
+              
+              try:
+                  page = context.new_page()
+                  query_to_search = get_query_from_url(url)
+
+                  if "startpage.com" in url:
+                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(3)
+                      try:
+                          page.type("input#q", query_to_search)
+                          page.keyboard.press("Enter")
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
+                  elif "html.duckduckgo.com" in url:
+                      page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                      time.sleep(3)
+                      try:
+                          page.type("input[name=q]", query_to_search)
+                          page.keyboard.press("Enter")
+                      except Exception:
+                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
+                  else:
+                      page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                  
+                  # Attesa passiva randomica
+                  passive_wait = random.randint(12, 22)
+                  print(f"[NODO {node_id}] In attesa di risoluzione passiva per {passive_wait}s...", flush=True)
+                  time.sleep(passive_wait)
+
+                  if "pixelscan.net" in url:
+                      try:
+                          btn = page.locator("text=Scan My Browser Now").first
+                          if btn.is_visible(timeout=3000):
+                              btn.click() 
+                              time.sleep(8)
+                      except Exception:
+                          pass
+                      
+                  if "creepjs" in url:
+                      time.sleep(6) 
+
+                  raw_html = get_safe_content(page)
+                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
+
+              except Exception as e:
+                  print(f"[NODO {node_id}] Errore: {e}", flush=True)
+                  results += f"ERRORE GLOBALE: {str(e)}\n"
+              finally:
+                  if page:
+                      try:
+                          page.close()
+                      except Exception:
+                          pass
+                  
+                  # Intervallo randomico tra una visita e l'altra
+                  visit_interval = random.uniform(4.0, 9.0)
+                  print(f"[NODO {node_id}] Pausa di {visit_interval:.2f}s prima del prossimo target...", flush=True)
+                  time.sleep(visit_interval)
+
+          context.close()
+
+          with open(f"output_node_{node_id}.txt", "w", encoding="utf-8") as f:
+              f.write(results)
+          EOF
+
+      - name: Esecuzione Scraping Parallelo (6 Nodi con Staggered Delay)
+        run: |
+          echo "Avvio processi paralleli su 6 nodi con avvio scaglionato casuale..."
+          
+          for i in {1..6}; do
+            echo "Inizializzazione del Nodo $i..."
+            python -u m2_insocket.py $i > node$i.log 2>&1 &
+            
+            if [ $i -lt 6 ]; then
+              # Delay casuale tra 5 e 15 secondi prima di far partire lo scraper successivo
+              DELAY=$((5 + RANDOM % 11))
+              echo "Nodo $i avviato. Attesa casuale di $DELAY secondi prima del prossimo nodo..."
+              sleep $DELAY
+            fi
+          done
+
+          echo "Tutti i nodi sono stati instanziati. Attesa del completamento dello scraping..."
+          wait
+
+          echo "=== LOG NODO 1 ===" && cat node1.log || true
+          echo "=== LOG NODO 2 ===" && cat node2.log || true
+          echo "=== LOG NODO 3 ===" && cat node3.log || true
+          echo "=== LOG NODO 4 ===" && cat node4.log || true
+          echo "=== LOG NODO 5 ===" && cat node5.log || true
+          echo "=== LOG NODO 6 ===" && cat node6.log || true
+          echo "=================="
+
+          touch output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt
+          cat output_node_1.txt output_node_2.txt output_node_3.txt output_node_4.txt output_node_5.txt output_node_6.txt > output_macchina2_cdp.txt
+
+      - name: Upload Artifact Macchina 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
