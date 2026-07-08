@@ -17,7 +17,6 @@ jobs:
       - name: Installazione Font di Sistema e Windows 11 Reali (Host)
         run: |
           sudo apt-get update
-          # Installazione di cabextract, xfonts-utils e unzip (fondamentali per scompattare i font)
           sudo apt-get install -y cabextract xfonts-utils unzip wget
           
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -29,7 +28,6 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           
-          # Scarichiamo un archivio reale dei font nativi di Windows 11 (Segoe UI, Calibri, ecc.) per una consistenza totale
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
           find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
@@ -50,133 +48,12 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP con Anycast Shuffling (Step 1)
+      - name: Scrittura dei File e Script Python di Supporto (Host)
         run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          # IP Anycast Cloudflare stabili per forzare percorsi di instradamento diversi
-          ANYCAST_IPS=(
-            "162.159.192.1"
-            "162.159.193.2"
-            "162.159.195.3"
-            "188.114.96.4"
-            "188.114.97.5"
-            "162.159.192.6"
-          )
-
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            IP=${ANYCAST_IPS[$((i-1))]}
-            echo "Avvio container warproxy-$i sulla porta $PORT vincolato all'Anycast IP $IP..."
-            docker run --name warproxy-$i \
-              --network host \
-              --add-host "engage.cloudflareclient.com:$IP" \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 1.0
-          done
-
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 8
-
-      - name: Creazione Script di Verifica Connessioni
-        run: |
-          cat << 'EOF' > verify_warp_ips.py
-          import subprocess
-          import time
-          import sys
-
-          PORTS = [40001, 40002, 40003, 40004, 40005, 40006]
-
-          def get_ip(port, url):
-              try:
-                  cmd = ["curl", "-s", "-m", "5", "--socks5-hostname", f"127.0.0.1:{port}", url]
-                  res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                  return res.stdout.strip()
-              except Exception:
-                  return None
-
-          def main():
-              print("=== VERIFICA CONNETTIVITÀ E UNICITÀ IP ===")
-              ipv4s = {}
-              ipv6s = {}
-              all_ok = True
-              
-              for i, port in enumerate(PORTS):
-                  node_id = i + 1
-                  ip4 = get_ip(port, "https://api.ipify.org")
-                  ip6 = get_ip(port, "https://api6.ipify.org")
-                  print(f"Nodo {node_id} (Porta {port}) -> IPv6: {ip6} | IPv4: {ip4}", flush=True)
-                  
-                  if not ip4 or not ip6:
-                      print(f"  [ERRORE] Nodo {node_id} offline o parzialmente irraggiungibile!", flush=True)
-                      all_ok = False
-                  else:
-                      ipv4s[port] = ip4
-                      ipv6s[port] = ip6
-
-              if not all_ok:
-                  sys.exit(1)
-
-              unique_v4 = set(ipv4s.values())
-              unique_v6 = set(ipv6s.values())
-              print(f"\nUnicità IPv4: {len(unique_v4)}/6 | Unicità IPv6: {len(unique_v6)}/6", flush=True)
-              
-              if len(unique_v6) < 6:
-                  print("[WARN] Rilevate collisioni su IPv6, ma procedo.", flush=True)
-
-          if __name__ == "__main__":
-              main()
-          EOF
-
-      - name: Verifica IP Step 1
-        run: |
-          python -u verify_warp_ips.py
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 1
-        run: |
-          cat << 'EOF' > m2_step1_setup.py
-          import json
-          TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
-          ]
-
-          for i in range(1, 7):
-              chunk = TARGETS[i-1::6]
-              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-          print("Code distribuite Step 1 generate con successo.")
-          EOF
-          python -u m2_step1_setup.py
-
-      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
-        run: |
+          # 1. extraction_utils.py
           cat << 'EOF' > extraction_utils.py
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
-
           from bs4 import BeautifulSoup
           from markdownify import markdownify as md_convert
 
@@ -311,8 +188,7 @@ jobs:
               return markdown_text
           EOF
 
-      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
-        run: |
+          # 2. nugget_extractor.py
           cat << 'EOF' > nugget_extractor.py
           import json
           import re
@@ -606,8 +482,7 @@ jobs:
               return None
           EOF
 
-      - name: Creazione Processo Estrattore Nugget INDIPENDENTE (Host)
-        run: |
+          # 3. nugget_estrattore_standalone.py
           cat << 'EOF' > nugget_estrattore_standalone.py
           import asyncio
           import json
@@ -730,8 +605,7 @@ jobs:
               asyncio.run(main())
           EOF
 
-      - name: Creazione Script Python - STEP 1 (Host)
-        run: |
+          # 4. m2_step1.py
           cat << 'EOF' > m2_step1.py
           import time
           import sys
@@ -885,8 +759,7 @@ jobs:
               asyncio.run(main())
           EOF
 
-      - name: Creazione Script Python - STEP 2 (Host)
-        run: |
+          # 5. m2_step2.py
           cat << 'EOF' > m2_step2.py
           import asyncio
           import time
@@ -1136,39 +1009,7 @@ jobs:
               asyncio.run(main())
           EOF
 
-      - name: Setup Container WARP (Step 1)
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          # 6 IP Anycast ufficiali distinti per differenziare le rotte fin dall'handshake iniziale
-          ANYCAST_IPS=(
-            "162.159.192.1"
-            "162.159.193.10"
-            "162.159.195.100"
-            "188.114.96.1"
-            "188.114.97.10"
-            "162.159.192.15"
-          )
-
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            IP=${ANYCAST_IPS[$((i-1))]}
-            echo "Avvio container warproxy-$i sulla porta $PORT con Anycast IP $IP..."
-            docker run --name warproxy-$i \
-              --network host \
-              --add-host "engage.cloudflareclient.com:$IP" \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 1.0
-          done
-
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 8
-
-      - name: Creazione Script di Verifica Connessioni
-        run: |
+          # 6. verify_warp_ips.py
           cat << 'EOF' > verify_warp_ips.py
           import subprocess
           import time
@@ -1214,6 +1055,37 @@ jobs:
               main()
           EOF
 
+      - name: Setup Container WARP (Step 1)
+        run: |
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          # 6 IP Anycast ufficiali distinti per differenziare le rotte fin dall'handshake iniziale
+          ANYCAST_IPS=(
+            "162.159.192.1"
+            "162.159.193.10"
+            "162.159.195.100"
+            "188.114.96.1"
+            "188.114.97.10"
+            "162.159.192.15"
+          )
+
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            IP=${ANYCAST_IPS[$((i-1))]}
+            echo "Avvio container warproxy-$i sulla porta $PORT con Anycast IP $IP..."
+            docker run --name warproxy-$i \
+              --network host \
+              --add-host "engage.cloudflareclient.com:$IP" \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 2.0
+          done
+
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 12
+
       - name: Verifica IP Step 1
         run: |
           python -u verify_warp_ips.py
@@ -1245,12 +1117,12 @@ jobs:
       - name: Refresh IP Container per lo STEP 2
         run: |
           echo 'Rigenerazione totale dei container con rotazione degli IP Anycast...'
-          # Rimuove i vecchi container
+          # Rimuove i vecchi container dello Step 1
           for i in {1..6}; do
             docker rm -f warproxy-$i || true
           done
 
-          # Lista di IP Anycast alternativi per lo Step 2
+          # Lista di IP Anycast alternativi e disgiunti per lo Step 2
           ANYCAST_IPS_STEP2=(
             "162.159.192.10"
             "162.159.193.110"
@@ -1271,11 +1143,11 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep i.0
+            sleep 2.0
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 8
+          sleep 12
 
       - name: Verifica IP Step 2
         run: |
