@@ -63,7 +63,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 10.5
+            sleep 4
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
@@ -886,9 +886,13 @@ jobs:
 
       - name: Refresh IP Container per lo STEP 2
         run: |
-          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          echo 'Riavvio dei container in sequenza con delay...'
+          for i in {1..6}; do
+            docker restart "warproxy-$i"
+            if [ $i -lt 6 ]; then sleep 5; fi
+          done
           sleep 6
+
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
