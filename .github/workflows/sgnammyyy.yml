@@ -14,10 +14,9 @@ jobs:
       FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
-      - name: Installazione Font di Sistema e Windows 11 Reali
+      - name: Installazione Font di Sistema e Windows 11 Reali (Host)
         run: |
           sudo apt-get update
-          # Installazione di cabextract, xfonts-utils e unzip (fondamentali per scompattare i font)
           sudo apt-get install -y cabextract xfonts-utils unzip wget
           
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -29,172 +28,16 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           
-          # Scarichiamo un archivio reale dei font nativi di Windows 11 (Segoe UI, Calibri, ecc.) per una consistenza totale
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
           find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
           
           fc-cache -f -v
 
-      - name: Installazione Dipendenze Scraper
+      - name: Installazione Dipendenze Scraper (Host per Estrattore Nugget)
         run: |
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
           playwright install-deps chromium
-
-      - name: Avvio Xvfb (Virtual Display Headful)
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Pre-inizializzazione Cache CloakBrowser
-        run: |
-          python -m cloakbrowser install
-
-      - name: Pull Immagine WARP
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-      - name: Creazione Script di Verifica e Rotazione IP WARP
-        run: |
-          cat << 'EOF' > rotate_warp_ips.py
-          import subprocess
-          import time
-          import sys
-
-          PORTS = [40001, 40002, 40003, 40004, 40005, 40006]
-
-          # Pool di endpoint di Ingress stabili per differenziare l'instradamento Anycast
-          ENDPOINT_POOL = [
-              "162.159.192.1:2408", "162.159.193.2:2408", "162.159.195.3:2408",
-              "188.114.96.4:2408", "188.114.97.5:2408", "162.159.192.6:2408",
-              "162.159.193.7:2408", "162.159.195.8:2408", "188.114.96.9:2408",
-              "188.114.97.10:2408", "162.159.192.11:2408", "162.159.193.12:2408",
-              "162.159.195.13:2408", "188.114.96.14:2408", "188.114.97.15:2408",
-              "162.159.192.16:2408", "162.159.193.17:2408", "162.159.195.18:2408",
-              "188.114.96.19:2408", "188.114.97.20:2408"
-          ]
-
-          # Assegnazione di partenza degli endpoint
-          node_endpoint_indices = {i+1: i for i in range(6)}
-
-          # Provider IP dual-stack stabili e privi di limiti stringenti di traffico
-          IPV6_PROVIDERS = ["https://api6.ipify.org", "https://v6.ident.me", "https://ipv6.icanhazip.com"]
-          IPV4_PROVIDERS = ["https://api.ipify.org", "https://v4.ident.me", "https://ipv4.icanhazip.com"]
-
-          def get_ip(port, providers):
-              for url in providers:
-                  try:
-                      cmd = ["curl", "-s", "-m", "5", "--socks5-hostname", f"127.0.0.1:{port}", url]
-                      res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                      ip = res.stdout.strip()
-                      if ip and len(ip) > 5:
-                          return ip
-                  except Exception:
-                      continue
-              return None
-
-          def recreate_container(node_id, endpoint_index):
-              container_name = f"warproxy-{node_id}"
-              port = 40000 + node_id
-              endpoint = ENDPOINT_POOL[endpoint_index % len(ENDPOINT_POOL)]
-              
-              # Distrugge completamente lo stato e la registrazione precedente
-              subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-              
-              cmd = [
-                  "docker", "run", "--name", container_name,
-                  "--network", "host",
-                  "-e", f"SOCKS5_PORT={port}",
-                  "-e", "DNS=2606:4700:4700::1111,2606:4700:4700::1001",
-                  "-e", f"ENDPOINT={endpoint}",
-                  "-e", "VERBOSE=true",
-                  "-d", "ghcr.io/kingcc/warproxy:latest"
-              ]
-              subprocess.run(cmd, capture_output=True)
-
-          def main():
-              print("[INIT] Avvio/Rigenerazione controllata dei container con Anycast Shuffling...", flush=True)
-              for node_id in range(1, 7):
-                  recreate_container(node_id, node_endpoint_indices[node_id])
-                  time.sleep(1.0)
-
-              print("[INFO] Attesa stabilizzazione iniziale dei tunnel (8s)...", flush=True)
-              time.sleep(8.0)
-
-              max_attempts = 3
-              for attempt in range(1, max_attempts + 1):
-                  print(f"\n--- [TENTATIVO {attempt}/{max_attempts}] Verifica unicità IP ---", flush=True)
-                  
-                  ipv6_map = {}
-                  ipv4_map = {}
-                  node_ipv6 = {}
-                  node_ipv4 = {}
-
-                  for i, port in enumerate(PORTS):
-                      node_id = i + 1
-                      time.sleep(0.5)
-                      ip6 = get_ip(port, IPV6_PROVIDERS)
-                      ip4 = get_ip(port, IPV4_PROVIDERS)
-                      
-                      node_ipv6[node_id] = ip6
-                      node_ipv4[node_id] = ip4
-                      print(f"Nodo {node_id} (Porta {port}) -> IPv6: {ip6} | IPv4: {ip4}", flush=True)
-                      
-                      if ip6:
-                          ipv6_map.setdefault(ip6, []).append(node_id)
-                      if ip4:
-                          ipv4_map.setdefault(ip4, []).append(node_id)
-
-                  nodes_to_recreate = set()
-                  
-                  # Rilevamento collisioni IPv6
-                  for ip, nodes in ipv6_map.items():
-                      if len(nodes) > 1:
-                          for duplicate_node in nodes[1:]:
-                              nodes_to_recreate.add(duplicate_node)
-                              
-                  # Rilevamento collisioni IPv4
-                  for ip, nodes in ipv4_map.items():
-                      if len(nodes) > 1:
-                          for duplicate_node in nodes[1:]:
-                              nodes_to_recreate.add(duplicate_node)
-
-                  if not nodes_to_recreate:
-                      print("\n[SUCCESSO] Tutti i nodi hanno IP unici sia IPv4 che IPv6!", flush=True)
-                      return
-
-                  print(f"\n[COLLISIONE] Duplicati rilevati sui nodi: {list(nodes_to_recreate)}", flush=True)
-                  
-                  if attempt == max_attempts:
-                      print("[WARN] Raggiunto il limite massimo di tentativi. Procedo comunque.", flush=True)
-                      return
-
-                  nodes_list = sorted(list(nodes_to_recreate))
-                  if len(nodes_list) == 1:
-                      target_node = nodes_list[0]
-                      node_endpoint_indices[target_node] += 6
-                      print(f"[DELAY] 1 solo nodo in collisione. Attesa 2 secondi prima della rigenerazione...", flush=True)
-                      time.sleep(2.0)
-                      recreate_container(target_node, node_endpoint_indices[target_node])
-                  else:
-                      print(f"[DELAY] Collisioni multiple. Avvio scaglionato (4s per ogni nodo successivo)...", flush=True)
-                      for idx, target_node in enumerate(nodes_list):
-                          node_endpoint_indices[target_node] += (6 + idx)
-                          delay = 4 * (idx + 1)
-                          print(f"[DELAY] Nodo {target_node} attende {delay}s prima della rigenerazione...", flush=True)
-                          time.sleep(4.0)
-                          recreate_container(target_node, node_endpoint_indices[target_node])
-
-                  print("[INFO] Attesa stabilizzazione tunnel WARP (8s)...", flush=True)
-                  time.sleep(8.0)
-
-          if __name__ == "__main__":
-              sys.exit(main())
-          EOF
-
-      - name: Avvio e Verifica Unicità IP Iniziali (Step 1)
-        run: |
-          python -u rotate_warp_ips.py
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -224,7 +67,6 @@ jobs:
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
-          # Suddivisione matematica statica (Chunking) per performance ottimali
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
@@ -668,7 +510,7 @@ jobs:
               return None
           EOF
 
-      - name: Creazione Processo Estrattore Nugget INDIPENDENTE
+      - name: Creazione Processo Estrattore Nugget INDIPENDENTE (Host)
         run: |
           cat << 'EOF' > nugget_estrattore_standalone.py
           import asyncio
@@ -792,7 +634,7 @@ jobs:
               asyncio.run(main())
           EOF
 
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, disaccoppiato da Gemini)
+      - name: Creazione Script Python - STEP 1 (Eseguito all'interno del container)
         run: |
           cat << 'EOF' > m2_step1.py
           import time
@@ -810,17 +652,13 @@ jobs:
           if len(sys.argv) < 2:
               sys.exit(1)
           node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
-          def carica_gemini_api_keys_placeholder():
-              pass
-
-          async def verify_proxy_active(port, max_retries=5, delay=5):
+          async def verify_network_active():
+              # Verifica la connettività globale diretta del container (passa nativamente da tun0)
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for _ in range(max_retries):
+              for _ in range(5):
                   try:
                       resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
                       if resp.status_code == 200:
@@ -828,7 +666,7 @@ jobs:
                           return True
                   except Exception:
                       pass
-                  await asyncio.sleep(delay)
+                  await asyncio.sleep(2)
               await test_session.close()
               return False
 
@@ -881,8 +719,9 @@ jobs:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
           async def main():
-              if not await verify_proxy_active(ACTIVE_PORT):
-                  sys.exit(0)
+              if not await verify_network_active():
+                  print(f"[NODO {node_id}] Rete non attiva nel container.", flush=True)
+                  sys.exit(1)
 
               queue_file = f"/tmp/step1_queue_{node_id}.json"
               if not os.path.exists(queue_file):
@@ -895,7 +734,7 @@ jobs:
               failed_targets = []
 
               session = curl_requests.AsyncSession(impersonate="chrome120")
-              session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+              # Rimosse le impostazioni del proxy locale: il traffico è forzato sulla VPN tun0 nativa
               session.headers.update({
                   "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
@@ -906,7 +745,7 @@ jobs:
               for url in targets:
                   if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
                       print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
-                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP directo.", flush=True)
+                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
                       failed_targets.append(url)
                       continue
 
@@ -949,61 +788,7 @@ jobs:
               asyncio.run(main())
           EOF
 
-      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
-        run: |
-          touch scraped_content.jsonl
-          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
-          echo $! > estrattore_nugget.pid
-          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
-
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
-      - name: Refresh IP Container per lo STEP 2
-        run: |
-          echo 'Rigenerazione totale dei container con hard-re-registration e Anycast Shuffling...'
-          python -u rotate_warp_ips.py
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 2
-        run: |
-          cat << 'EOF' > m2_step2_setup.py
-          import json
-          import os
-
-          merged_failed = []
-          for i in range(1, 7):
-              filename = f"failed_node_{i}.json"
-              if os.path.exists(filename):
-                  with open(filename, "r", encoding="utf-8") as f:
-                      try: merged_failed.extend(json.load(f))
-                      except Exception: pass
-
-          unique_failed = list(dict.fromkeys(merged_failed))
-
-          for i in range(1, 7):
-              chunk = unique_failed[i-1::6]
-              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
-          EOF
-          python -u m2_step2_setup.py
-
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, disaccoppiato da Gemini)
+      - name: Creazione Script Python - STEP 2 (Eseguito all'interno del container)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -1021,7 +806,6 @@ jobs:
           if len(sys.argv) < 2:
               sys.exit(1)
           node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
@@ -1050,10 +834,9 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Impossibile registrare il record per l'estrattore: {e}", flush=True)
 
-          async def verify_proxy_active(port, max_retries=6, delay=5):
+          async def verify_network_active():
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for tentativo in range(max_retries):
+              for _ in range(5):
                   try:
                       resp = await test_session.get("https://api6.ipify.org?format=json", timeout=6)
                       if resp.status_code == 200:
@@ -1061,9 +844,7 @@ jobs:
                           return True
                   except Exception:
                       pass
-                  print(f"[NODO {node_id}] Proxy non ancora pronto sulla porta {port}, "
-                        f"tentativo {tentativo + 1}/{max_retries}...", flush=True)
-                  await asyncio.sleep(delay)
+                  await asyncio.sleep(2)
               await test_session.close()
               return False
 
@@ -1114,24 +895,22 @@ jobs:
                       f.write("")
                   return
 
-              if not await verify_proxy_active(INITIAL_PORT):
-                  print(f"[NODO {node_id}] Proxy non attivo sulla porta {INITIAL_PORT}.", flush=True)
+              if not await verify_network_active():
+                  print(f"[NODO {node_id}] Connessione non attiva all'interno del container.")
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: proxy non disponibile, "
-                               f"nodo abortito\n{'#'*60}\n")
+                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2: VPN non disponibile\n{'#'*60}\n")
                   return
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
-              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+              windows_fonts_dir = "/root/.local/share/fonts/windows"
 
-              # Generazione deterministica e coerente del seed di fingerprint per il profilo persistente
+              # Generazione deterministica del fingerprint seed basata sul Run ID e Node ID
               run_id_str = os.environ.get("GITHUB_RUN_ID", "1")
               try:
                   run_id = int(run_id_str)
               except ValueError:
                   run_id = 1
-              # Creiamo un seme unico per nodo ma fisso durante tutto il run corrente
               fingerprint_seed = 100000 + (run_id % 10000) * 10 + node_id
 
               # Configurazione geometrica e strutturale per Windows 11
@@ -1158,7 +937,7 @@ jobs:
                           headless=False,
                           humanize=True,
                           human_preset="careful",
-                          proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                          # geoip=True gestisce in automatico il fuso orario basandosi sull'IP di tun0
                           geoip=True,
                           viewport={"width": 1920, "height": 940},
                           args=base_args
@@ -1258,29 +1037,161 @@ jobs:
               asyncio.run(main())
           EOF
 
-      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
-        if: always()
+      - name: Creazione di Dockerfile ed Entrypoint Unificato per i Container Scraper (Host)
         run: |
-          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
-          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
-          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
-          TAIL_PID=$!
+          # 1. Creazione del Dockerfile per l'ambiente isolato
+          cat << 'EOF' > Dockerfile
+          FROM ubuntu:24.04
 
-          PIDS=()
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          # Installa dipendenze base, Xvfb per il browser e Python
+          RUN apt-get update && apt-get install -y \
+              curl gpg xvfb python3 python3-pip \
+              libgbm1 libasound2t64 libnspr4 libnss3 libxss1 libxtst6 libxshmfence1 \
+              fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+              fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf \
+              && rm -rf /var/lib/apt/lists/*
+
+          # Installa Cloudflare WARP
+          RUN curl -fsSL https://cloudflareclient.com | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+              && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://cloudflareclient.com noble main" | tee /etc/apt/sources.list.d/cloudflare-warp.list \
+              && apt-get update && apt-get install -y cloudflare-warp \
+              && rm -rf /var/lib/apt/lists/*
+
+          # Installa librerie di scraping e CloakBrowser
+          RUN pip3 install --no-cache-dir beautifulsoup4 playwright requests curl-cffi markdownify google-genai --break-system-packages
+          RUN pip3 install --no-cache-dir "cloakbrowser[geoip]" --break-system-packages
+          
+          # Scarica il binario di Cloakbrowser all'interno dell'immagine per massimizzare la velocità
+          RUN python3 -c "from cloakbrowser import ensure_binary; ensure_binary()"
+
+          RUN fc-cache -f -v
+
+          COPY entrypoint.sh /entrypoint.sh
+          RUN chmod +x /entrypoint.sh
+
+          ENV DISPLAY=:99
+
+          ENTRYPOINT ["/entrypoint.sh"]
+          EOF
+
+          # 2. Creazione dello script di Entrypoint
+          cat << 'EOF' > entrypoint.sh
+          #!/bin/bash
+          set -e
+
+          # Avvio Xvfb in background per simulare un monitor (necessario per Chromium in Docker)
+          Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          sleep 1
+
+          # Avvio del demone WARP
+          warp-svc --accept-tos > /dev/null 2>&1 &
+          sleep 2
+
+          # Registrazione e connessione (Garantisce un IP pubblico IPv4/IPv6 unico e separato per questo namespace)
+          echo "[WARP] Registrazione nuovo client anonimo..."
+          warp-cli --accept-tos registration new > /dev/null
+          warp-cli --accept-tos mode warp > /dev/null
+          warp-cli --accept-tos connect > /dev/null
+          sleep 6
+
+          echo "[INFO] Verifica IP Pubblici assegnati al container:"
+          echo -n "  - IPv4: " && curl -4 -s https://icanhazip.com || echo "Nessun indirizzo IPv4"
+          echo -n "  - IPv6: " && curl -6 -s https://icanhazip.com || echo "Nessun indirizzo IPv6"
+
+          # Esegue lo script utente
+          exec "$@"
+          EOF
+
+      - name: Build Immagine Docker Unificata
+        run: |
+          docker build -t cloak-warp-scraper .
+
+      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
+        run: |
+          touch scraped_content.jsonl
+          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
+          echo $! > estrattore_nugget.pid
+          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
+
+      - name: Esecuzione Scraping Parallelo - STEP 1 (Mono-Container Isolati)
+        run: |
+          echo "Avvio dei 6 nodi isolati per lo STEP 1..."
           for i in {1..6}; do
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
+            # Avviamo ciascun container in background passandogli la directory di lavoro, tmp e i font
+            docker run -d \
+              --name "worker_step1_$i" \
+              --cap-add=NET_ADMIN \
+              --shm-size=2gb \
+              -v /tmp:/tmp \
+              -v $(pwd):/app \
+              -w /app \
+              -v ~/.local/share/fonts/windows:/root/.local/share/fonts/windows \
+              cloak-warp-scraper python3 m2_step1.py $i
+            sleep 2.0
           done
 
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
+          echo "Attesa completamento dei container Step 1..."
           for i in {1..6}; do
-            docker stop warproxy-$i || true
-            docker rm warproxy-$i || true
+            docker wait "worker_step1_$i" || true
+            echo "--- LOGS CONTAINER NODO $i - STEP 1 ---"
+            docker logs "worker_step1_$i" || true
+            docker rm -f "worker_step1_$i" || true
           done
 
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        run: |
+          cat << 'EOF' > m2_step2_setup.py
+          import json
+          import os
+
+          merged_failed = []
+          for i in range(1, 7):
+              filename = f"failed_node_{i}.json"
+              if os.path.exists(filename):
+                  with open(filename, "r", encoding="utf-8") as f:
+                      try: merged_failed.extend(json.load(f))
+                      except Exception: pass
+
+          unique_failed = list(dict.fromkeys(merged_failed))
+
+          for i in range(1, 7):
+              chunk = unique_failed[i-1::6]
+              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          EOF
+          python -u m2_step2_setup.py
+
+      - name: Esecuzione Scraping Parallelo - STEP 2 (Mono-Container con Nuove Sessioni e Nuovi IP)
+        run: |
+          echo "Avvio dei 6 nodi isolati per lo STEP 2..."
+          for i in {1..6}; do
+            # Ogni run crea una sessione nuova con IP generati ex-novo da Cloudflare
+            docker run -d \
+              --name "worker_step2_$i" \
+              --cap-add=NET_ADMIN \
+              --shm-size=2gb \
+              -v /tmp:/tmp \
+              -v $(pwd):/app \
+              -w /app \
+              -v ~/.local/share/fonts/windows:/root/.local/share/fonts/windows \
+              -e GITHUB_RUN_ID=${{ github.run_id }} \
+              cloak-warp-scraper python3 m2_step2.py $i
+            sleep 2.0
+          done
+
+          echo "Attesa completamento dei container Step 2..."
+          for i in {1..6}; do
+            docker wait "worker_step2_$i" || true
+            echo "--- LOGS CONTAINER NODO $i - STEP 2 ---"
+            docker logs "worker_step2_$i" || true
+            docker rm -f "worker_step2_$i" || true
+          done
+
+          # Aggrega i risultati testuali generati dai nodi
           touch output_node_1_step1.txt output_node_1_step2.txt \
                 output_node_2_step1.txt output_node_2_step2.txt \
                 output_node_3_step1.txt output_node_3_step2.txt \
