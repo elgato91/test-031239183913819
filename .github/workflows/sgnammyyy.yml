@@ -1049,10 +1049,9 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--ignore-certificate-errors",
+                  f"--fingerprint={random.randint(100000, 999999)}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
-                  "--fingerprint-storage-quota=5000",
-                  f"--fingerprint=9990{node_id}",
+                  "--fingerprint-storage-quota=5000"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -1068,7 +1067,7 @@ jobs:
                           human_preset="careful",
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
-                          viewport={"width": 1920, "height": 940},
+                          viewport={"width": 1920, "height": 1080},
                           args=base_args
                       )
                       main_page = await context.new_page()
