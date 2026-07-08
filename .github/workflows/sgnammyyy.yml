@@ -1064,10 +1064,8 @@ jobs:
                           profile_dir,
                           headless=False,
                           humanize=True,
-                          human_preset="careful",
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
-                          viewport={"width": 1920, "height": 1080},
                           args=base_args
                       )
                       main_page = await context.new_page()
