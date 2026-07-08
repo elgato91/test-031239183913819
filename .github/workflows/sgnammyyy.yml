@@ -14,9 +14,10 @@ jobs:
       FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
-      - name: Installazione Font di Sistema e Windows 11 Reali (Host)
+      - name: Installazione Font di Sistema e Windows 11 Reali
         run: |
           sudo apt-get update
+          # Installazione di cabextract, xfonts-utils e unzip (fondamentali per scompattare i font)
           sudo apt-get install -y cabextract xfonts-utils unzip wget
           
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
@@ -28,13 +29,14 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           
+          # Scarichiamo un archivio reale dei font nativi di Windows 11 (Segoe UI, Calibri, ecc.) per una consistenza totale
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
           find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
           
           fc-cache -f -v
 
-      - name: Installazione Dipendenze Scraper (Host)
+      - name: Installazione Dipendenze Scraper
         run: |
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
           playwright install-deps chromium
@@ -48,12 +50,84 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Scrittura dei File e Script Python di Supporto (Host)
+      - name: Setup Container WARP (IPv6)
         run: |
-          # 1. extraction_utils.py
+          docker pull ghcr.io/kingcc/warproxy:latest
+
+          # Configurazione gai.conf per forzare la precedenza IPv6 a livello di sistema operativo
+          sudo tee /etc/gai.conf << 'EOF'
+          precedence  ::1/128       50
+          precedence  ::/0          40
+          precedence  2002::/16     30
+          precedence  ::/96         20
+          precedence  ::ffff:0:0/96 10
+          EOF
+
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -v /etc/gai.conf:/etc/gai.conf:ro \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 0.5
+          done
+
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 6
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+        run: |
+          cat << 'EOF' > m2_step1_setup.py
+          import json
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+
+          # Suddivisione matematica statica (Chunking) per performance ottimali
+          for i in range(1, 7):
+              chunk = TARGETS[i-1::6]
+              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+          print("Code distribuite Step 1 generate con successo.")
+          EOF
+          python -u m2_step1_setup.py
+
+      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
+        run: |
           cat << 'EOF' > extraction_utils.py
+          """
+          Modulo condiviso tra Step 1 e Step 2.
+          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
+          retry, validazione WAF o altra logica di scraping.
+          """
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
+
           from bs4 import BeautifulSoup
           from markdownify import markdownify as md_convert
 
@@ -61,135 +135,59 @@ jobs:
                                       "form", "noscript", "iframe", "svg"]
 
           TRACKING_PARAMS_PREFIXES = ("utm_",)
-          TRACKING_PARAMS_EXACT = {
-              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
-              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
-              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
-              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
-              "share", "share_id", "si"
-          }
+          TRACKING_PARAMS_CONTAIN = ("gclid", "fbclid")
+          TRACKING_PARAMS_EXACT = ("sigpd", "fclid", "sca_esv", "fbs", "srsltid", "sstk", "sigpd")
 
-          JUNK_LINK_DOMAINS = (
-              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
-              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
-              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
-              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
-              "addtoany.com", "sharethis.com", "mailto:"
-          )
+          def filter_query_params(url):
+              try:
+                  parsed = urlsplit(url)
+                  if not parsed.query:
+                      return url
+                  params = parse_qsl(parsed.query, keep_blank_values=True)
+                  filtered = []
+                  for k, v in params:
+                      k_lower = k.lower()
+                      if any(k_lower.startswith(p) for p in TRACKING_PARAMS_PREFIXES):
+                          continue
+                      if any(p in k_lower for p in TRACKING_PARAMS_CONTAIN):
+                          continue
+                      if k_lower in TRACKING_PARAMS_EXACT:
+                          continue
+                      filtered.append((k, v))
+                  
+                  new_query = urlencode(filtered)
+                  return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+              except Exception:
+                  return url
 
-          def _is_junk_domain(netloc, full_href):
-              netloc_low = netloc.lower()
-              href_low = full_href.lower()
-              for junk in JUNK_LINK_DOMAINS:
-                  if junk in netloc_low or href_low.startswith(junk):
-                      return True
-              return False
-
-          def _clean_query(query_string):
-              if not query_string:
+          def clean_html_to_markdown(html_content, base_url=None):
+              if not html_content:
                   return ""
-              pairs = parse_qsl(query_string, keep_blank_values=True)
-              cleaned_pairs = []
-              for key, value in pairs:
-                  key_low = key.lower()
-                  if key_low in TRACKING_PARAMS_EXACT:
-                      continue
-                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES):
-                      continue
-                  cleaned_pairs.append((key, value))
-              return urlencode(cleaned_pairs)
-
-          def clean_link_href(raw_href, page_url):
-              if not raw_href:
-                  return None
-
-              raw_href = raw_href.strip()
-              if not raw_href or raw_href.startswith("javascript:"):
-                  return None
-              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
-                  return None
-
-              try:
-                  absolute = urljoin(page_url, raw_href)
-              except Exception:
-                  return None
-
-              try:
-                  parts = urlsplit(absolute)
-              except Exception:
-                  return None
-
-              if parts.scheme not in ("http", "https", "mailto"):
-                  return None
-
-              if parts.scheme == "mailto":
-                  return None
-
-              page_parts = urlsplit(page_url)
-              same_path = (parts.netloc == page_parts.netloc and
-                           parts.path.rstrip("/") == page_parts.path.rstrip("/"))
-
-              if same_path and parts.fragment and not parts.query:
-                  return None
-
-              if _is_junk_domain(parts.netloc, absolute):
-                  return None
-
-              cleaned_query = _clean_query(parts.query)
-
-              rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
-                                     cleaned_query, ""))
-
-              page_rebuilt_parts = urlsplit(page_url)
-              page_cleaned_query = _clean_query(page_rebuilt_parts.query)
-              page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
-                                          page_rebuilt_parts.netloc,
-                                          page_rebuilt_parts.path.rstrip("/"),
-                                          page_cleaned_query, ""))
-              rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc,
-                                                 parts.path.rstrip("/"),
-                                                 cleaned_query, ""))
-              if rebuilt_no_trailing == page_rebuilt:
-                  return None
-
-              return rebuilt
-
-          def _strip_anchor_tag(a_tag):
-              a_tag.replace_with(a_tag.get_text())
-
-          def html_to_clean_markdown(html, page_url):
-              soup = BeautifulSoup(html, "html.parser")
-
-              for tag_name in STRUCTURAL_TAGS_TO_STRIP:
-                  for tag in soup.find_all(tag_name):
-                      tag.decompose()
-
-              for a_tag in soup.find_all("a"):
-                  href = a_tag.get("href")
-                  cleaned = clean_link_href(href, page_url)
-                  if cleaned is None:
-                      _strip_anchor_tag(a_tag)
-                  else:
-                      a_tag["href"] = cleaned
-                      for attr in list(a_tag.attrs):
-                          if attr not in ("href", "title"):
-                              del a_tag[attr]
-
-              markdown_text = md_convert(
-                  str(soup),
-                  heading_style="ATX",
-                  bullets="-",
-                  strip=["img"],
-              )
-
-              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
-              markdown_text = markdown_text.strip()
-
-              return markdown_text
+              soup = BeautifulSoup(html_content, "html.parser")
+              for tag in soup(STRUCTURAL_TAGS_TO_STRIP):
+                  tag.decompose()
+              
+              for a in soup.find_all("a", href=True):
+                  raw_href = a["href"]
+                  if base_url:
+                      try:
+                          raw_href = urljoin(base_url, raw_href)
+                      except Exception:
+                          pass
+                  cleaned_href = filter_query_params(raw_href)
+                  a["href"] = cleaned_href
+              
+              md = md_convert(str(soup), heading_style="ATX")
+              md = re.sub(r'\n{3,}', '\n\n', md)
+              return md.strip()
           EOF
 
-          # 2. nugget_extractor.py
+      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
+        run: |
           cat << 'EOF' > nugget_extractor.py
+          """
+          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
+          """
           import json
           import re
           import os
@@ -253,10 +251,12 @@ jobs:
           {testo}
           """
 
+
           def _stima_token(testo):
               if not testo:
                   return 0
               return max(1, len(testo) // 4)
+
 
           class TokenBucket:
               def __init__(self, capacity_tokens, refill_period_seconds=60.0):
@@ -289,6 +289,7 @@ jobs:
                                 f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
                                 flush=True)
                           await asyncio.sleep(wait_seconds)
+
 
           class GeminiKeyPool:
               def __init__(self, api_keys):
@@ -373,6 +374,7 @@ jobs:
                   pass
               return None
 
+
           def _calcola_confidence(quote_originale, testo_sorgente):
               if not quote_originale or not testo_sorgente:
                   return "low"
@@ -407,12 +409,14 @@ jobs:
               else:
                   return "low"
 
+
           def scrivi_nuggets_jsonl(nuggets, jsonl_path):
               if not nuggets:
                   return
               with open(jsonl_path, "a", encoding="utf-8") as f:
                   for n in nuggets:
                       f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
 
           async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
                                     node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
@@ -482,7 +486,8 @@ jobs:
               return None
           EOF
 
-          # 3. nugget_estrattore_standalone.py
+      - name: Creazione Processo Estrattore Nugget INDIPENDENTE
+        run: |
           cat << 'EOF' > nugget_estrattore_standalone.py
           import asyncio
           import json
@@ -502,6 +507,7 @@ jobs:
 
           _jsonl_lock = asyncio.Lock()
 
+
           def carica_gemini_api_keys():
               keys = []
               primary = os.environ.get("GEMINI_API_KEY")
@@ -516,11 +522,13 @@ jobs:
                   i += 1
               return keys
 
+
           async def salva_nuggets(nuggets):
               if not nuggets:
                   return
               async with _jsonl_lock:
                   scrivi_nuggets_jsonl(nuggets, NUGGETS_OUTPUT_PATH)
+
 
           async def main():
               api_keys = carica_gemini_api_keys()
@@ -601,11 +609,13 @@ jobs:
 
               print(f"[ESTRATTORE] Terminato. Nugget salvati in {NUGGETS_OUTPUT_PATH}", flush=True)
 
+
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
 
-          # 4. m2_step1.py
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, disaccoppiato da Gemini)
+        run: |
           cat << 'EOF' > m2_step1.py
           import time
           import sys
@@ -615,7 +625,7 @@ jobs:
           import asyncio
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
-          from extraction_utils import html_to_clean_markdown
+          from extraction_utils import clean_html_to_markdown
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -625,6 +635,11 @@ jobs:
           ACTIVE_PORT = 40000 + node_id
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
+
+
+          def carica_gemini_api_keys_placeholder():
+              pass
+
 
           async def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
@@ -641,7 +656,13 @@ jobs:
               await test_session.close()
               return False
 
+
           def validate_html(html, url, status_code):
+              """
+              Validatore robusto per l'HTML grezzo in Step 1.
+              Controlla il tag <title> e analizza solo il testo effettivamente visibile a schermo,
+              escludendo blocchi <script>, <style> e <noscript> per azzerare i falsi positivi.
+              """
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
@@ -649,17 +670,20 @@ jobs:
                   
               soup = BeautifulSoup(html, "html.parser")
               
+              # 1. Controlliamo se nel titolo del documento ci sono diciture WAF bloccanti
               title = (soup.title.string or "").strip().lower() if soup.title else ""
               waf_titles = ["access denied", "attention required", "just a moment", "checking your browser", "cloudflare"]
               for wt in waf_titles:
                   if wt in title:
                       return False, f"WAF rilevato nel titolo della pagina: {title}"
 
+              # 2. Decomponiamo i tag non testuali per evitare falsi positivi strutturali
               for element in soup(["script", "style", "noscript"]):
                   element.decompose()
                   
               visible_text = soup.get_text(separator=' ', strip=True).lower()
 
+              # 3. Controlliamo solo gli indicatori WAF e Captcha reali
               blocking_indicators = [
                   "are you a robot", "prove your humanity", "captcha verification",
                   "unusual traffic from your computer network", "robot challenge screen",
@@ -670,10 +694,12 @@ jobs:
                   if ind in visible_text:
                       return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
 
+              # 4. Verifica della lunghezza minima del testo reale caricato
               if len(visible_text) < 150:
                   return False, f"Contenuto della pagina insufficiente ({len(visible_text)} caratteri)"
 
               return True, ""
+
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
               try:
@@ -689,9 +715,9 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
+
           async def main():
               if not await verify_proxy_active(ACTIVE_PORT):
-                  print(f"[NODO {node_id}] SOCKS5 non attivo sulla porta {ACTIVE_PORT}")
                   sys.exit(0)
 
               queue_file = f"/tmp/step1_queue_{node_id}.json"
@@ -716,7 +742,7 @@ jobs:
               for url in targets:
                   if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
                       print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
-                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
+                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP directo.", flush=True)
                       failed_targets.append(url)
                       continue
 
@@ -731,7 +757,7 @@ jobs:
                               soup = BeautifulSoup(resp.text, 'html.parser')
                               text = soup.get_text(separator=' ', strip=True)
                           else:
-                              text = html_to_clean_markdown(resp.text, url)
+                              text = clean_html_to_markdown(resp.text, url)
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
 
@@ -755,11 +781,68 @@ jobs:
 
               print(f"[NODO {node_id}] STEP 1 completato.", flush=True)
 
+
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
 
-          # 5. m2_step2.py
+      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
+        run: |
+          touch scraped_content.jsonl
+          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
+          echo $! > estrattore_nugget.pid
+          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
+
+      - name: Esecuzione Scraping Parallelo - STEP 1
+        run: |
+          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
+
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+      - name: Refresh IP Container per lo STEP 2
+        run: |
+          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          sleep 6
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        run: |
+          cat << 'EOF' > m2_step2_setup.py
+          import json
+          import os
+
+          merged_failed = []
+          for i in range(1, 7):
+              filename = f"failed_node_{i}.json"
+              if os.path.exists(filename):
+                  with open(filename, "r", encoding="utf-8") as f:
+                      try: merged_failed.extend(json.load(f))
+                      except Exception: pass
+
+          unique_failed = list(dict.fromkeys(merged_failed))
+
+          for i in range(1, 7):
+              chunk = unique_failed[i-1::6]
+              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+
+          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
+          EOF
+          python -u m2_step2_setup.py
+
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, disaccoppiato da Gemini)
+        run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
           import time
@@ -771,7 +854,7 @@ jobs:
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
           from curl_cffi import requests as curl_requests
-          from extraction_utils import html_to_clean_markdown
+          from extraction_utils import clean_html_to_markdown
 
           if len(sys.argv) < 2:
               sys.exit(1)
@@ -779,6 +862,7 @@ jobs:
           INITIAL_PORT = 40000 + node_id
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
+
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -790,6 +874,7 @@ jobs:
               except Exception:
                   pass
               return default
+
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
               try:
@@ -804,6 +889,7 @@ jobs:
                       f.flush()
               except Exception as e:
                   print(f"[NODO {node_id}] Impossibile registrare il record per l'estrattore: {e}", flush=True)
+
 
           async def verify_proxy_active(port, max_retries=6, delay=5):
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
@@ -822,7 +908,12 @@ jobs:
               await test_session.close()
               return False
 
+
           def validate_html(html, url, status_code):
+              """
+              Validatore strutturale per l'HTML dello Step 2.
+              Analizza solo il testo visibile per evitare falsi positivi su tag script/style/noscript.
+              """
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
@@ -856,6 +947,7 @@ jobs:
 
               return True, ""
 
+
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file):
@@ -880,22 +972,18 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              run_id_str = os.environ.get("GITHUB_RUN_ID", "1")
-              try:
-                  run_id = int(run_id_str)
-              except ValueError:
-                  run_id = 1
-              fingerprint_seed = 100000 + (run_id % 10000) * 10 + node_id
-
+              # Configurazione geometrica e strutturale per consistenza del fingerprint (Windows 11)
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={fingerprint_seed}",
+                  f"--fingerprint={random.randint(100000, 999999)}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--fingerprint-taskbar-height=48",
-                  "--fingerprint-storage-quota=5000"
+                  "--fingerprint-storage-quota=5000",
+                  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                  "--fingerprint-webrtc-ip=auto"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -978,7 +1066,7 @@ jobs:
                           is_ok, err_msg = validate_html(raw_html, current_url, None)
 
                           if is_ok:
-                              text_for_output = html_to_clean_markdown(raw_html, current_url)
+                              text_for_output = clean_html_to_markdown(raw_html, current_url)
                               results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
                               print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
 
@@ -1005,178 +1093,10 @@ jobs:
                       except Exception:
                           pass
 
+
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
-
-          # 6. verify_warp_ips.py
-          cat << 'EOF' > verify_warp_ips.py
-          import subprocess
-          import time
-          import sys
-
-          PORTS = [40001, 40002, 40003, 40004, 40005, 40006]
-
-          def get_ip(port, url):
-              try:
-                  cmd = ["curl", "-s", "-m", "5", "--socks5-hostname", f"127.0.0.1:{port}", url]
-                  res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                  return res.stdout.strip()
-              except Exception:
-                  return None
-
-          def main():
-              print("=== VERIFICA CONNETTIVITÀ E UNICITÀ IP ===")
-              ipv4s = {}
-              ipv6s = {}
-              all_ok = True
-              
-              for i, port in enumerate(PORTS):
-                  node_id = i + 1
-                  ip4 = get_ip(port, "https://api.ipify.org")
-                  ip6 = get_ip(port, "https://api6.ipify.org")
-                  print(f"Nodo {node_id} (Porta {port}) -> IPv6: {ip6} | IPv4: {ip4}", flush=True)
-                  
-                  if not ip4 or not ip6:
-                      print(f"  [ERRORE] Nodo {node_id} offline o parzialmente irraggiungibile!", flush=True)
-                      all_ok = False
-                  else:
-                      ipv4s[port] = ip4
-                      ipv6s[port] = ip6
-
-              if not all_ok:
-                  sys.exit(1)
-
-              unique_v4 = set(ipv4s.values())
-              unique_v6 = set(ipv6s.values())
-              print(f"\nUnicità IPv4: {len(unique_v4)}/6 | Unicità IPv6: {len(unique_v6)}/6", flush=True)
-
-          if __name__ == "__main__":
-              main()
-          EOF
-
-      - name: Setup Container WARP (Step 1)
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          # 6 IP Anycast ufficiali distinti per differenziare le rotte fin dall'handshake iniziale
-          ANYCAST_IPS=(
-            "162.159.192.1"
-            "162.159.193.10"
-            "162.159.195.100"
-            "188.114.96.1"
-            "188.114.97.10"
-            "162.159.192.15"
-          )
-
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            IP=${ANYCAST_IPS[$((i-1))]}
-            echo "Avvio container warproxy-$i sulla porta $PORT con Anycast IP $IP..."
-            docker run --name warproxy-$i \
-              --network host \
-              --add-host "engage.cloudflareclient.com:$IP" \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 2.0
-          done
-
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 12
-
-      - name: Verifica IP Step 1
-        run: |
-          python -u verify_warp_ips.py
-
-      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
-        run: |
-          touch scraped_content.jsonl
-          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
-          echo $! > estrattore_nugget.pid
-          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
-
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
-      - name: Refresh IP Container per lo STEP 2
-        run: |
-          echo 'Rigenerazione totale dei container con rotazione degli IP Anycast...'
-          # Rimuove i vecchi container dello Step 1
-          for i in {1..6}; do
-            docker rm -f warproxy-$i || true
-          done
-
-          # Lista di IP Anycast alternativi e disgiunti per lo Step 2
-          ANYCAST_IPS_STEP2=(
-            "162.159.192.10"
-            "162.159.193.110"
-            "162.159.195.120"
-            "188.114.96.10"
-            "188.114.97.20"
-            "162.159.192.25"
-          )
-
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            IP=${ANYCAST_IPS_STEP2[$((i-1))]}
-            echo "Avvio container warproxy-$i sulla porta $PORT con Anycast IP $IP..."
-            docker run --name warproxy-$i \
-              --network host \
-              --add-host "engage.cloudflareclient.com:$IP" \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 2.0
-          done
-
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 12
-
-      - name: Verifica IP Step 2
-        run: |
-          python -u verify_warp_ips.py
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 2
-        run: |
-          cat << 'EOF' > m2_step2_setup.py
-          import json
-          import os
-
-          merged_failed = []
-          for i in range(1, 7):
-              filename = f"failed_node_{i}.json"
-              if os.path.exists(filename):
-                  with open(filename, "r", encoding="utf-8") as f:
-                      try: merged_failed.extend(json.load(f))
-                      except Exception: pass
-
-          unique_failed = list(dict.fromkeys(merged_failed))
-
-          for i in range(1, 7):
-              chunk = unique_failed[i-1::6]
-              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
-          EOF
-          python -u m2_step2_setup.py
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         if: always()
