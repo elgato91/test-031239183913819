@@ -768,7 +768,7 @@ jobs:
                   if ind in visible_text:
                       return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
 
-              # 4. Verifica della lunghezza minima del testo reale caricato
+              # 4. Verification della lunghezza minima del testo reale caricato
               if len(visible_text) < 150:
                   return False, f"Contenuto della pagina insufficiente ({len(visible_text)} caratteri)"
 
@@ -1056,6 +1056,12 @@ jobs:
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
 
+              # Mappatura dei soli motori supportati con gestione speciale (DuckDuckGo & Startpage)
+              SPECIAL_ENGINES = {
+                  "startpage.com": {"home": "https://startpage.com", "selector": "input#q"},
+                  "duckduckgo.com": {"home": "https://duckduckgo.com", "selector": "input[name=q]"}
+              }
+
               context = None
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
@@ -1066,7 +1072,6 @@ jobs:
                           humanize=True,
                           proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                           geoip=True,
-                          locale="en-US",
                           args=base_args
                       )
                       main_page = await context.new_page()
@@ -1096,46 +1101,26 @@ jobs:
                       try:
                           query_to_search = get_query_from_url(url)
 
-                          if "bing.com" in url:
-                              await state["current_page"].goto("https://bing.com", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(3.0, 5.0))
-                              try:
-                                  search_box = state["current_page"].locator("textarea[name='q'], input[name='q']").first
-                                  await search_box.type(query_to_search, delay=80)
-                                  await asyncio.sleep(random.uniform(0.5, 1.2))
-                                  await state["current_page"].keyboard.press("Enter")
-                                  await state["current_page"].wait_for_load_state("domcontentloaded", timeout=15000)
-                              except Exception:
-                                  await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=35000)
+                          # Identifica se l'URL appartiene a un motore con gestione speciale
+                          engine_key = next((k for k in SPECIAL_ENGINES if k in url), None)
 
-                          elif "startpage.com" in url:
-                              await state["current_page"].goto("https://startpage.com", wait_until="domcontentloaded", timeout=35000)
+                          if engine_key:
+                              engine = SPECIAL_ENGINES[engine_key]
+                              await state["current_page"].goto(engine["home"], wait_until="domcontentloaded", timeout=35000)
                               await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
-                                  search_box = state["current_page"].locator("input#q").first
+                                  search_box = state["current_page"].locator(engine["selector"]).first
                                   await search_box.type(query_to_search, delay=80)
                                   await asyncio.sleep(random.uniform(0.4, 1.0))
                                   await state["current_page"].keyboard.press("Enter")
                                   await state["current_page"].wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
                                   await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=35000)
-
-                          elif "duckduckgo.com" in url:
-                              await state["current_page"].goto("https://duckduckgo.com", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(2.5, 4.0))
-                              try:
-                                  search_box = state["current_page"].locator("input[name=q]").first
-                                  await search_box.type(query_to_search, delay=80)
-                                  await asyncio.sleep(random.uniform(0.4, 0.9))
-                                  await state["current_page"].keyboard.press("Enter")
-                                  await state["current_page"].wait_for_load_state("domcontentloaded", timeout=15000)
-                              except Exception:
-                                  await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=35000)
-
                           else:
+                              # Bing e qualsiasi altra pagina generica vengono aperti direttamente qui
                               await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                          # Attesa asincrona passiva invisibile ai sistemi anti-bot
+                          # Attesa asincrona passiva invisibile ai sistemi anti-bot (usa esclusivamente asyncio.sleep)
                           await asyncio.sleep(random.uniform(6.0, 8.0))
 
                           # Simulazione movimenti umani sulla pagina caricata
