@@ -1051,7 +1051,6 @@ jobs:
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
                   "--fingerprint-storage-quota=5000",
                   f"--fingerprint=9990{node_id}",
-                  "--fingerprint-noise=false"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
