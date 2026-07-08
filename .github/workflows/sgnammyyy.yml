@@ -69,6 +69,121 @@ jobs:
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
 
+      - name: Creazione Script di Verifica e Rotazione IP WARP
+        run: |
+          cat << 'EOF' > rotate_warp_ips.py
+          import subprocess
+          import time
+          import sys
+
+          PORTS = [40001, 40002, 40003, 40004, 40005, 40006]
+
+          # Servizi pubblici stabili per il controllo degli IP dual-stack
+          IPV6_PROVIDERS = [
+              "https://api6.ipify.org",
+              "https://v6.ident.me",
+              "https://ipv6.icanhazip.com"
+          ]
+
+          IPV4_PROVIDERS = [
+              "https://api.ipify.org",
+              "https://v4.ident.me",
+              "https://ipv4.icanhazip.com"
+          ]
+
+          def get_ip(port, providers):
+              for url in providers:
+                  try:
+                      cmd = ["curl", "-s", "-m", "6", "--socks5-hostname", f"127.0.0.1:{port}", url]
+                      res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                      ip = res.stdout.strip()
+                      if ip and len(ip) > 5:
+                          return ip
+                  except Exception:
+                      continue
+              return None
+
+          def restart_container(node_id):
+              container_name = f"warproxy-{node_id}"
+              print(f"[RESTART] Riavvio del container {container_name}...", flush=True)
+              subprocess.run(["docker", "restart", container_name], capture_output=True)
+
+          def main():
+              max_attempts = 3
+              for attempt in range(1, max_attempts + 1):
+                  print(f"\n--- [TENTATIVO {attempt}/{max_attempts}] Verifica unicità IP ---", flush=True)
+                  
+                  ipv6_map = {}
+                  ipv4_map = {}
+                  node_ipv6 = {}
+                  node_ipv4 = {}
+
+                  for i, port in enumerate(PORTS):
+                      node_id = i + 1
+                      time.sleep(1.0) # Delay preventivo nell'interrogazione
+                      
+                      ip6 = get_ip(port, IPV6_PROVIDERS)
+                      ip4 = get_ip(port, IPV4_PROVIDERS)
+                      
+                      node_ipv6[node_id] = ip6
+                      node_ipv4[node_id] = ip4
+                      
+                      print(f"Nodo {node_id} (Porta {port}) -> IPv6: {ip6} | IPv4: {ip4}", flush=True)
+                      
+                      if ip6:
+                          ipv6_map.setdefault(ip6, []).append(node_id)
+                      if ip4:
+                          ipv4_map.setdefault(ip4, []).append(node_id)
+
+                  nodes_to_restart = set()
+                  
+                  # Controllo collisioni IPv6
+                  for ip, nodes in ipv6_map.items():
+                      if len(nodes) > 1:
+                          for duplicate_node in nodes[1:]:
+                              nodes_to_restart.add(duplicate_node)
+                              
+                  # Controllo collisioni IPv4
+                  for ip, nodes in ipv4_map.items():
+                      if len(nodes) > 1:
+                          for duplicate_node in nodes[1:]:
+                              nodes_to_restart.add(duplicate_node)
+
+                  if not nodes_to_restart:
+                      print("\n[SUCCESSO] Tutti i nodi hanno IP unici sia IPv4 che IPv6!", flush=True)
+                      return
+
+                  print(f"\n[COLLISIONE] Trovati {len(nodes_to_restart)} nodi con IP duplicati: {list(nodes_to_restart)}", flush=True)
+                  
+                  if attempt == max_attempts:
+                      print("[WARN] Raggiunto il limite massimo di tentativi. Procedo comunque con gli IP correnti.", flush=True)
+                      return
+
+                  nodes_list = sorted(list(nodes_to_restart))
+                  if len(nodes_list) == 1:
+                      target_node = nodes_list[0]
+                      print(f"[DELAY] 1 solo nodo duplicato rilevato. Attesa 2 secondi prima del riavvio...", flush=True)
+                      time.sleep(2.0)
+                      restart_container(target_node)
+                  else:
+                      print(f"[DELAY] Più nodi duplicati rilevati. Avvio scaglionato (4s per ogni nodo successivo)...", flush=True)
+                      for idx, target_node in enumerate(nodes_list):
+                          delay = 4 * (idx + 1)
+                          print(f"[DELAY] Nodo {target_node} attende {delay} secondi prima del riavvio...", flush=True)
+                          time.sleep(4.0)
+                          restart_container(target_node)
+
+                  print("[INFO] Attesa stabilizzazione tunnel WARP (8s)...", flush=True)
+                  time.sleep(8.0)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+      - name: Verifica e Allineamento IP Iniziali
+        run: |
+          python -u rotate_warp_ips.py
+
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
           cat << 'EOF' > m2_step1_setup.py
@@ -109,11 +224,6 @@ jobs:
       - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
         run: |
           cat << 'EOF' > extraction_utils.py
-          """
-          Modulo condiviso tra Step 1 e Step 2.
-          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
-          retry, validazione WAF o altra logica di scraping.
-          """
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -140,7 +250,6 @@ jobs:
               "addtoany.com", "sharethis.com", "mailto:"
           )
 
-
           def _is_junk_domain(netloc, full_href):
               netloc_low = netloc.lower()
               href_low = full_href.lower()
@@ -148,7 +257,6 @@ jobs:
                   if junk in netloc_low or href_low.startswith(junk):
                       return True
               return False
-
 
           def _clean_query(query_string):
               if not query_string:
@@ -163,7 +271,6 @@ jobs:
                       continue
                   cleaned_pairs.append((key, value))
               return urlencode(cleaned_pairs)
-
 
           def clean_link_href(raw_href, page_url):
               if not raw_href:
@@ -220,10 +327,8 @@ jobs:
 
               return rebuilt
 
-
           def _strip_anchor_tag(a_tag):
               a_tag.replace_with(a_tag.get_text())
-
 
           def html_to_clean_markdown(html, page_url):
               soup = BeautifulSoup(html, "html.parser")
@@ -259,9 +364,6 @@ jobs:
       - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
         run: |
           cat << 'EOF' > nugget_extractor.py
-          """
-          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
-          """
           import json
           import re
           import os
@@ -325,12 +427,10 @@ jobs:
           {testo}
           """
 
-
           def _stima_token(testo):
               if not testo:
                   return 0
               return max(1, len(testo) // 4)
-
 
           class TokenBucket:
               def __init__(self, capacity_tokens, refill_period_seconds=60.0):
@@ -363,7 +463,6 @@ jobs:
                                 f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
                                 flush=True)
                           await asyncio.sleep(wait_seconds)
-
 
           class GeminiKeyPool:
               def __init__(self, api_keys):
@@ -448,7 +547,6 @@ jobs:
                   pass
               return None
 
-
           def _calcola_confidence(quote_originale, testo_sorgente):
               if not quote_originale or not testo_sorgente:
                   return "low"
@@ -483,14 +581,12 @@ jobs:
               else:
                   return "low"
 
-
           def scrivi_nuggets_jsonl(nuggets, jsonl_path):
               if not nuggets:
                   return
               with open(jsonl_path, "a", encoding="utf-8") as f:
                   for n in nuggets:
                       f.write(json.dumps(n, ensure_ascii=False) + "\n")
-
 
           async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
                                     node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
@@ -581,7 +677,6 @@ jobs:
 
           _jsonl_lock = asyncio.Lock()
 
-
           def carica_gemini_api_keys():
               keys = []
               primary = os.environ.get("GEMINI_API_KEY")
@@ -596,13 +691,11 @@ jobs:
                   i += 1
               return keys
 
-
           async def salva_nuggets(nuggets):
               if not nuggets:
                   return
               async with _jsonl_lock:
                   scrivi_nuggets_jsonl(nuggets, NUGGETS_OUTPUT_PATH)
-
 
           async def main():
               api_keys = carica_gemini_api_keys()
@@ -683,7 +776,6 @@ jobs:
 
               print(f"[ESTRATTORE] Terminato. Nugget salvati in {NUGGETS_OUTPUT_PATH}", flush=True)
 
-
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
@@ -710,10 +802,8 @@ jobs:
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
-
           def carica_gemini_api_keys_placeholder():
               pass
-
 
           async def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
@@ -730,13 +820,7 @@ jobs:
               await test_session.close()
               return False
 
-
           def validate_html(html, url, status_code):
-              """
-              Validatore robusto per l'HTML grezzo in Step 1.
-              Controlla il tag <title> e analizza solo il testo effettivamente visibile a schermo,
-              escludendo blocchi <script>, <style> e <noscript> per azzerare i falsi positivi.
-              """
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
@@ -744,20 +828,17 @@ jobs:
                   
               soup = BeautifulSoup(html, "html.parser")
               
-              # 1. Controlliamo se nel titolo del documento ci sono diciture WAF bloccanti
               title = (soup.title.string or "").strip().lower() if soup.title else ""
               waf_titles = ["access denied", "attention required", "just a moment", "checking your browser", "cloudflare"]
               for wt in waf_titles:
                   if wt in title:
                       return False, f"WAF rilevato nel titolo della pagina: {title}"
 
-              # 2. Decomponiamo i tag non testuali per evitare falsi positivi strutturali
               for element in soup(["script", "style", "noscript"]):
                   element.decompose()
                   
               visible_text = soup.get_text(separator=' ', strip=True).lower()
 
-              # 3. Controlliamo solo gli indicatori WAF e Captcha reali
               blocking_indicators = [
                   "are you a robot", "prove your humanity", "captcha verification",
                   "unusual traffic from your computer network", "robot challenge screen",
@@ -768,12 +849,10 @@ jobs:
                   if ind in visible_text:
                       return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
 
-              # 4. Verifica della lunghezza minima del testo reale caricato
               if len(visible_text) < 150:
                   return False, f"Contenuto della pagina insufficiente ({len(visible_text)} caratteri)"
 
               return True, ""
-
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
               try:
@@ -788,7 +867,6 @@ jobs:
                       f.flush()
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
-
 
           async def main():
               if not await verify_proxy_active(ACTIVE_PORT):
@@ -855,7 +933,6 @@ jobs:
 
               print(f"[NODO {node_id}] STEP 1 completato.", flush=True)
 
-
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
@@ -889,6 +966,10 @@ jobs:
           echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
           sleep 6
+
+      - name: Verifica e Rotazione IP WARP per lo STEP 2
+        run: |
+          python -u rotate_warp_ips.py
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
@@ -937,7 +1018,6 @@ jobs:
 
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
-
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
                   parsed = urlparse(url)
@@ -948,7 +1028,6 @@ jobs:
               except Exception:
                   pass
               return default
-
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, node_id, step_label):
               try:
@@ -963,7 +1042,6 @@ jobs:
                       f.flush()
               except Exception as e:
                   print(f"[NODO {node_id}] Impossibile registrare il record per l'estrattore: {e}", flush=True)
-
 
           async def verify_proxy_active(port, max_retries=6, delay=5):
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
@@ -982,12 +1060,7 @@ jobs:
               await test_session.close()
               return False
 
-
           def validate_html(html, url, status_code):
-              """
-              Validatore strutturale per l'HTML dello Step 2.
-              Analizza solo il testo visibile per evitare falsi positivi su tag script/style/noscript.
-              """
               if status_code is not None and status_code >= 400:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
@@ -1021,7 +1094,6 @@ jobs:
 
               return True, ""
 
-
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file):
@@ -1046,18 +1118,25 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              # Configurazione geometrica e strutturale per consistenza del fingerprint (Windows 11)
+              # Configurazione deterministica e consistente del seed di fingerprint per il profilo persistente
+              run_id_str = os.environ.get("GITHUB_RUN_ID", "1")
+              try:
+                  run_id = int(run_id_str)
+              except ValueError:
+                  run_id = 1
+              fingerprint_seed = 100000 + (run_id % 10000) * 10 + node_id
+
+              # Configurazione geometrica e strutturale per Windows 11
+              # Rimosse le ridondanze WebRTC in quanto geoip=True gestisce lo spoofing automaticamente
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
+                  f"--fingerprint={fingerprint_seed}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--fingerprint-taskbar-height=48",
-                  "--fingerprint-storage-quota=5000",
-                  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                  "--fingerprint-webrtc-ip=auto"
+                  "--fingerprint-storage-quota=5000"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -1166,7 +1245,6 @@ jobs:
                           await context.close()
                       except Exception:
                           pass
-
 
           if __name__ == "__main__":
               asyncio.run(main())
