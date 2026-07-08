@@ -17,23 +17,21 @@ jobs:
       - name: Installazione Font di Sistema e Windows 11 Reali
         run: |
           sudo apt-get update
-          # Installazione di cabextract, xfonts-utils e unzip (fondamentali per scompattare i font)
-          sudo apt-get install -y cabextract xfonts-utils unzip wget
-          
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
+          # Installiamo solo unzip, wget e i font Linux obbligatori per i controlli anti-bot Canvas
+          sudo apt-get install -y unzip wget \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
 
+          # Creiamo la directory richiesta da CloakBrowser per l'evasione dei controlli
           mkdir -p ~/.local/share/fonts/windows
-          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
-          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           
-          # Scarichiamo un archivio reale dei font nativi di Windows 11 (Segoe UI, Calibri, ecc.) per una consistenza totale
+          # Scarichiamo e iniettiamo i font reali e moderni di Windows 11 (Segoe UI, Calibri, ecc.) 
+          # Fondamentali secondo la documentazione per non farsi rilevare da CreepJS/FingerprintJS
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
           find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
           
+          # Rigeneriamo la cache dei font di sistema (Obbligatorio)
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -1016,8 +1014,8 @@ jobs:
                   if ind in visible_text:
                       return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
 
-              if len(visible_text) < 150:
-                  return False, f"Contenuto visibile insufficiente ({len(visible_text)} caratteri)"
+                  if len(visible_text) < 150:
+                      return False, f"Contenuto visibile insufficiente ({len(visible_text)} caratteri)"
 
               return True, ""
 
@@ -1049,8 +1047,9 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
+                  "--ignore-certificate-errors",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
-                  "--ignore-certificate-errors"
+                  "--fingerprint-windows-font-metrics"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -1069,9 +1068,18 @@ jobs:
                           viewport={"width": 1920, "height": 940},
                           args=base_args
                       )
-                      page = await context.new_page()
+                      main_page = await context.new_page()
 
-                      await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
+                      # Stato locale per gestire i popup in isolamento asincrono per ogni nodo
+                      state = {"current_page": main_page}
+
+                      def local_popup_handler(popup):
+                          print(f"[NODO {node_id}] Nuovo Tab/Popup intercettato dal WAF!", flush=True)
+                          state["current_page"] = popup
+
+                      context.on("page", local_popup_handler)
+
+                      await main_page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                       await asyncio.sleep(2)
 
                   except Exception as e:
@@ -1082,67 +1090,61 @@ jobs:
 
                   for url in targets:
                       print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
-                      page = main_page # Pagina di lavoro iniziale
+                      state["current_page"] = main_page
                       
                       try:
                           query_to_search = get_query_from_url(url)
 
                           if "bing.com" in url:
-                              await page.goto("https://bing.com", wait_until="domcontentloaded", timeout=35000)
+                              await state["current_page"].goto("https://bing.com", wait_until="domcontentloaded", timeout=35000)
                               await asyncio.sleep(random.uniform(3.0, 5.0))
                               try:
-                                  search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                  search_box = state["current_page"].locator("textarea[name='q'], input[name='q']").first
                                   await search_box.type(query_to_search, delay=80)
                                   await asyncio.sleep(random.uniform(0.5, 1.2))
-                                  await page.keyboard.press("Enter")
-                                  await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                  await state["current_page"].keyboard.press("Enter")
+                                  await state["current_page"].wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
-                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=35000)
 
                           elif "startpage.com" in url:
-                              await page.goto("https://startpage.com", wait_until="domcontentloaded", timeout=35000)
+                              await state["current_page"].goto("https://startpage.com", wait_until="domcontentloaded", timeout=35000)
                               await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
-                                  search_box = page.locator("input#q").first
+                                  search_box = state["current_page"].locator("input#q").first
                                   await search_box.type(query_to_search, delay=80)
                                   await asyncio.sleep(random.uniform(0.4, 1.0))
-                                  await page.keyboard.press("Enter")
-                                  await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                  await state["current_page"].keyboard.press("Enter")
+                                  await state["current_page"].wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
-                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=35000)
 
-                          elif "://duckduckgo.com" in url:
-                              await page.goto("https://://duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                          elif "duckduckgo.com" in url:
+                              await state["current_page"].goto("https://duckduckgo.com", wait_until="domcontentloaded", timeout=35000)
                               await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
-                                  search_box = page.locator("input[name=q]").first
+                                  search_box = state["current_page"].locator("input[name=q]").first
                                   await search_box.type(query_to_search, delay=80)
                                   await asyncio.sleep(random.uniform(0.4, 0.9))
-                                  await page.keyboard.press("Enter")
-                                  await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                  await state["current_page"].keyboard.press("Enter")
+                                  await state["current_page"].wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
-                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=35000)
 
                           else:
-                              # Se il sito forza un redirect aprendo un nuovo tab, sposta il puntatore sul popup
-                              async def handle_popup(popup):
-                                  nonlocal page
-                                  print(f"[NODO {node_id}] Cambiato Tab di destinazione (rilevato Popup)!", flush=True)
-                                  page = popup
-                              
-                              context.on("page", lambda p: asyncio.ensure_future(handle_popup(p)))
-                              await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                              await state["current_page"].goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                          # (Qui si innesca la modifica numero 2 di asyncio.sleep al posto di networkidle)
+                          # Attesa asincrona passiva invisibile ai sistemi anti-bot
                           await asyncio.sleep(random.uniform(6.0, 8.0))
 
-                          await page.keyboard.press("PageDown")
+                          # Simulazione movimenti umani sulla pagina caricata
+                          await state["current_page"].keyboard.press("PageDown")
                           await asyncio.sleep(random.uniform(1.5, 2.5))
-                          await page.keyboard.press("PageDown")
+                          await state["current_page"].keyboard.press("PageDown")
                           await asyncio.sleep(random.uniform(2.0, 3.0))
 
-                          raw_html = await page.content()
-                          current_url = page.url
+                          raw_html = await state["current_page"].content()
+                          current_url = state["current_page"].url
 
                           is_ok, err_msg = validate_html(raw_html, current_url, None)
 
@@ -1159,44 +1161,14 @@ jobs:
                           print(f"[NODO {node_id}] -> Errore esecuzione su {url}: {e}", flush=True)
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
 
-                      # Se abbiamo lavorato su un tab secondario, lo chiudiamo e puliamo i listener
-                      if page != main_page:
+                      # Se è stato aperto e usato un tab popup secondario, lo chiudiamo in sicurezza
+                      if state["current_page"] != main_page:
                           try:
-                              await page.close()
+                              await state["current_page"].close()
                           except Exception:
                               pass
-                          context.remove_all_listeners("page")
 
                       await asyncio.sleep(random.uniform(6.0, 10.0))
-
-                          # Sostituito networkidle con attesa asincrona nativa invisibile ai WAF
-                          await asyncio.sleep(random.uniform(6.0, 8.0))
-                          
-                          await page.keyboard.press("PageDown")
-                          await asyncio.sleep(1)
-                          await page.keyboard.press("PageDown")
-                          await asyncio.sleep(2)
-
-                          raw_html = await page.content()
-                          current_url = page.url
-
-                          is_ok, err_msg = validate_html(raw_html, current_url, None)
-
-                          if is_ok:
-                              text_for_output = html_to_clean_markdown(raw_html, current_url)
-                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
-                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
-
-                              pubblica_contenuto_scrapato(url, text_for_output, node_id, "step2")
-                          else:
-                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({err_msg})\n"
-                              print(f"[NODO {node_id}] -> Fallito: {err_msg}", flush=True)
-
-                      except Exception as e:
-                          print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
-
-                      await asyncio.sleep(random.uniform(4.0, 7.0))
 
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                       f.write(results)
