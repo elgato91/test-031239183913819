@@ -63,7 +63,7 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+            sleep 10.5
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
