@@ -17,8 +17,9 @@ jobs:
       - name: Installazione Font di Sistema e Windows 11 Reali
         run: |
           sudo apt-get update
+          # Installazione di cabextract, xfonts-utils e unzip (fondamentali per scompattare i font)
           sudo apt-get install -y cabextract xfonts-utils unzip wget
-
+          
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
@@ -27,11 +28,12 @@ jobs:
           mkdir -p ~/.local/share/fonts/windows
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
-
+          
+          # Scarichiamo un archivio reale dei font nativi di Windows 11 (Segoe UI, Calibri, ecc.) per una consistenza totale
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
           find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
-
+          
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -48,7 +50,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6 forzato via ResolveStrategy + verifica reale)
+      - name: Setup Container WARP (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -61,55 +63,11 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 1.5
+            sleep 0.5
           done
 
-          echo "Attesa generazione iniziale wgcf-profile.conf e wireproxy.conf..."
-          sleep 8
-
-          # Iniettiamo ResolveStrategy = ipv6 nella sezione [Interface] di ogni wireproxy.conf.
-          # Questo NON tocca l'account wgcf/IP assegnato: modifica solo la strategia di risoluzione
-          # DNS usata da wireproxy per instradare il traffico applicativo (Step 1 e Step 2) in IPv6
-          # quando disponibile, invece di ricadere silenziosamente su IPv4 come fa 'auto' di default.
-          for i in {1..6}; do
-            echo "Nodo $i: verifico presenza di /config/wireproxy.conf..."
-            docker exec warproxy-$i sh -c '
-              CONF="/config/wireproxy.conf"
-              if [ -f "$CONF" ]; then
-                if ! grep -q "ResolveStrategy" "$CONF"; then
-                  sed -i "/^\[Interface\]/a ResolveStrategy = ipv6" "$CONF"
-                  echo "  -> ResolveStrategy = ipv6 iniettato in $CONF"
-                else
-                  sed -i "s/^ResolveStrategy.*/ResolveStrategy = ipv6/" "$CONF"
-                  echo "  -> ResolveStrategy aggiornato a ipv6 in $CONF"
-                fi
-              else
-                echo "  -> ATTENZIONE: $CONF non trovato nel nodo '"$i"' (controllare log container)"
-              fi
-            ' || echo "  -> Impossibile eseguire exec sul nodo $i (potrebbe non essere ancora pronto)"
-          done
-
-          # Restart del solo processo wireproxy dentro ogni container (rilegge la conf appena
-          # modificata senza rigenerare un nuovo account/IP wgcf)
-          for i in {1..6}; do
-            docker exec warproxy-$i sh -c 'pkill -HUP wireproxy 2>/dev/null || pkill wireproxy 2>/dev/null' || true
-          done
-
-          echo "Attesa stabilizzazione tunnel WARP dopo injection ResolveStrategy..."
+          echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
-
-          echo ""
-          echo "=== VERIFICA USCITA IP REALE PER NODO (IPv4 vs IPv6) ==="
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            IPV6_RESULT=$(curl -s --max-time 8 --socks5-hostname 127.0.0.1:$PORT https://api6.ipify.org?format=json 2>/dev/null || echo "FALLITO")
-            IPV4_RESULT=$(curl -s --max-time 8 --socks5-hostname 127.0.0.1:$PORT https://api4.ipify.org?format=json 2>/dev/null || echo "FALLITO")
-            echo "Nodo $i (porta $PORT):"
-            echo "  IPv6: $IPV6_RESULT"
-            echo "  IPv4: $IPV4_RESULT"
-          done
-          echo "=========================================================="
-          echo ""
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -122,7 +80,6 @@ jobs:
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -754,6 +711,10 @@ jobs:
           SCRAPED_CONTENT_PATH = "scraped_content.jsonl"
 
 
+          def carica_gemini_api_keys_placeholder():
+              pass
+
+
           async def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = curl_requests.AsyncSession(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
@@ -780,20 +741,23 @@ jobs:
                   return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300:
                   return False, "HTML vuoto"
-
+                  
               soup = BeautifulSoup(html, "html.parser")
-
+              
+              # 1. Controlliamo se nel titolo del documento ci sono diciture WAF bloccanti
               title = (soup.title.string or "").strip().lower() if soup.title else ""
               waf_titles = ["access denied", "attention required", "just a moment", "checking your browser", "cloudflare"]
               for wt in waf_titles:
                   if wt in title:
                       return False, f"WAF rilevato nel titolo della pagina: {title}"
 
+              # 2. Decomponiamo i tag non testuali per evitare falsi positivi strutturali
               for element in soup(["script", "style", "noscript"]):
                   element.decompose()
-
+                  
               visible_text = soup.get_text(separator=' ', strip=True).lower()
 
+              # 3. Controlliamo solo gli indicatori WAF e Captcha reali
               blocking_indicators = [
                   "are you a robot", "prove your humanity", "captcha verification",
                   "unusual traffic from your computer network", "robot challenge screen",
@@ -804,6 +768,7 @@ jobs:
                   if ind in visible_text:
                       return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
 
+              # 4. Verifica della lunghezza minima del testo reale caricato
               if len(visible_text) < 150:
                   return False, f"Contenuto della pagina insufficiente ({len(visible_text)} caratteri)"
 
@@ -925,33 +890,6 @@ jobs:
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
           sleep 6
 
-          # Il restart del container rigenera un nuovo IP WARP: la injection ResolveStrategy=ipv6
-          # va quindi riapplicata anche qui, altrimenti Step 2 ripartirebbe in modalita' 'auto'
-          # (che ricade su IPv4 quando l'interfaccia e' dual-stack).
-          for i in {1..6}; do
-            docker exec warproxy-$i sh -c '
-              CONF="/config/wireproxy.conf"
-              if [ -f "$CONF" ]; then
-                if ! grep -q "ResolveStrategy" "$CONF"; then
-                  sed -i "/^\[Interface\]/a ResolveStrategy = ipv6" "$CONF"
-                else
-                  sed -i "s/^ResolveStrategy.*/ResolveStrategy = ipv6/" "$CONF"
-                fi
-              fi
-            ' || true
-            docker exec warproxy-$i sh -c 'pkill -HUP wireproxy 2>/dev/null || pkill wireproxy 2>/dev/null' || true
-          done
-          sleep 6
-
-          echo ""
-          echo "=== VERIFICA USCITA IP REALE PER NODO (post-refresh, pre-Step 2) ==="
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            IPV6_RESULT=$(curl -s --max-time 8 --socks5-hostname 127.0.0.1:$PORT https://api6.ipify.org?format=json 2>/dev/null || echo "FALLITO")
-            echo "Nodo $i (porta $PORT): IPv6: $IPV6_RESULT"
-          done
-          echo "======================================================================"
-
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
           cat << 'EOF' > m2_step2_setup.py
@@ -977,7 +915,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, fingerprint minimale, disaccoppiato da Gemini)
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser, disaccoppiato da Gemini)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -1056,7 +994,7 @@ jobs:
                   return False, "HTML vuoto"
 
               soup = BeautifulSoup(html, "html.parser")
-
+              
               title = (soup.title.string or "").strip().lower() if soup.title else ""
               waf_titles = ["access denied", "attention required", "just a moment", "checking your browser", "cloudflare"]
               for wt in waf_titles:
@@ -1065,7 +1003,7 @@ jobs:
 
               for element in soup(["script", "style", "noscript"]):
                   element.decompose()
-
+                  
               visible_text = soup.get_text(separator=' ', strip=True).lower()
 
               blocking_indicators = [
@@ -1108,18 +1046,18 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              # Fingerprint MINIMALE: solo seed random + font dir. Nessun override esplicito di
-              # screen-width/height, taskbar-height, storage-quota o webrtc-ip: il seed genera
-              # gia' in modo internamente coerente GPU, hardware concurrency, memoria e schermo,
-              # come indicato dalla documentazione ufficiale CloakBrowser. Sovrascrivere solo
-              # alcuni di questi valori manualmente crea una fingerprint ibrida (seed-derivata +
-              # override manuale) che puo' risultare incoerente proprio dove i sistemi di
-              # detection (Cloudflare, FingerprintJS) guardano con piu' attenzione.
+              # Configurazione geometrica e strutturale per consistenza del fingerprint (Windows 11)
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}",
+                  "--fingerprint-screen-width=1920",
+                  "--fingerprint-screen-height=1080",
+                  "--fingerprint-taskbar-height=48",
+                  "--fingerprint-storage-quota=5000",
+                  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                  "--fingerprint-webrtc-ip=auto"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
@@ -1140,11 +1078,7 @@ jobs:
                       )
                       page = await context.new_page()
 
-                      # Warmup esteso su due domini reali (Google + Reddit) per costruire una
-                      # cronologia di navigazione piu' credibile prima di colpire i target protetti.
                       await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-                      await asyncio.sleep(2)
-                      await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
                       await asyncio.sleep(2)
 
                   except Exception as e:
@@ -1163,7 +1097,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                  await search_box.fill(query_to_search)
+                                  await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1173,7 +1107,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input#q").first
-                                  await search_box.fill(query_to_search)
+                                  await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1183,7 +1117,7 @@ jobs:
                               await asyncio.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input[name=q]").first
-                                  await search_box.fill(query_to_search)
+                                  await search_box.type(query_to_search, delay=60)
                                   await page.keyboard.press("Enter")
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -1196,12 +1130,7 @@ jobs:
                           except Exception:
                               pass
 
-                          # Attesa piu' lunga (6s) + doppio scroll: necessaria soprattutto per
-                          # risolvere challenge JS Cloudflare ("Just a moment...") che impiegano
-                          # alcuni secondi per l'auto-verifica silenziosa prima del redirect.
-                          await asyncio.sleep(6)
-                          await page.keyboard.press("PageDown")
-                          await asyncio.sleep(1)
+                          await asyncio.sleep(4)
                           await page.keyboard.press("PageDown")
                           await asyncio.sleep(2)
 
@@ -1209,20 +1138,6 @@ jobs:
                           current_url = page.url
 
                           is_ok, err_msg = validate_html(raw_html, current_url, None)
-
-                          # Retry mirato SOLO per il caso "Just a moment" (Cloudflare JS challenge):
-                          # non modifica il timing per nessun altro sito, si attiva solo su questa
-                          # condizione specifica gia' presente in waf_titles.
-                          if not is_ok and "just a moment" in err_msg.lower():
-                              for retry_wait in (5, 8, 10):
-                                  print(f"[NODO {node_id}] Cloudflare challenge rilevato su {url}, "
-                                        f"attendo {retry_wait}s per la risoluzione automatica...", flush=True)
-                                  await asyncio.sleep(retry_wait)
-                                  raw_html = await page.content()
-                                  current_url = page.url
-                                  is_ok, err_msg = validate_html(raw_html, current_url, None)
-                                  if is_ok:
-                                      break
 
                           if is_ok:
                               text_for_output = html_to_clean_markdown(raw_html, current_url)
