@@ -39,6 +39,15 @@ jobs:
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
           playwright install-deps chromium
 
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
+
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
           cat << 'EOF' > m2_step1_setup.py
@@ -1038,25 +1047,25 @@ jobs:
 
           ENV DEBIAN_FRONTEND=noninteractive
 
-          # Installa dipendenze base, Xvfb per il browser e Python
+          # Installazione dei pacchetti base, Xvfb, Python, DBus e delle librerie grafiche indispensabili
           RUN apt-get update && apt-get install -y \
-              curl gpg xvfb python3 python3-pip \
+              curl gpg xvfb python3 python3-pip dbus dbus-x11 iproute2 \
               libgbm1 libasound2t64 libnspr4 libnss3 libxss1 libxtst6 libxshmfence1 \
               fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
               fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf \
               && rm -rf /var/lib/apt/lists/*
 
-          # Installa Cloudflare WARP
+          # Registrazione della chiave di firma ufficiale e del repository corretto per cloudflare-warp
           RUN curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
               && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com noble main" | tee /etc/apt/sources.list.d/cloudflare-warp.list \
               && apt-get update && apt-get install -y cloudflare-warp \
               && rm -rf /var/lib/apt/lists/*
 
-          # Installa librerie di scraping e CloakBrowser
+          # Installazione delle dipendenze di scraping e del core di CloakBrowser
           RUN pip3 install --no-cache-dir beautifulsoup4 playwright requests curl-cffi markdownify google-genai --break-system-packages
           RUN pip3 install --no-cache-dir "cloakbrowser[geoip]" --break-system-packages
           
-          # Scarica il binario di Cloakbrowser all'interno dell'immagine per massimizzare la velocità
+          # Download del binario modificato di CloakBrowser all'interno dell'immagine per consistenza
           RUN python3 -c "from cloakbrowser import ensure_binary; ensure_binary()"
 
           RUN fc-cache -f -v
@@ -1073,22 +1082,49 @@ jobs:
           #!/bin/bash
           set -e
 
+          # 1. Avvio di Xvfb per simulare un server grafico headless
           Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           sleep 1
 
-          warp-svc --accept-tos > /dev/null 2>&1 &
-          sleep 2
+          # 2. Inizializzazione manuale indispensabile del demone DBus di sistema (richiesto da warp-svc)
+          mkdir -p /var/run/dbus
+          if [ -f /var/run/dbus/pid ]; then
+              rm -f /var/run/dbus/pid
+          fi
+          dbus-uuidgen --ensure
+          dbus-daemon --system --fork
 
-          echo "[WARP] Registrazione nuovo client anonimo..."
+          # 3. Avvio in background del servizio cloudflare-warp
+          warp-svc --accept-tos > /dev/null 2>&1 &
+          sleep 3
+
+          # 4. Registrazione di una nuova licenza WARP locale e connessione
+          echo "[WARP] Generazione nuova chiave e registrazione identità..."
           warp-cli --accept-tos registration new > /dev/null
           warp-cli --accept-tos mode warp > /dev/null
           warp-cli --accept-tos connect > /dev/null
-          sleep 6
 
-          # Aggiorna l'indice dei font montati a runtime prima dell'esecuzione
+          # 5. Monitoraggio dinamico per verificare che l'interfaccia TUN 'tun0' venga alzata e riceva un IP
+          echo "[WARP] Attesa stabilizzazione interfaccia tun0..."
+          CONNECTED=false
+          for i in {1..15}; do
+              if ip addr show dev tun0 >/dev/null 2>&1; then
+                  echo "[WARP] Interfaccia tun0 rilevata con successo!"
+                  CONNECTED=true
+                  break
+              fi
+              sleep 1
+          done
+
+          if [ "$CONNECTED" = false ]; then
+              echo "[ERROR] Impossibile stabilire il tunnel virtuale tun0 in 15 secondi."
+              exit 1
+          fi
+
+          # 6. Forziamo l'indicizzazione dei font montati a runtime
           fc-cache -f > /dev/null 2>&1 || true
 
-          echo "[INFO] Verifica IP Pubblici assegnati al container:"
+          echo "[INFO] Verifica routing IP pubblici per questo container isolato:"
           echo -n "  - IPv4: " && curl -4 -s https://icanhazip.com || echo "Nessun indirizzo IPv4"
           echo -n "  - IPv6: " && curl -6 -s https://icanhazip.com || echo "Nessun indirizzo IPv6"
 
@@ -1110,9 +1146,11 @@ jobs:
         run: |
           echo "Avvio dei 6 nodi isolati per lo STEP 1..."
           for i in {1..6}; do
+            # L'aggiunta di --device /dev/net/tun consente a WARP di creare tun0 nel container
             docker run -d \
               --name "worker_step1_$i" \
               --cap-add=NET_ADMIN \
+              --device /dev/net/tun \
               --shm-size=2gb \
               -v /tmp:/tmp \
               -v $(pwd):/app \
@@ -1159,9 +1197,11 @@ jobs:
         run: |
           echo "Avvio dei 6 nodi isolati per lo STEP 2..."
           for i in {1..6}; do
+            # Ogni run crea una sessione nuova con IP generati ex-novo da Cloudflare
             docker run -d \
               --name "worker_step2_$i" \
               --cap-add=NET_ADMIN \
+              --device /dev/net/tun \
               --shm-size=2gb \
               -v /tmp:/tmp \
               -v $(pwd):/app \
@@ -1213,3 +1253,94 @@ jobs:
             if kill -0 "$PID" 2>/dev/null; then
               echo "Timeout di sicurezza raggiunto (90s dopo il segnale): chiudo forzatamente il processo estrattore residuo."
               kill "$PID" 2>/dev/null || true
+            fi
+          fi
+          touch nuggets_estrattore.jsonl
+          echo "--- log estrattore nugget ---"
+          cat estrattore_nugget.log || true
+
+      - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
+        if: always()
+        run: |
+          cat << 'EOF' > merge_nuggets.py
+          import json
+          import os
+          import glob
+
+          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
+
+          merged_nuggets = []
+          per_file_stats = {}
+
+          for filename in jsonl_files:
+              count = 0
+              corrotte = 0
+              try:
+                  with open(filename, "r", encoding="utf-8") as f:
+                      for riga in f:
+                          riga = riga.strip()
+                          if not riga:
+                              continue
+                          try:
+                              nugget = json.loads(riga)
+                              merged_nuggets.append(nugget)
+                              count += 1
+                          except json.JSONDecodeError:
+                              corrotte += 1
+              except Exception as e:
+                  print(f"Errore lettura {filename}: {e}", flush=True)
+
+              per_file_stats[filename] = count
+              if corrotte:
+                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
+
+          seen = set()
+          nuggets_deduplicati = []
+          for n in merged_nuggets:
+              fact_norm = (n.get("fact") or "").strip().lower()
+              url_norm = (n.get("source_url") or "").strip().lower()
+              key = (fact_norm, url_norm)
+              if key in seen:
+                  continue
+              seen.add(key)
+              nuggets_deduplicati.append(n)
+
+          confidence_counts = {"high": 0, "medium": 0, "low": 0}
+          for n in nuggets_deduplicati:
+              c = n.get("confidence", "low")
+              if c in confidence_counts:
+                  confidence_counts[c] += 1
+
+          output_finale = {
+              "stats": {
+                  "file_jsonl_trovati": len(jsonl_files),
+                  "totale_nugget_grezzi": len(merged_nuggets),
+                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
+                  "per_file": per_file_stats,
+                  "per_confidence": confidence_counts
+              },
+              "nuggets": nuggets_deduplicati
+          }
+
+          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+              json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+                f"salvati in nuggets_finale.json", flush=True)
+          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+          EOF
+          python -u merge_nuggets.py
+
+      - name: Upload Artifact Macchina 2 (Testo Grezzo)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
+
+      - name: Upload Artifact Nugget (JSON Strutturato)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuggets_Macchina2
+          path: nuggets_finale.json
