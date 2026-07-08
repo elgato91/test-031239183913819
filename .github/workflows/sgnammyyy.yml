@@ -54,12 +54,30 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
+          # Array di IP endpoint reali e differenti di Cloudflare WARP.
+          # Questo forza l'instradamento di ciascun tunnel su nodi di ingresso diversi,
+          # garantendo la generazione di IPv4 e IPv6 di uscita diversi e unici per ogni container.
+          ENDPOINTS=(
+            "162.159.193.1:2408"
+            "162.159.193.5:2408"
+            "162.159.193.10:2408"
+            "162.159.192.1:2408"
+            "162.159.192.5:2408"
+            "162.159.192.10:2408"
+          )
+
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            ENDPOINT_IP=${ENDPOINTS[$((i-1))]}
+            echo "Avvio container warproxy-$i sulla porta $PORT con endpoint $ENDPOINT_IP..."
+            
+            # 1. Rimosso --network host per sfruttare la rete isolata Bridge di Docker.
+            # 2. Mappata la porta interna SOCKS5 (1080) sulla corrispondente porta host ($PORT).
+            # 3. Forzata la variabile ENDPOINT con IP differenti per evitare medesimi gateway di uscita.
             docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
+              -p $PORT:1080 \
+              -e SOCKS5_PORT=1080 \
+              -e ENDPOINT=$ENDPOINT_IP \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
@@ -816,7 +834,7 @@ jobs:
               for url in targets:
                   if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
                       print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
-                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
+                            f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP directo.", flush=True)
                       failed_targets.append(url)
                       continue
 
