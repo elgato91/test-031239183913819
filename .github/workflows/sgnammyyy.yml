@@ -1050,6 +1050,7 @@ jobs:
                   "--ignore-certificate-errors",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
                   "--fingerprint-storage-quota=5000",
+                  f"--fingerprint=9990{node_id}",
                   "--fingerprint-noise=false"
               ]
 
