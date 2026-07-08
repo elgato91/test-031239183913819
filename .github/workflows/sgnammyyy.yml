@@ -29,10 +29,12 @@ jobs:
           # Fondamentali secondo la documentazione per non farsi rilevare da CreepJS/FingerprintJS
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
-          find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
+          
+          # CORRETTO IL BUG DEL COMANDO FIND: Raggruppamento esplicito delle estensioni per copiare tutti i file ttf/otf
+          find /tmp/win11-fonts-extracted -type f \( -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" \) -exec cp {} ~/.local/share/fonts/windows/ \;
           
           # Rigeneriamo la cache dei font di sistema (Obbligatorio)
-          fc-cache -f -v ~/.local/share/fonts/windows
+          fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
         run: |
@@ -1014,8 +1016,8 @@ jobs:
                   if ind in visible_text:
                       return False, f"WAF/Captcha rilevato nel testo visibile: {ind}"
 
-                  if len(visible_text) < 150:
-                      return False, f"Contenuto visibile insufficiente ({len(visible_text)} caratteri)"
+              if len(visible_text) < 150:
+                  return False, f"Contenuto visibile insufficiente ({len(visible_text)} caratteri)"
 
               return True, ""
 
