@@ -1049,10 +1049,8 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
-                  "--fingerprint-storage-quota=5000",
-                  "--enable-blink-features=FakeShadowRoot"
+                  "--ignore-certificate-errors"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
