@@ -1082,48 +1082,96 @@ jobs:
 
                   for url in targets:
                       print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
+                      page = main_page # Pagina di lavoro iniziale
+                      
                       try:
                           query_to_search = get_query_from_url(url)
 
                           if "bing.com" in url:
-                              await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(2.5, 4.0))
+                              await page.goto("https://bing.com", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(3.0, 5.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                  await search_box.type(query_to_search, delay=60)
+                                  await search_box.type(query_to_search, delay=80)
+                                  await asyncio.sleep(random.uniform(0.5, 1.2))
                                   await page.keyboard.press("Enter")
+                                  await page.wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
 
                           elif "startpage.com" in url:
-                              await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(2.0, 3.5))
+                              await page.goto("https://startpage.com", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("input#q").first
-                                  await search_box.type(query_to_search, delay=60)
+                                  await search_box.type(query_to_search, delay=80)
+                                  await asyncio.sleep(random.uniform(0.4, 1.0))
                                   await page.keyboard.press("Enter")
+                                  await page.wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
 
-                          elif "html.duckduckgo.com" in url:
-                              await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(2.0, 3.5))
+                          elif "://duckduckgo.com" in url:
+                              await page.goto("https://://duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("input[name=q]").first
-                                  await search_box.type(query_to_search, delay=60)
+                                  await search_box.type(query_to_search, delay=80)
+                                  await asyncio.sleep(random.uniform(0.4, 0.9))
                                   await page.keyboard.press("Enter")
+                                  await page.wait_for_load_state("domcontentloaded", timeout=15000)
                               except Exception:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
 
                           else:
+                              # Se il sito forza un redirect aprendo un nuovo tab, sposta il puntatore sul popup
+                              async def handle_popup(popup):
+                                  nonlocal page
+                                  print(f"[NODO {node_id}] Cambiato Tab di destinazione (rilevato Popup)!", flush=True)
+                                  page = popup
+                              
+                              context.on("page", lambda p: asyncio.ensure_future(handle_popup(p)))
                               await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
+                          # (Qui si innesca la modifica numero 2 di asyncio.sleep al posto di networkidle)
+                          await asyncio.sleep(random.uniform(6.0, 8.0))
+
+                          await page.keyboard.press("PageDown")
+                          await asyncio.sleep(random.uniform(1.5, 2.5))
+                          await page.keyboard.press("PageDown")
+                          await asyncio.sleep(random.uniform(2.0, 3.0))
+
+                          raw_html = await page.content()
+                          current_url = page.url
+
+                          is_ok, err_msg = validate_html(raw_html, current_url, None)
+
+                          if is_ok:
+                              text_for_output = html_to_clean_markdown(raw_html, current_url)
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_for_output}\n"
+                              print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
+                              pubblica_contenuto_scrapato(url, text_for_output, node_id, "step2")
+                          else:
+                              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({err_msg})\n"
+                              print(f"[NODO {node_id}] -> Fallito: {err_msg}", flush=True)
+
+                      except Exception as e:
+                          print(f"[NODO {node_id}] -> Errore esecuzione su {url}: {e}", flush=True)
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+
+                      # Se abbiamo lavorato su un tab secondario, lo chiudiamo e puliamo i listener
+                      if page != main_page:
                           try:
-                              await page.wait_for_load_state("networkidle", timeout=12000)
+                              await page.close()
                           except Exception:
                               pass
+                          context.remove_all_listeners("page")
 
-                          await asyncio.sleep(4)
+                      await asyncio.sleep(random.uniform(6.0, 10.0))
+
+                          # Sostituito networkidle con attesa asincrona nativa invisibile ai WAF
+                          await asyncio.sleep(random.uniform(6.0, 8.0))
+                          
                           await page.keyboard.press("PageDown")
                           await asyncio.sleep(1)
                           await page.keyboard.press("PageDown")
