@@ -32,7 +32,7 @@ jobs:
           find /tmp/win11-fonts-extracted -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -exec cp {} ~/.local/share/fonts/windows/ \;
           
           # Rigeneriamo la cache dei font di sistema (Obbligatorio)
-          fc-cache -f -v
+          fc-cache -f -v ~/.local/share/fonts/windows
 
       - name: Installazione Dipendenze Scraper
         run: |
@@ -1049,7 +1049,8 @@ jobs:
                   "--disable-dev-shm-usage",
                   "--ignore-certificate-errors",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}",
-                  "--fingerprint-windows-font-metrics"
+                  "--fingerprint-storage-quota=5000",
+                  "--fingerprint-noise=false"
               ]
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
