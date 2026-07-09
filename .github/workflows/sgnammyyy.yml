@@ -962,6 +962,7 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
+                  f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=5000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
