@@ -33,11 +33,11 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            sleep 0.5
+            sleep 15
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 4
+          sleep 10
 
           echo "=== VISUALIZZAZIONE INDIRIZZI IP REALI ==="
           for i in {1..6}; do
@@ -45,15 +45,16 @@ jobs:
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Legge l'IPv4 effettivo della scheda Cloudflare (esclude 127.0.0.1 e la rete docker standard)
+            # Forza la risoluzione IPv4 interrogando direttamente il server DNS Cloudflare tramite il proxy
             echo -n "  IPv4 Assegnato: "
-            docker exec warproxy-$i ip -4 addr show | grep inet | grep -v '127.0.0.1' | grep -v '172.17.' | awk '{print $2}' | cut -d/ -f1 || echo "Non disponibile"
+            dig +short TXT @1.1.1.1 whoami.cloudflare --socks5=127.0.0.1:$PORT | tr -d '"' || echo "Non disponibile"
 
-            # Legge l'IPv6 effettivo della scheda Cloudflare (esclude ::1 e gli IP locali fe80::)
+            # Forza la risoluzione IPv6 interrogando direttamente il server DNS Cloudflare IPv6 tramite il proxy
             echo -n "  IPv6 Assegnato: "
-            docker exec warproxy-$i ip -6 addr show | grep inet6 | grep -v '::1' | grep -v 'fe80:' | awk '{print $2}' | cut -d/ -f1 || echo "Non disponibile"
+            dig +short TXT @2606:4700:4700::1111 whoami.cloudflare --socks5=127.0.0.1:$PORT | tr -d '"' || echo "Non disponibile"
           done
           echo "----------------------------------------"
+
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
