@@ -16,12 +16,7 @@ jobs:
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" playwright requests "requests[socks]" curl-cffi
-          playwright install-deps chromium
-
-      - name: Pre-inizializzazione Cache CloakBrowser
-        run: |
-          python -m cloakbrowser install
+          pip install "cloakbrowser[geoip]" requests "requests[socks]"
 
       - name: Setup Container WARP (IPv6)
         run: |
