@@ -46,22 +46,25 @@ jobs:
 
       - name: Setup Container WARP (IPv6)
         run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
+          docker pull monius/warp-socks:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+            echo "Avvio container warp-socks-$i sulla porta $PORT..."
+            
+            # Mappiamo la tua porta esterna (40001-40006) sulla 1080 interna del container
+            docker run --name warp-socks-$i \
+              -p $PORT:1080 \
+              -e IPv6=true \
+              -d monius/warp-socks:latest
+            
+            sleep 2
           done
 
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          echo "=== SETUP COMPLETATO ==="
+          echo "6 Proxy SOCKS5 pronti sulle porte da 40001 a 40006."
+          echo "Puoi collegare CloakBrowser direttamente a 127.0.0.1:40001 ecc."
+
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
