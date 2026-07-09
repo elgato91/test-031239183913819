@@ -46,17 +46,14 @@ jobs:
 
       - name: Setup Container WARP (IPv6)
         run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
+          docker pull ghcr.io/mon-ius/docker-warp-socks:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            echo "Avvio container warp-socks-$i esposto sulla porta host $PORT..."
             docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
+              -p $PORT:9091 \
+              -d ghcr.io/mon-ius/docker-warp-socks:latest
             sleep 0.5
           done
 
