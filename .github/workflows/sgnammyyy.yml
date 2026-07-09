@@ -963,6 +963,7 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
+                  "--fingerprint-storage-quota=5000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
@@ -972,7 +973,6 @@ jobs:
                       profile_dir,
                       headless=False,
                       humanize=True,
-                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
                       viewport={"width": 1920, "height": 1080},
