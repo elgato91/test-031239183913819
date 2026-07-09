@@ -57,8 +57,25 @@ jobs:
             sleep 0.5
           done
 
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          echo "Verifica dello stato dei proxy in corso (attesa negoziazione iniziale)..."
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "In attesa che il proxy sulla porta $PORT sia pronto..."
+            SUCCESS=0
+            for attempt in {1..30}; do
+              if curl -s --connect-timeout 2 -o /dev/null -x "socks5h://127.0.0.1:$PORT" "https://www.cloudflare.com/cdn-cgi/trace"; then
+                echo "-> Proxy sulla porta $PORT pronto e attivo!"
+                SUCCESS=1
+                break
+              fi
+              sleep 1
+            done
+            if [ $SUCCESS -ne 1 ]; then
+              echo "-> ERRORE: Il proxy sulla porta $PORT non si e' attivato."
+              docker logs warproxy-$i | tail -n 20
+              exit 1
+            fi
+          done
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -747,7 +764,7 @@ jobs:
               low_html = html.lower()
 
               # Controllo aggiuntivo sul <title>: segnale ad alta confidenza, indipendente
-              # dal testo visibile, basso rischio di falsi positivi.
+              # dal testo visibile, basso rischio di falsi positiv.
               title_match = re.search(r"<title[^>]*>(.*?)</title>", low_html, re.DOTALL)
               if title_match:
                   title_text = title_match.group(1).strip()
@@ -869,9 +886,28 @@ jobs:
 
       - name: Refresh IP Container per lo STEP 2
         run: |
-          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
+          echo "Riavvio dei container per pulire la sessione WARP..."
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
+          
+          echo "Verifica dello stato dei proxy in corso (attesa post-riavvio)..."
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "In attesa che il proxy sulla porta $PORT sia pronto..."
+            SUCCESS=0
+            for attempt in {1..30}; do
+              if curl -s --connect-timeout 2 -o /dev/null -x "socks5h://127.0.0.1:$PORT" "https://www.cloudflare.com/cdn-cgi/trace"; then
+                echo "-> Proxy sulla porta $PORT pronto!"
+                SUCCESS=1
+                break
+              fi
+              sleep 1
+            done
+            if [ $SUCCESS -ne 1 ]; then
+              echo "-> ERRORE: Il proxy sulla porta $PORT non si e' riattivato."
+              docker logs warproxy-$i | tail -n 20
+              exit 1
+            fi
+          done
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
