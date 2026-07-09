@@ -25,13 +25,18 @@ jobs:
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
+            
+            # NOTA: Rimosso --network host. Usiamo -p per isolare totalmente i container.
+            # Mappiamo la porta esterna $PORT sulla porta interna $PORT gestita dalla variabile d'ambiente.
             docker run --name warproxy-$i \
-              --network host \
+              -p $PORT:$PORT \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 4
+            
+            # Pausa fondamentale per non far registrare i container nello stesso millisecondo su Cloudflare
+            sleep 0.5
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
@@ -43,13 +48,12 @@ jobs:
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Chiediamo esplicitamente l'IPv4 a un resolver che risponde solo in v4
+            # Usiamo curl forzando i flag nativi -4 e -6 senza fidarci dei domini di terze parti
             echo -n "  IPv4 Reale: "
-            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.co || echo "Non disponibile"
+            curl -4 -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Non disponibile"
 
-            # Chiediamo esplicitamente l'IPv6 a un resolver che risponde solo in v6
             echo -n "  IPv6 Reale: "
-            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.co || echo "Non disponibile"
+            curl -6 -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Non disponibile"
           done
           echo "----------------------------------------"
 
