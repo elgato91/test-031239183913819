@@ -36,23 +36,34 @@ jobs:
           
       - name: Setup Container WARP (IPv6)
         run: |
-          # Scarichiamo l'immagine ufficiale corretta da Docker Hub
           docker pull monius/docker-warp-socks:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warp-socks-$i sulla porta $PORT..."
             
-            # Nota: Questa immagine espone internamente la porta 9091 per impostazione predefinita
             docker run --name warp-socks-$i \
               -p $PORT:9091 \
               -d monius/docker-warp-socks:latest
             
-            sleep 2
+            sleep 3
           done
 
-          echo "=== SETUP COMPLETATO ==="
-          echo "6 Proxy SOCKS5 pronti sulle porte da 40001 a 40006."
+          echo "Attesa stabilizzazione dei tunnel Sing-box..."
+          sleep 10
+
+          echo "=== VERIFICA DEGLI IP REALI DI OGNI PROXY ==="
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "----------------------------------------"
+            echo "Proxy Porta $PORT:"
+            
+            # Usiamo il comando ufficiale del README usando socks5h per passare i DNS al tunnel
+            # Estraiamo la riga dell'IP di uscita e lo stato del WARP
+            curl -x "socks5h://127.0.0.1:$PORT" -fsSL "https://www.cloudflare.com/cdn-cgi/trace" | grep -E 'ip=|warp=' || echo "Errore di connessione sul proxy"
+          done
+          echo "----------------------------------------"
+
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
