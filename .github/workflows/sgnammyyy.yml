@@ -37,7 +37,7 @@ jobs:
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 5
+          sleep 4
 
           echo "=== VISUALIZZAZIONE INDIRIZZI IP REALI ==="
           for i in {1..6}; do
@@ -45,19 +45,15 @@ jobs:
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Recupera tutti gli IP assegnati al container, escludendo l'interfaccia locale (127.0.0.1 / ::1)
-            # e li separa chiaramente tra IPv4 e IPv6 leggendo lo stato di rete interno di Docker
-            
+            # Legge l'IPv4 effettivo della scheda Cloudflare (esclude 127.0.0.1 e la rete docker standard)
             echo -n "  IPv4 Assegnato: "
-            docker exec warproxy-$i hostname -I | awk '{print $1}' || echo "Non disponibile"
+            docker exec warproxy-$i ip -4 addr show | grep inet | grep -v '127.0.0.1' | grep -v '172.17.' | awk '{print $2}' | cut -d/ -f1 || echo "Non disponibile"
 
+            # Legge l'IPv6 effettivo della scheda Cloudflare (esclude ::1 e gli IP locali fe80::)
             echo -n "  IPv6 Assegnato: "
-            docker exec warproxy-$i cat /proc/net/if_inet6 | awk '{print $1}' | sed 's/.\{4\}/&:/g;s/:$//' || echo "Non disponibile"
+            docker exec warproxy-$i ip -6 addr show | grep inet6 | grep -v '::1' | grep -v 'fe80:' | awk '{print $2}' | cut -d/ -f1 || echo "Non disponibile"
           done
           echo "----------------------------------------"
-
-
-
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
