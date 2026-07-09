@@ -50,34 +50,49 @@ jobs:
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
+            NAME="warproxy-$i"
+            
+            echo "Rimozione eventuale container precedente $NAME..."
+            docker rm -f $NAME 2>/dev/null || true
+
+            echo "Avvio container $NAME sulla porta $PORT..."
+            # Creiamo una cartella temporanea unica per isolare l'identità Cloudflare di questo container
+            mkdir -p /tmp/warp-$i
+            
+            docker run --name $NAME \
               --network host \
+              -v /tmp/warp-$i:/data \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
+            
+            # 15 secondi di attesa reali permettono a Cloudflare di differenziare la richiesta di IP
             sleep 15
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
+          sleep 10
 
-          echo "=== VERIFICA INDIRIZZI IP WARP ==="
+          echo "=== VERIFICA INDIRIZZI IP WARP REALI ==="
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            echo -n "  IPv4: "
-            curl -4 -s --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Errore o IPv4 non disponibile"
-            echo ""
+            # Test IPv4 nativo usando l'endpoint Cloudflare dedicato
+            echo -n "  IPv4 Reale: "
+            curl -s --socks5-hostname 127.0.0.1:$PORT http://1.1.1 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile"
 
-            echo -n "  IPv6: "
-            curl -6 -s --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Errore o IPv6 non disponibile"
-            echo ""
+            # Test IPv6 nativo usando l'endpoint Cloudflare IPv6-only dedicato
+            echo -n "  IPv6 Reale: "
+            curl -s --socks5-hostname 127.0.0.1:$PORT http://2606:4700:4700::1111 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile"
           done
           echo "----------------------------------------"
+          
+          # Pulizia cartelle temporanee
+          rm -rf /tmp/warp-*
+
 
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
