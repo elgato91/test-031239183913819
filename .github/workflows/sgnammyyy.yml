@@ -46,14 +46,16 @@ jobs:
 
       - name: Setup Container WARP (IPv6)
         run: |
-          docker pull ghcr.io/mon-ius/docker-warp-socks:latest
+          docker pull ghcr.io/kingcc/warproxy:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warp-socks-$i esposto sulla porta host $PORT..."
+            echo "Avvio container warproxy-$i esposto sulla porta host $PORT..."
             docker run --name warproxy-$i \
-              -p $PORT:9091 \
-              -d ghcr.io/mon-ius/docker-warp-socks:latest
+              -p $PORT:1080 \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
             sleep 0.5
           done
 
@@ -764,7 +766,7 @@ jobs:
               low_html = html.lower()
 
               # Controllo aggiuntivo sul <title>: segnale ad alta confidenza, indipendente
-              # dal testo visibile, basso rischio di falsi positiv.
+              # dal testo visibile, basso rischio di falsi positivi.
               title_match = re.search(r"<title[^>]*>(.*?)</title>", low_html, re.DOTALL)
               if title_match:
                   title_text = title_match.group(1).strip()
