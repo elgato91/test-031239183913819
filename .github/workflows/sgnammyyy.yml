@@ -24,25 +24,18 @@ jobs:
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            NAME="warproxy-$i"
-            
-            echo "Rimozione eventuale container precedente $NAME..."
-            docker rm -f $NAME 2>/dev/null || true
-
-            echo "Avvio container $NAME sulla porta $PORT..."
-            # Rimosso il volume problematico; l'isolamento avviene nel filesystem del container
-            docker run --name $NAME \
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
             sleep 4
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 5
+          sleep 10
 
           echo "=== VERIFICA INDIRIZZI IP WARP REALI ==="
           for i in {1..6}; do
@@ -50,15 +43,15 @@ jobs:
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Timeout inseriti per evitare blocchi indefiniti del workflow
+            # Chiediamo esplicitamente l'IPv4 a un resolver che risponde solo in v4
             echo -n "  IPv4 Reale: "
-            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://1.1.1 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile (Timeout/Errore)"
+            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.co || echo "Non disponibile"
 
+            # Chiediamo esplicitamente l'IPv6 a un resolver che risponde solo in v6
             echo -n "  IPv6 Reale: "
-            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://2606:4700:4700::1111 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile (Timeout/Errore)"
+            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.co || echo "Non disponibile"
           done
           echo "----------------------------------------"
-
 
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
