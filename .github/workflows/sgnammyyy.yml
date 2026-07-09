@@ -44,29 +44,30 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6)
+      - name: Setup Container WARP (IPv6 con Docker-Warp-Socks e Staggering)
         run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
+          docker pull ghcr.io/mon-ius/docker-warp-socks:latest
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i esposto sulla porta host $PORT..."
+            echo "Avvio container warproxy-$i sulla porta host $PORT..."
             docker run --name warproxy-$i \
-              -p $PORT:1080 \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+              -p $PORT:9091 \
+              -d ghcr.io/mon-ius/docker-warp-socks:latest
+            
+            # Pausa per evitare che le registrazioni simultanee causino errore 429
+            echo "Attesa 15 secondi per consentire la registrazione a Cloudflare..."
+            sleep 15
           done
 
-          echo "Verifica dello stato dei proxy in corso (attesa negoziazione iniziale)..."
+          echo "Verifica iniziale dello stato dei proxy..."
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "In attesa che il proxy sulla porta $PORT sia pronto..."
+            echo "Verifica del proxy sulla porta $PORT..."
             SUCCESS=0
-            for attempt in {1..30}; do
+            for attempt in {1..20}; do
               if curl -s --connect-timeout 2 -o /dev/null -x "socks5h://127.0.0.1:$PORT" "https://www.cloudflare.com/cdn-cgi/trace"; then
-                echo "-> Proxy sulla porta $PORT pronto e attivo!"
+                echo "-> Proxy $i pronto e attivo!"
                 SUCCESS=1
                 break
               fi
@@ -886,30 +887,35 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Refresh IP Container per lo STEP 2
+      - name: Refresh IP Container per lo STEP 2 (Sequenziale con Staggering anti-429)
         run: |
-          echo "Riavvio dei container per pulire la sessione WARP..."
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          
-          echo "Verifica dello stato dei proxy in corso (attesa post-riavvio)..."
+          echo "Riavvio sequenziale dei container con intervallo di sicurezza per ottenere nuovi IP puliti..."
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "In attesa che il proxy sulla porta $PORT sia pronto..."
+            echo "Riavvio container warproxy-$i..."
+            docker restart warproxy-$i
+            
+            # Pausa strategica per evitare il throttling delle registrazioni alle API di Cloudflare
+            echo "Attesa 15 secondi per negoziazione nuovo client WARP..."
+            sleep 15
+
+            echo "Verifica del proxy warproxy-$i sulla porta host $PORT..."
             SUCCESS=0
-            for attempt in {1..30}; do
+            for attempt in {1..20}; do
               if curl -s --connect-timeout 2 -o /dev/null -x "socks5h://127.0.0.1:$PORT" "https://www.cloudflare.com/cdn-cgi/trace"; then
-                echo "-> Proxy sulla porta $PORT pronto!"
+                echo "-> Proxy warproxy-$i riavviato e funzionante con successo!"
                 SUCCESS=1
                 break
               fi
               sleep 1
             done
             if [ $SUCCESS -ne 1 ]; then
-              echo "-> ERRORE: Il proxy sulla porta $PORT non si e' riattivato."
+              echo "-> ERRORE: Il proxy sulla porta $PORT non si e' ripristinato dopo il riavvio."
               docker logs warproxy-$i | tail -n 20
               exit 1
             fi
           done
+          echo "Tutti i proxy sono stati riavviati con successo con nuovi IP."
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
