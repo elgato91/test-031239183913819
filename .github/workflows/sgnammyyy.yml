@@ -57,11 +57,28 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
+            sleep 15
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
+
+          echo "=== VERIFICA INDIRIZZI IP WARP ==="
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "----------------------------------------"
+            echo "Container warproxy-$i (Porta $PORT):"
+            
+            echo -n "  IPv4: "
+            curl -4 -s --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Errore o IPv4 non disponibile"
+            echo ""
+
+            echo -n "  IPv6: "
+            curl -6 -s --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Errore o IPv6 non disponibile"
+            echo ""
+          done
+          echo "----------------------------------------"
+
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
