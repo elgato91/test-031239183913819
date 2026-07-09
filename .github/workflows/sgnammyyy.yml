@@ -12,6 +12,7 @@ jobs:
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
       TARGET_TOPIC: "Orvieto"
       FORZA_DIAGNOSTICI_STEP2: "1"
+      CLOAKBROWSER_SUPPRESS_FONT_WARNING: "1"
     steps:
 
       - name: Installazione Font di Sistema e Windows 11 Reali
@@ -26,7 +27,7 @@ jobs:
           wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
           unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
 
-          find /tmp/win11-fonts-extracted -type f \( -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" \) -exec cp {} ~/.local/share/fonts/windows/ \;
+          find /tmp/win11-fonts-extracted -type f \( -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" -o -name "*.ttc" -o -name "*.TTC" \) -exec cp {} ~/.local/share/fonts/windows/ \;
 
           fc-cache -f -v
 
@@ -44,7 +45,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6)
+      - name: Setup Container WARP (Step 1 - IPv4 Stabile)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -54,7 +55,7 @@ jobs:
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e DNS=1.1.1.1,1.0.0.1 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             sleep 5
@@ -391,7 +392,7 @@ jobs:
                           prossima_liberazione = min(e["cooldown_until"] for e in self.entries)
                           attesa = max(0.5, prossima_liberazione - now)
                           print(f"{label}[KEY-POOL] Tutte le chiavi in cooldown, attendo {attesa:.1f}s...",
-                                flush=True)
+                                  flush=True)
                           await asyncio.sleep(min(attesa, 15.0))
 
               def _mark_cooldown(self, entry, label=""):
@@ -549,7 +550,7 @@ jobs:
                       print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
                       return None
 
-              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
+              print(f"[NODO {node_id}] Tutte le chiavi disponibili esaurite per {source_url} "
                     f"(ultimo motivo: {ultimo_motivo})", flush=True)
               return None
           EOF
