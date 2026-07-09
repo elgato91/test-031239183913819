@@ -56,18 +56,14 @@ jobs:
             docker rm -f $NAME 2>/dev/null || true
 
             echo "Avvio container $NAME sulla porta $PORT..."
-            # Creiamo una cartella temporanea unica per isolare l'identità Cloudflare di questo container
-            mkdir -p /tmp/warp-$i
-            
+            # Rimosso il volume problematico; l'isolamento avviene nel filesystem del container
             docker run --name $NAME \
               --network host \
-              -v /tmp/warp-$i:/data \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            # 15 secondi di attesa reali permettono a Cloudflare di differenziare la richiesta di IP
             sleep 15
           done
 
@@ -80,18 +76,14 @@ jobs:
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Test IPv4 nativo usando l'endpoint Cloudflare dedicato
+            # Timeout inseriti per evitare blocchi indefiniti del workflow
             echo -n "  IPv4 Reale: "
-            curl -s --socks5-hostname 127.0.0.1:$PORT http://1.1.1 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile"
+            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://1.1.1 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile (Timeout/Errore)"
 
-            # Test IPv6 nativo usando l'endpoint Cloudflare IPv6-only dedicato
             echo -n "  IPv6 Reale: "
-            curl -s --socks5-hostname 127.0.0.1:$PORT http://2606:4700:4700::1111 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile"
+            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://2606:4700:4700::1111 | grep -E '^ip=' | cut -d= -f2 || echo "Non disponibile (Timeout/Errore)"
           done
           echo "----------------------------------------"
-          
-          # Pulizia cartelle temporanee
-          rm -rf /tmp/warp-*
 
 
 
