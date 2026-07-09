@@ -33,27 +33,29 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            sleep 15
+            sleep 0.5
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 10
+          sleep 5
 
-          echo "=== VISUALIZZAZIONE INDIRIZZI IP CONFIGURATI ==="
+          echo "=== VISUALIZZAZIONE INDIRIZZI IP REALI ==="
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Questo endpoint accetta e risponde SOLO in IPv4
+            # Recupera tutti gli IP assegnati al container, escludendo l'interfaccia locale (127.0.0.1 / ::1)
+            # e li separa chiaramente tra IPv4 e IPv6 leggendo lo stato di rete interno di Docker
+            
             echo -n "  IPv4 Assegnato: "
-            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://dnsomatic.com || echo "Non disponibile"
+            docker exec warproxy-$i hostname -I | awk '{print $1}' || echo "Non disponibile"
 
-            # Questo endpoint accetta e risponde SOLO in IPv6
             echo -n "  IPv6 Assegnato: "
-            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://ident.me || echo "Non disponibile"
+            docker exec warproxy-$i cat /proc/net/if_inet6 | awk '{print $1}' | sed 's/.\{4\}/&:/g;s/:$//' || echo "Non disponibile"
           done
           echo "----------------------------------------"
+
 
 
 
