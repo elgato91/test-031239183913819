@@ -1,31 +1,49 @@
-name: Test Gemma 26B via Google AI Studio
+name: Test Gemma 26B con Google Search Grounding
 
 on:
-  workflow_dispatch: # Consente di avviare il test manualmente da GitHub Actions
+  workflow_dispatch: # Consente l'esecuzione manuale da GitHub Actions
 
 jobs:
-  test-gemma:
+  test-gemma-search:
     runs-on: ubuntu-latest
     steps:
-      - name: Invia richiesta a Gemma 26B
+      - name: Richiesta a Gemma con Grounding Web
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           if [ -z "$GEMINI_API_KEY" ]; then
-            echo "Errore: GEMINI_API_KEY non è configurata nei GitHub Secrets."
+            echo "Errore: GEMINI_API_KEY non è configurata."
             exit 1
           fi
 
-          curl -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
+          # Effettua la chiamata passando il tool "google_search" nel payload
+          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d '{
               "contents": [
                 {
                   "parts": [
                     {
-                      "text": "Rispondi in una sola frase: perché il cielo è azzurro?"
+                      "text": "Quali sono le ultimissime notizie di oggi sul telescopio James Webb? Rispondi in massimo due frasi."
                     }
                   ]
                 }
+              ],
+              "tools": [
+                {
+                  "google_search": {}
+                }
               ]
-            }'
+            }')
+
+          echo "========================================="
+          echo "RISPOSTA DEL MODELLO:"
+          echo "========================================="
+          # Estrae la risposta finale escludendo i passaggi intermedi di ragionamento
+          echo "$RESPONSE" | jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text'
+          
+          echo -e "\n========================================="
+          echo "FONTI UTILIZZATE (GROUNDING METADATA):"
+          echo "========================================="
+          # Mostra le query di ricerca effettuate e i link delle fonti usate dal modello
+          echo "$RESPONSE" | jq '.candidates[0].groundingMetadata'
