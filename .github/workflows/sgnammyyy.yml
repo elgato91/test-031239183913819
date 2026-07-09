@@ -870,11 +870,27 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Refresh IP Container per lo STEP 2
+      - name: Rigenerazione Pulita Container per lo STEP 2 (Nuove Registrazioni)
         run: |
-          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
+          echo 'Eliminazione vecchi container per forzare nuove registrazioni su WARP...'
+          docker rm -f warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6 || true
+
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Creazione container warproxy-$i sulla porta $PORT (Nuova registrazione)..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=1.1.1.1,1.0.0.1 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            
+            # Scagliona le registrazioni per evitare il rate-limit di Cloudflare dallo stesso IP host
+            sleep 5
+          done
+
+          echo "Attesa stabilizzazione dei nuovi tunnel freschi..."
+          sleep 10
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
