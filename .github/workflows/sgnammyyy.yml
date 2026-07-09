@@ -26,8 +26,6 @@ jobs:
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
             
-            # NOTA: Rimosso --network host. Usiamo -p per isolare totalmente i container.
-            # Mappiamo la porta esterna $PORT sulla porta interna $PORT gestita dalla variabile d'ambiente.
             docker run --name warproxy-$i \
               -p $PORT:$PORT \
               -e SOCKS5_PORT=$PORT \
@@ -35,27 +33,28 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            # Pausa fondamentale per non far registrare i container nello stesso millisecondo su Cloudflare
-            sleep 0.5
+            sleep 15
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 10
 
-          echo "=== VERIFICA INDIRIZZI IP WARP REALI ==="
+          echo "=== VISUALIZZAZIONE INDIRIZZI IP CONFIGURATI ==="
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "----------------------------------------"
             echo "Container warproxy-$i (Porta $PORT):"
             
-            # Usiamo curl forzando i flag nativi -4 e -6 senza fidarci dei domini di terze parti
-            echo -n "  IPv4 Reale: "
-            curl -4 -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Non disponibile"
+            # Questo endpoint accetta e risponde SOLO in IPv4
+            echo -n "  IPv4 Assegnato: "
+            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://dnsomatic.com || echo "Non disponibile"
 
-            echo -n "  IPv6 Reale: "
-            curl -6 -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT https://ifconfig.me || echo "Non disponibile"
+            # Questo endpoint accetta e risponde SOLO in IPv6
+            echo -n "  IPv6 Assegnato: "
+            curl -s --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$PORT http://ident.me || echo "Non disponibile"
           done
           echo "----------------------------------------"
+
 
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
