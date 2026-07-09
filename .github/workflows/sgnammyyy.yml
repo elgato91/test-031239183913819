@@ -871,23 +871,21 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Rigenerazione Pulita Container per lo STEP 2 (Nuove Registrazioni)
+      - name: Rigenerazione Pulita Container per lo STEP 2 (Nuove Registrazioni su Nuove Porte)
         run: |
-          echo 'Eliminazione vecchi container per forzare nuove registrazioni su WARP...'
+          echo 'Eliminazione vecchi container di Step 1...'
           docker rm -f warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6 || true
 
           for i in {1..6}; do
-            PORT=$((40000 + i))
-            echo "Creazione container warproxy-$i sulla porta $PORT (Nuova registrazione)..."
+            PORT=$((41000 + i)) # <--- Usiamo il range 41001-41006 per aggirare il TIME_WAIT delle vecchie porte
+            echo "Creazione container warproxy-$i sulla porta $PORT (Nuova registrazione con IP fresco)..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=1.1.1.1,1.0.0.1 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
-            # Scagliona le registrazioni per evitare il rate-limit di Cloudflare dallo stesso IP host
-            sleep 5
+            sleep 4
           done
 
           echo "Attesa stabilizzazione dei nuovi tunnel freschi..."
@@ -918,7 +916,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
+      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, con attesa attiva e navigazione controllata)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -927,6 +925,7 @@ jobs:
           import random
           import os
           import json
+          import requests
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
@@ -934,10 +933,21 @@ jobs:
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
+          INITIAL_PORT = 41000 + node_id
 
           # File dedicato per nodo: stesso principio dello Step 1.
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
+
+          def verify_proxy_active(port, max_retries=10, delay=5):
+              test_session = requests.Session(impersonate="chrome120")
+              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              for _ in range(max_retries):
+                  try:
+                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200: return True
+                  except: pass
+                  time.sleep(delay)
+              return False
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -963,6 +973,11 @@ jobs:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
           async def main():
+              # Attesa bloccante del proxy prima di avviare CloakBrowser
+              if not verify_proxy_active(INITIAL_PORT):
+                  print(f"[NODO {node_id}] Nuova porta proxy non raggiungibile. Esco.", flush=True)
+                  sys.exit(0)
+
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
 
@@ -975,7 +990,7 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              # Profilo con noise attivo di default e path per font corretti (identico alla baseline).
+              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -997,10 +1012,10 @@ jobs:
                   )
                   page = await context.new_page()
 
-                  # WARMUP Integrato - Creazione di cronologia valida
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
-                  await asyncio.sleep(1)
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
+                  # WARMUP Integrato - Creazione di cronologia valida su Wikipedia (veloce e privo di blocchi)
+                  await page.goto("https://www.google.com", wait_until="commit", timeout=25000)
+                  await asyncio.sleep(2)
+                  await page.goto("https://www.wikipedia.org", wait_until="commit", timeout=25000)
                   await asyncio.sleep(2)
 
               except Exception as e:
@@ -1016,41 +1031,45 @@ jobs:
 
                       # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
-                          await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                          await page.goto("https://www.bing.com/", wait_until="commit", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
                           try:
                               search_box = page.locator("textarea[name='q'], input[name='q']").first
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(6)
+                          except: 
+                              await page.goto(url, wait_until="commit", timeout=35000)
+                              await asyncio.sleep(6)
 
                       elif "startpage.com" in url:
-                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                          await page.goto("https://www.startpage.com/", wait_until="commit", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
                           try:
                               search_box = page.locator("input#q").first
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(6)
+                          except: 
+                              await page.goto(url, wait_until="commit", timeout=35000)
+                              await asyncio.sleep(6)
 
                       elif "html.duckduckgo.com" in url:
-                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
+                          await page.goto("https://html.duckduckgo.com/", wait_until="commit", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
                           try:
                               search_box = page.locator("input[name=q]").first
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(6)
+                          except: 
+                              await page.goto(url, wait_until="commit", timeout=35000)
+                              await asyncio.sleep(6)
 
                       else:
-                          await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
-                      try: await page.wait_for_load_state("networkidle", timeout=12000)
-                      except: pass
-
-                      await asyncio.sleep(6)
+                          # Usiamo wait_until="commit" per ignorare i tracker lenti che mandano la navigazione in timeout
+                          await page.goto(url, wait_until="commit", timeout=60000)
+                          await asyncio.sleep(8)
 
                       # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
@@ -1078,17 +1097,11 @@ jobs:
 
                       # Testo completo, senza troncamento, in Markdown pulito per l'LLM.
                       # Il check di validazione gira sul testo GIA' pulito, non sull'HTML
-                      # grezzo troncato: una pagina di blocco corta resta corta anche dopo
-                      # la pulizia, invece di essere gonfiata da tag/script residui.
+                      # grezzo troncato.
                       text_full = html_to_clean_markdown(raw_html, url)
                       text_lower_full = text_full.lower()
 
-                      # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le
-                      # frasi esatte di pagine di blocco che passavano il controllo
-                      # precedente ("Robot Challenge Screen" / "Checking the site
-                      # connection security" da Cloudflare; "unusual traffic from your
-                      # computer network" da Google), senza rimuovere nessuna delle
-                      # frasi originali.
+                      # Blocklist aggiornata su base OSSERVATA
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
