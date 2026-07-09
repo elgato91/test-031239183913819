@@ -43,11 +43,11 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            sleep 15
+            sleep 4
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 10
+          sleep 5
 
           echo "=== VERIFICA INDIRIZZI IP WARP REALI ==="
           for i in {1..6}; do
