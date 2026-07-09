@@ -1,7 +1,7 @@
 name: Test Gemma 26B con Google Search Grounding
 
 on:
-  workflow_dispatch: # Consente l'esecuzione manuale da GitHub Actions
+  workflow_dispatch:
 
 jobs:
   test-gemma-search:
@@ -16,15 +16,18 @@ jobs:
             exit 1
           fi
 
-          # Effettua la chiamata passando il tool "google_search" nel payload
-          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
+          echo "Inizio della chiamata API con Google Search (può richiedere fino a 45 secondi)..."
+
+          # Usiamo --max-time 60 per interrompere dopo un minuto in caso di blocco e salviamo su file
+          curl -sS --connect-timeout 15 --max-time 60 \
+            -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d '{
               "contents": [
                 {
                   "parts": [
                     {
-                      "text": "Quali sono le ultimissime notizie di oggi sul telescopio James Webb? Rispondi in massimo due frasi."
+                      "text": "Quali sono le ultime novità di oggi sul telescopio James Webb? Rispondi in massimo due frasi."
                     }
                   ]
                 }
@@ -34,16 +37,29 @@ jobs:
                   "google_search": {}
                 }
               ]
-            }')
+            }' -o response.json
+
+          # Controlliamo se il file è vuoto o non è stato creato
+          if [ ! -s response.json ]; then
+            echo "Errore: Il server di Google non ha risposto entro i limiti di tempo o la connessione è fallita."
+            exit 1
+          fi
+
+          # Controlliamo se l'API ha restituito un errore formale di configurazione o di quota
+          if jq -e '.error' response.json >/dev/null; then
+            echo "Errore restituito dalle API di Google:"
+            jq '.error' response.json
+            exit 1
+          fi
 
           echo "========================================="
           echo "RISPOSTA DEL MODELLO:"
           echo "========================================="
-          # Estrae la risposta finale escludendo i passaggi intermedi di ragionamento
-          echo "$RESPONSE" | jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text'
+          # Estraiamo solo il testo finale generato dal modello
+          jq -r '.candidates[0].content.parts[] | select(.thought != true) | .text' response.json
           
           echo -e "\n========================================="
           echo "FONTI UTILIZZATE (GROUNDING METADATA):"
           echo "========================================="
-          # Mostra le query di ricerca effettuate e i link delle fonti usate dal modello
-          echo "$RESPONSE" | jq '.candidates[0].groundingMetadata'
+          # Estraiamo i dettagli della ricerca effettuata sul web
+          jq '.candidates[0].groundingMetadata' response.json
