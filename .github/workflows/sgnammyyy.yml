@@ -71,10 +71,11 @@ jobs:
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
+              "https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php",
               "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://bot-detector.rebrowser.net/",
+              "https://www.browserscan.net/bot-detection",
+              "https://deviceandbrowserinfo.com/are_you_a_bot",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -715,7 +716,7 @@ jobs:
           from curl_cffi import requests
           from extraction_utils import html_to_clean_markdown
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+          DIAGNOSTIC_SITES = ["ipify", "deviceandbrowserinfo.com", "browserleaks", "browserscan.net", "sannysoft", "creepjs", "recaptcha-demo.appspot.com", "bot-detector.rebrowser.net", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
