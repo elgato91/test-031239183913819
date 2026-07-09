@@ -57,11 +57,11 @@ jobs:
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            sleep 5
+            sleep 1
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 3
+          sleep 5
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
