@@ -71,11 +71,10 @@ jobs:
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
-              "https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php",
+              "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
-              "https://bot-detector.rebrowser.net/",
-              "https://www.browserscan.net/bot-detection",
-              "https://deviceandbrowserinfo.com/are_you_a_bot",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -716,7 +715,7 @@ jobs:
           from curl_cffi import requests
           from extraction_utils import html_to_clean_markdown
 
-          DIAGNOSTIC_SITES = ["ipify", "deviceandbrowserinfo.com", "browserleaks", "browserscan.net", "sannysoft", "creepjs", "recaptcha-demo.appspot.com", "bot-detector.rebrowser.net", "incolumitas", "deviceinfo"]
+          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
@@ -964,7 +963,6 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=5000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
@@ -974,6 +972,7 @@ jobs:
                       profile_dir,
                       headless=False,
                       humanize=True,
+                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
                       viewport={"width": 1920, "height": 1080},
