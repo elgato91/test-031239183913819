@@ -14,9 +14,35 @@ jobs:
       FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
+      - name: Installazione Font di Sistema e Windows 11 Reali
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip wget \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
+
+          mkdir -p ~/.local/share/fonts/windows
+
+          wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
+          unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
+
+          find /tmp/win11-fonts-extracted -type f \( -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" \) -exec cp {} ~/.local/share/fonts/windows/ \;
+
+          fc-cache -f -v
+
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" requests "requests[socks]"
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
+          playwright install-deps chromium
+
+      - name: Avvio Xvfb (Virtual Display Headful)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Pre-inizializzazione Cache CloakBrowser
+        run: |
+          python -m cloakbrowser install
 
       - name: Setup Container WARP (IPv6)
         run: |
@@ -25,36 +51,17 @@ jobs:
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
-            
             docker run --name warproxy-$i \
-              -p $PORT:$PORT \
+              --network host \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
-            
             sleep 0.5
           done
 
           echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 5
-
-          echo "=== VISUALIZZAZIONE INDIRIZZI IP REALI ==="
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            echo "----------------------------------------"
-            echo "Container warproxy-$i (Porta $PORT):"
-            
-            # Forza la risoluzione IPv4 interrogando direttamente il server DNS Cloudflare tramite il proxy
-            echo -n "  IPv4 Assegnato: "
-            dig +short TXT @1.1.1.1 whoami.cloudflare --socks5=127.0.0.1:$PORT | tr -d '"' || echo "Non disponibile"
-
-            # Forza la risoluzione IPv6 interrogando direttamente il server DNS Cloudflare IPv6 tramite il proxy
-            echo -n "  IPv6 Assegnato: "
-            dig +short TXT @2606:4700:4700::1111 whoami.cloudflare --socks5=127.0.0.1:$PORT | tr -d '"' || echo "Non disponibile"
-          done
-          echo "----------------------------------------"
-
+          sleep 6
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
