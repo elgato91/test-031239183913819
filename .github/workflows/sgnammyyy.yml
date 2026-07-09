@@ -710,6 +710,7 @@ jobs:
           import random
           import os
           import json
+          import re
           from bs4 import BeautifulSoup
           from curl_cffi import requests
           from extraction_utils import html_to_clean_markdown
@@ -737,12 +738,28 @@ jobs:
               return False
 
           def validate_html(html, url, status_code):
-              # Identica alla versione originale: nessuna modifica alla logica WAF.
+              # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le frasi esatte
+              # di due pagine di blocco Cloudflare/Google che passavano il controllo precedente
+              # ("Robot Challenge Screen" / "Checking the site connection security" da
+              # katieparla.com e passportindex.org; "unusual traffic from your computer
+              # network" da Google) senza intaccare nessuna delle frasi originali.
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
               if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
 
               low_html = html.lower()
+
+              # Controllo aggiuntivo sul <title>: segnale ad alta confidenza, indipendente
+              # dal testo visibile, basso rischio di falsi positivi.
+              title_match = re.search(r"<title[^>]*>(.*?)</title>", low_html, re.DOTALL)
+              if title_match:
+                  title_text = title_match.group(1).strip()
+                  waf_titles = ["just a moment", "attention required", "access denied",
+                                "checking your browser", "robot challenge screen"]
+                  for wt in waf_titles:
+                      if wt in title_text:
+                          return False, f"WAF rilevato nel titolo della pagina: {wt}"
+
               blocking_indicators = [
                   "challenge-platform", "access denied", "403 forbidden", "cloudflare",
                   "just a moment", "security verification", "please enable js", "enable javascript",
@@ -752,7 +769,8 @@ jobs:
                   "please enter in the characters you see below", "access to this page is forbidden",
                   "error 1020", "you have been blocked", "pardon our interruption",
                   "se non vieni reindirizzato", "se hai problemi ad accedere",
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
+                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
+                  "checking the site connection security"
               ]
 
               for ind in blocking_indicators:
@@ -1026,27 +1044,52 @@ jobs:
                       # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
-                      text_check = soup.get_text(separator=' ', strip=True)[:5000]
-                      text_lower = text_check.lower()
 
-                      # Rilevamento passivo WAF/Captcha - identico alla baseline
+                      # Controllo sul <title>: segnale ad alta confidenza, indipendente
+                      # dal testo visibile, basso rischio di falsi positivi.
+                      title_blocked = False
+                      title_reason = ""
+                      if soup.title and soup.title.string:
+                          title_low = soup.title.string.strip().lower()
+                          waf_titles = ["just a moment", "attention required", "access denied",
+                                        "checking your browser", "robot challenge screen"]
+                          for wt in waf_titles:
+                              if wt in title_low:
+                                  title_blocked = True
+                                  title_reason = f"WAF nel titolo: {wt}"
+                                  break
+
+                      # Testo completo, senza troncamento, in Markdown pulito per l'LLM.
+                      # Il check di validazione gira sul testo GIA' pulito, non sull'HTML
+                      # grezzo troncato: una pagina di blocco corta resta corta anche dopo
+                      # la pulizia, invece di essere gonfiata da tag/script residui.
+                      text_full = html_to_clean_markdown(raw_html, url)
+                      text_lower_full = text_full.lower()
+
+                      # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le
+                      # frasi esatte di pagine di blocco che passavano il controllo
+                      # precedente ("Robot Challenge Screen" / "Checking the site
+                      # connection security" da Cloudflare; "unusual traffic from your
+                      # computer network" da Google), senza rimuovere nessuna delle
+                      # frasi originali.
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
                           "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity"
+                          "we've detected unusual activity",
+                          "robot challenge screen", "checking the site connection security",
+                          "unusual traffic from your computer network"
                       ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
+                      is_blocked = title_blocked or any(b in text_lower_full for b in blocking_indicators)
 
-                      if len(text_check) > 150 and not is_blocked:
-                          # Testo completo, senza troncamento, in Markdown pulito per l'LLM.
-                          text_full = html_to_clean_markdown(raw_html, url)
+                      if len(text_full) > 300 and not is_blocked:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_full}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
                           pubblica_contenuto_scrapato(url, text_full, "step2")
                       else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
+                          motivo = title_reason if title_blocked else "Blocco WAF/Captcha o contenuto insufficiente"
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({motivo})\n"
+                          print(f"[NODO {node_id}] -> Fallito: {motivo}", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
