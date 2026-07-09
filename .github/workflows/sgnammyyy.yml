@@ -962,7 +962,7 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--fingerprint-storage-quota=5000",
+                  "--fingerprint-storage-quota=6000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
@@ -979,9 +979,9 @@ jobs:
                   page = await context.new_page()
 
                   # WARMUP Integrato - Creazione di cronologia valida
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
-                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
+                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=5000)
+                  await asyncio.sleep(1)
+                  await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
 
               except Exception as e:
