@@ -54,14 +54,14 @@ jobs:
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=8.8.8.8,1.1.1.1,2001:4860:4860::8888,2606:4700:4700::1111 \
+              -e DNS=2606:4700:4700::1111,2001:4860:4860::8888,1.1.1.1 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
             # Controllo attivo per verificare che il proxy sia pronto ed evitare il 429
             echo "Verifica registrazione per warproxy-$i..."
             for attempt in {1..15}; do
-              if curl -s -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+              if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
                 echo "warproxy-$i è pronto e registrato!"
                 break
               fi
@@ -908,7 +908,7 @@ jobs:
             # Controllo attivo per verificare la nuova registrazione ed evitare il 429
             echo "Verifica nuova registrazione per warproxy-$i..."
             for attempt in {1..15}; do
-              if curl -s -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+              if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
                 echo "warproxy-$i è pronto con il nuovo IP!"
                 break
               fi
