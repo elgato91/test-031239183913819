@@ -1,4 +1,4 @@
-name: Test WARP IPv6 Forzato v2
+name: Test WARP Bridge Networking
 
 on:
   workflow_dispatch:
@@ -10,54 +10,28 @@ jobs:
       - name: Pull immagine
         run: docker pull ghcr.io/kingcc/warproxy:latest
 
-      - name: Avvia 6 nodi
+      - name: Crea rete bridge dedicata
+        run: docker network create warp-test-net
+
+      - name: Avvia 6 nodi su bridge dedicato (porte pubblicate singolarmente)
         run: |
           for i in 1 2 3 4 5 6; do
             PORT=$((40000 + i))
             docker run --name wp-$i \
-              --network host \
+              --network warp-test-net \
+              -p $PORT:$PORT \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,1.1.1.1 \
               -d ghcr.io/kingcc/warproxy:latest
 
             DELAY=$(awk -v min=4 -v max=6 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
-            echo "Nodo $i avviato su porta $PORT, attendo ${DELAY}s..."
+            echo "Nodo $i avviato su porta $PORT (bridge), attendo ${DELAY}s..."
             sleep "$DELAY"
           done
 
           echo ""
-          echo "=== Attesa generazione file di config iniziale (30s) ==="
-          sleep 30
-
-      - name: Ispeziona permessi e contenuto file config (diagnostica)
-        run: |
-          for i in 1 2 3 4 5 6; do
-            echo "--- Nodo $i ---"
-            docker exec wp-$i sh -c "ls -la /config/ 2>&1 || echo 'errore ls'"
-            docker exec wp-$i sh -c "cat /config/wgcf-profile.conf 2>&1 | grep -i endpoint || echo 'file o riga endpoint non trovati'"
-          done
-
-      - name: Forza Endpoint IPv6 fisso dentro ciascun container e riavvia processo interno
-        run: |
-          for i in 1 2 3 4 5 6; do
-            echo "Nodo $i: sostituzione endpoint dentro il container"
-            docker exec wp-$i sh -c "sed -i 's/Endpoint = engage.cloudflareclient.com:2408/Endpoint = [2606:4700:d0::a29f:c001]:2408/' /config/wgcf-profile.conf 2>&1" || echo "  sed fallito sul nodo $i"
-            docker exec wp-$i sh -c "grep -i endpoint /config/wgcf-profile.conf 2>&1" || echo "  grep fallito sul nodo $i"
-
-            echo "Nodo $i: riavvio container per applicare la nuova config"
-            docker restart wp-$i
-          done
-
-          echo ""
-          echo "=== Attesa ristabilimento tunnel (30s) ==="
-          sleep 30
-
-      - name: Verifica se l'endpoint è stato mantenuto dopo il restart (o riscritto da wgcf)
-        run: |
-          for i in 1 2 3 4 5 6; do
-            echo "--- Nodo $i (post-restart) ---"
-            docker exec wp-$i sh -c "grep -i endpoint /config/wgcf-profile.conf 2>&1" || echo "  file non leggibile"
-          done
+          echo "=== Attesa registrazione (40s) ==="
+          sleep 40
 
       - name: IP di uscita per nodo
         run: |
@@ -75,3 +49,4 @@ jobs:
           for i in 1 2 3 4 5 6; do
             docker rm -f wp-$i || true
           done
+          docker network rm warp-test-net || true
