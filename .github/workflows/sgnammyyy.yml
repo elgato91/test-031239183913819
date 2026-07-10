@@ -48,19 +48,19 @@ jobs:
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
-          # Lista di endpoint Cloudflare fisici differenti per garantire IP di uscita unici
-          ENDPOINTS=(
-            "162.159.192.1:2408"
-            "162.159.193.1:2408"
-            "162.159.195.1:2408"
-            "162.159.204.1:2408"
-            "162.159.192.2:2408"
-            "162.159.193.2:2408"
-          )
-
           for i in {1..6}; do
             PORT=$((40000 + i))
-            ENDPOINT=${ENDPOINTS[$((i-1))]}
+            
+            # Assegnazione di endpoint Cloudflare fisici differenti per garantire IP unici
+            case $i in
+              1) ENDPOINT="162.159.192.1:2408" ;;
+              2) ENDPOINT="162.159.193.1:2408" ;;
+              3) ENDPOINT="162.159.195.1:2408" ;;
+              4) ENDPOINT="162.159.204.1:2408" ;;
+              5) ENDPOINT="162.159.192.2:2408" ;;
+              6) ENDPOINT="162.159.193.2:2408" ;;
+            esac
+
             echo "Avvio container warproxy-$i sulla porta $PORT con endpoint $ENDPOINT..."
             docker run --name warproxy-$i \
               --network host \
@@ -70,11 +70,14 @@ jobs:
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            # Controllo attivo con log dettagliato dei tentativi
+            # Controllo attivo senza parametro -6 per evitare conflitti locali sul loopback
             echo "Verifica registrazione IPv6 per warproxy-$i..."
             for attempt in {1..15}; do
               echo "  [Tentativo $attempt/15] Controllo connettività IPv6..."
-              if curl -s -6 --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://ipv6.icanhazip.com | grep -q "."; then
+              if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://ipv6.icanhazip.com | grep -q "."; then
+                echo "  [OK] warproxy-$i è pronto e registrato in IPv6!"
+                break
+              elif curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://api6.ipify.org | grep -q "."; then
                 echo "  [OK] warproxy-$i è pronto e registrato in IPv6!"
                 break
               fi
@@ -651,7 +654,7 @@ jobs:
           async def main():
               api_keys = carica_gemini_api_keys()
               if not api_keys:
-                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trouvata. Processo terminato "
+                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato "
                         "immediatamente.", flush=True)
                   return
 
@@ -907,19 +910,32 @@ jobs:
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Creazione container warproxy-$i sulla porta $PORT (Nuova registrazione)..."
+            
+            # Assegnazione di endpoint Cloudflare fisici differenti per garantire IP unici
+            case $i in
+              1) ENDPOINT="162.159.192.1:2408" ;;
+              2) ENDPOINT="162.159.193.1:2408" ;;
+              3) ENDPOINT="162.159.195.1:2408" ;;
+              4) ENDPOINT="162.159.204.1:2408" ;;
+              5) ENDPOINT="162.159.192.2:2408" ;;
+              6) ENDPOINT="162.159.193.2:2408" ;;
+            esac
+
+            echo "Creazione container warproxy-$i sulla porta $PORT con endpoint $ENDPOINT (Nuova registrazione)..."
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2001:4860:4860::8888 \
+              -e ENDPOINT=$ENDPOINT \
+              -e DNS=1.1.1.1,2606:4700:4700::1111 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
             # Controllo attivo per verificare la nuova registrazione ed evitare il 429
-            echo "Verifica nuova registrazione per warproxy-$i..."
+            echo "Verifica nuova registrazione IPv6 per warproxy-$i..."
             for attempt in {1..15}; do
+              echo "  [Tentativo $attempt/15] Controllo connettività IPv6..."
               if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://ipv6.icanhazip.com | grep -q "."; then
-                echo "warproxy-$i è pronto con il nuovo IP!"
+                echo "  [OK] warproxy-$i è pronto con il nuovo IP IPv6!"
                 break
               fi
               sleep 3
