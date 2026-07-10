@@ -1,4 +1,4 @@
-name: Test WARP IPv6 Forzato
+name: Test WARP IPv6 Forzato v2
 
 on:
   workflow_dispatch:
@@ -10,18 +10,12 @@ jobs:
       - name: Pull immagine
         run: docker pull ghcr.io/kingcc/warproxy:latest
 
-      - name: Avvia 6 nodi, forza endpoint IPv6, stampa IP
+      - name: Avvia 6 nodi
         run: |
-          mkdir -p /tmp/warp_configs
-
           for i in 1 2 3 4 5 6; do
             PORT=$((40000 + i))
-            CONFIG_DIR="/tmp/warp_configs/node_$i"
-            mkdir -p "$CONFIG_DIR"
-
             docker run --name wp-$i \
               --network host \
-              -v "$CONFIG_DIR:/config" \
               -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,1.1.1.1 \
               -d ghcr.io/kingcc/warproxy:latest
@@ -35,22 +29,22 @@ jobs:
           echo "=== Attesa generazione file di config iniziale (30s) ==="
           sleep 30
 
-          echo ""
-          echo "=== Forzatura Endpoint IPv6 fisso su ciascun nodo ==="
+      - name: Ispeziona permessi e contenuto file config (diagnostica)
+        run: |
           for i in 1 2 3 4 5 6; do
-            CONFIG_DIR="/tmp/warp_configs/node_$i"
-            PROFILE="$CONFIG_DIR/wgcf-profile.conf"
+            echo "--- Nodo $i ---"
+            docker exec wp-$i sh -c "ls -la /config/ 2>&1 || echo 'errore ls'"
+            docker exec wp-$i sh -c "cat /config/wgcf-profile.conf 2>&1 | grep -i endpoint || echo 'file o riga endpoint non trovati'"
+          done
 
-            if [ -f "$PROFILE" ]; then
-              echo "Nodo $i: profilo trovato, sostituisco Endpoint con IPv6 fisso"
-              sed -i 's/Endpoint = engage.cloudflareclient.com:2408/Endpoint = [2606:4700:d0::a29f:c001]:2408/' "$PROFILE"
-              cat "$PROFILE" | grep -i endpoint
-            else
-              echo "Nodo $i: ATTENZIONE, wgcf-profile.conf non trovato in $CONFIG_DIR"
-              ls -la "$CONFIG_DIR" || true
-            fi
+      - name: Forza Endpoint IPv6 fisso dentro ciascun container e riavvia processo interno
+        run: |
+          for i in 1 2 3 4 5 6; do
+            echo "Nodo $i: sostituzione endpoint dentro il container"
+            docker exec wp-$i sh -c "sed -i 's/Endpoint = engage.cloudflareclient.com:2408/Endpoint = [2606:4700:d0::a29f:c001]:2408/' /config/wgcf-profile.conf 2>&1" || echo "  sed fallito sul nodo $i"
+            docker exec wp-$i sh -c "grep -i endpoint /config/wgcf-profile.conf 2>&1" || echo "  grep fallito sul nodo $i"
 
-            echo "Riavvio container per nodo $i..."
+            echo "Nodo $i: riavvio container per applicare la nuova config"
             docker restart wp-$i
           done
 
@@ -58,8 +52,15 @@ jobs:
           echo "=== Attesa ristabilimento tunnel (30s) ==="
           sleep 30
 
-          echo ""
-          echo "=== IP di uscita per nodo (dopo forzatura IPv6) ==="
+      - name: Verifica se l'endpoint è stato mantenuto dopo il restart (o riscritto da wgcf)
+        run: |
+          for i in 1 2 3 4 5 6; do
+            echo "--- Nodo $i (post-restart) ---"
+            docker exec wp-$i sh -c "grep -i endpoint /config/wgcf-profile.conf 2>&1" || echo "  file non leggibile"
+          done
+
+      - name: IP di uscita per nodo
+        run: |
           for i in 1 2 3 4 5 6; do
             PORT=$((40000 + i))
             TRACE=$(curl -s --max-time 10 -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace)
@@ -74,4 +75,3 @@ jobs:
           for i in 1 2 3 4 5 6; do
             docker rm -f wp-$i || true
           done
-          rm -rf /tmp/warp_configs
