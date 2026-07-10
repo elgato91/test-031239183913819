@@ -44,7 +44,7 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP (IPv6 con Fallback IPv4)
+      - name: Setup Container WARP (IPv6 Nativo)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -54,15 +54,15 @@ jobs:
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2001:4860:4860::8888,1.1.1.1 \
+              -e DNS=2606:4700:4700::1111,2001:4860:4860::8888 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
-            # Controllo attivo per verificare che il proxy sia pronto ed evitare il 429
-            echo "Verifica registrazione per warproxy-$i..."
+            # Controllo attivo forzato su IPv6 per verificare la corretta associazione
+            echo "Verifica registrazione IPv6 per warproxy-$i..."
             for attempt in {1..15}; do
-              if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-                echo "warproxy-$i è pronto e registrato!"
+              if curl -s -6 --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://ipv6.icanhazip.com | grep -q "."; then
+                echo "warproxy-$i è pronto e registrato in IPv6!"
                 break
               fi
               sleep 3
@@ -71,7 +71,7 @@ jobs:
           done
 
           echo "Attesa stabilizzazione finale..."
-          sleep 10
+          sleep 12
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -739,16 +739,13 @@ jobs:
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              urls = ["https://api64.ipify.org?format=json", "https://httpbin.org/ip"]
+              urls = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"]
               for _ in range(max_retries):
                   for url in urls:
                       try:
                           resp = test_session.get(url, timeout=6)
                           if resp.status_code == 200:
-                              if "ipify" in url:
-                                  ip_address = resp.json().get("ip", "Sconosciuto")
-                              else:
-                                  ip_address = resp.json().get("origin", "Sconosciuto")
+                              ip_address = resp.text.strip()
                               return True, ip_address
                       except: pass
                   time.sleep(delay)
@@ -901,14 +898,14 @@ jobs:
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=8.8.8.8,1.1.1.1,2001:4860:4860::8888,2606:4700:4700::1111 \
+              -e DNS=2606:4700:4700::1111,2001:4860:4860::8888 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
             # Controllo attivo per verificare la nuova registrazione ed evitare il 429
             echo "Verifica nuova registrazione per warproxy-$i..."
             for attempt in {1..15}; do
-              if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+              if curl -s --connect-timeout 4 --max-time 8 -x socks5h://127.0.0.1:$PORT https://ipv6.icanhazip.com | grep -q "."; then
                 echo "warproxy-$i è pronto con il nuovo IP!"
                 break
               fi
@@ -995,15 +992,12 @@ jobs:
                   "http": f"socks5h://127.0.0.1:{port}",
                   "https": f"socks5h://127.0.0.1:{port}"
               }
-              urls = ["https://api64.ipify.org?format=json", "https://httpbin.org/ip"]
+              urls = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"]
               for url in urls:
                   try:
                       resp = requests.get(url, proxies=proxies, timeout=5)
                       if resp.status_code == 200:
-                          if "ipify" in url:
-                              return resp.json().get("ip", "Sconosciuto")
-                          else:
-                              return resp.json().get("origin", "Sconosciuto")
+                          return resp.text.strip()
                   except:
                       pass
               return "Sconosciuto (rilevamento fallito)"
