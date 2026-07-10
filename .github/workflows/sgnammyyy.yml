@@ -54,7 +54,7 @@ jobs:
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,1.1.1.1 \
+              -e DNS=8.8.8.8,1.1.1.1,2001:4860:4860::8888,2606:4700:4700::1111 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
@@ -310,8 +310,8 @@ jobs:
              storia, geografia, recensione, dato_statistico, contatto, altro.
           4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
              array vuoto [].
-          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
-             generico privo di dati concreti.
+          5. Don't include editorial opinions, advertisements, or generic promotional
+             content lacking concrete data.
 
           Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
           [
@@ -739,14 +739,18 @@ jobs:
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              urls = ["https://api64.ipify.org?format=json", "https://httpbin.org/ip"]
               for _ in range(max_retries):
-                  try:
-                      # api64.ipify.org risolve dual-stack garantendo il fallback IPv4 se l'IPv6 fallisce
-                      resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200:
-                          ip_address = resp.json().get("ip", "Sconosciuto")
-                          return True, ip_address
-                  except: pass
+                  for url in urls:
+                      try:
+                          resp = test_session.get(url, timeout=6)
+                          if resp.status_code == 200:
+                              if "ipify" in url:
+                                  ip_address = resp.json().get("ip", "Sconosciuto")
+                              else:
+                                  ip_address = resp.json().get("origin", "Sconosciuto")
+                              return True, ip_address
+                      except: pass
                   time.sleep(delay)
               return False, None
 
@@ -897,7 +901,7 @@ jobs:
             docker run --name warproxy-$i \
               --network host \
               -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,1.1.1.1 \
+              -e DNS=8.8.8.8,1.1.1.1,2001:4860:4860::8888,2606:4700:4700::1111 \
               -e VERBOSE=true \
               -d ghcr.io/kingcc/warproxy:latest
             
@@ -985,6 +989,25 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
+          def get_outbound_ip(port):
+              import requests
+              proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              urls = ["https://api64.ipify.org?format=json", "https://httpbin.org/ip"]
+              for url in urls:
+                  try:
+                      resp = requests.get(url, proxies=proxies, timeout=5)
+                      if resp.status_code == 200:
+                          if "ipify" in url:
+                              return resp.json().get("ip", "Sconosciuto")
+                          else:
+                              return resp.json().get("origin", "Sconosciuto")
+                  except:
+                      pass
+              return "Sconosciuto (rilevamento fallito)"
+
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
@@ -993,6 +1016,10 @@ jobs:
               if not targets:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
                   return
+
+              # Ottieni l'IP di uscita in modo sicuro (decoupled da Playwright)
+              outbound_ip = await asyncio.to_thread(get_outbound_ip, INITIAL_PORT)
+              print(f"[NODO {node_id}] [STEP 2] IP di uscita del proxy: {outbound_ip}", flush=True)
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
@@ -1019,16 +1046,6 @@ jobs:
                       args=base_args
                   )
                   page = await context.new_page()
-
-                  # Rilevamento dell'IP di uscita effettivo del browser
-                  try:
-                      await page.goto("https://api64.ipify.org?format=json", timeout=12000)
-                      page_text = await page.locator("body").inner_text()
-                      ip_json = json.loads(page_text)
-                      outbound_ip = ip_json.get("ip", "Sconosciuto")
-                      print(f"[NODO {node_id}] [STEP 2] Sessione avviata. IP di uscita CloakBrowser: {outbound_ip}", flush=True)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
 
                   # WARMUP Integrato - Creazione di cronologia valida
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
