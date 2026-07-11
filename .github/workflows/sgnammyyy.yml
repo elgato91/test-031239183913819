@@ -12,11 +12,6 @@ jobs:
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
       TARGET_TOPIC: "Orvieto"
       FORZA_DIAGNOSTICI_STEP2: "1"
-      NODI_NECESSARI: 6
-      WARP_BUDGET_TOTALE_SECONDI: 90
-      WARP_DELAY_MIN: 2
-      WARP_DELAY_MAX: 3
-      WARP_PORTA_BASE: 40000
     steps:
 
       - name: Installazione Font di Sistema e Windows 11 Reali
@@ -49,38 +44,26 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Pull immagine WARP ufficiale
-        run: docker pull caomingjun/warp:latest
-
-      # ============================================================================
-      # GENERAZIONE DI TUTTI GLI SCRIPT ALL'INIZIO (Nessun altro step scriverà file)
-      # ============================================================================
-      - name: Generazione di tutti gli script Python e Shell
+      - name: Setup Container WARP STEP 1 (IPv4+IPv6 univoci, client ufficiale)
         run: |
-          # 1. Script di registrazione WARP con Pool Autoriparante (Sintassi corretta, -lt minuscolo)
-          cat << 'SCRIPT_EOF' > registra_warp.sh
-          #!/usr/bin/env bash
           set -o pipefail
-          set -u
-
-          NODI_NECESSARI="${NODI_NECESSARI:-6}"
-          BUDGET_TOTALE_SECONDI="${BUDGET_TOTALE_SECONDI:-90}"
-          DELAY_MIN="${DELAY_MIN:-2}"
-          DELAY_MAX="${DELAY_MAX:-3}"
-          PORTA_BASE="${PORTA_BASE:-40000}"
-          PREFIX_CONTAINER="${PREFIX_CONTAINER:-warp}"
-          MAPPA_OUTPUT="${MAPPA_OUTPUT:-/tmp/warp_node_map.json}"
-
           START_TS=$(date +%s)
 
-          declare -A slot_container
-          declare -A slot_porta
-          declare -A slot_ipv4
-          declare -A slot_ipv6
-          declare -A slot_pronto
-          declare -A slot_status
+          NODI_NECESSARI=6
+          BUDGET_TOTALE_SECONDI=90
+          DELAY_MIN=2
+          DELAY_MAX=3
+          PORTA_BASE=40000
 
-          CONTATORE_GLOBALE=0
+          # Ogni slot 1..6 ha una porta FISSA (PORTA_BASE+slot), che e' quella
+          # attesa dallo scraper Python (ACTIVE_PORT = 40000 + node_id).
+          # Un nodo che fallisce o duplica viene semplicemente RIPROVATO sullo
+          # stesso slot/porta, cosi' non serve mai spostare o rinominare nulla.
+          declare -A ipv4_di_slot
+          declare -A ipv6_di_slot
+          declare -A ipv4_visti
+          declare -A ipv6_visti
+          SLOT_OK=()
 
           tempo_residuo() {
             local elapsed=$(( $(date +%s) - START_TS ))
@@ -88,10 +71,9 @@ jobs:
           }
 
           avvia_e_verifica_nodo() {
-            local id=$1
+            local slot=$1
             local port=$2
             local out_file=$3
-            local container_name=$4
             local ip4=""
             local ip6=""
             local t_pronto="0"
@@ -99,13 +81,13 @@ jobs:
             local t_start
             t_start=$(date +%s)
 
-            trap 'echo "${id}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}|${container_name}" > "$out_file"' EXIT
+            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
 
-            docker rm -f "$container_name" > /dev/null 2>&1 || true
+            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
 
             local run_out
             if ! run_out=$(docker run -d \
-              --name "$container_name" \
+              --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
               --cap-add NET_ADMIN \
               --cap-add MKNOD \
               --cap-add AUDIT_WRITE \
@@ -131,13 +113,13 @@ jobs:
             done
 
             if [ "$pronto" -eq 1 ]; then
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${PREFIX_CONTAINER}_${id}") &
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${PREFIX_CONTAINER}_${id}") &
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
               wait
 
-              ip4=$(cat "/tmp/ip4_${PREFIX_CONTAINER}_${id}" 2>/dev/null || true)
-              ip6=$(cat "/tmp/ip6_${PREFIX_CONTAINER}_${id}" 2>/dev/null || true)
-              rm -f "/tmp/ip4_${PREFIX_CONTAINER}_${id}" "/tmp/ip6_${PREFIX_CONTAINER}_${id}"
+              ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+              ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+              rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
 
               if [ -z "$ip4" ]; then
                 ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
@@ -152,285 +134,219 @@ jobs:
             return 0
           }
 
-          rimuovi_nodo_container() {
-            local container_name=$1
-            docker rm -f "$container_name" > /dev/null 2>&1 || true
+          rimuovi_nodo_slot() {
+            local slot=$1
+            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
           }
 
           leggi_esito() {
             local esito_file=$1
-            IFS='|' read -r PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR PARSED_CONTAINER < "$esito_file"
+            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
           }
 
-          aggiorna_esiti_slot() {
-            declare -A visti_v4
-            declare -A visti_v6
-
-            for s in $(seq 1 "$NODI_NECESSARI"); do
-              local ip4="${slot_ipv4[$s]:-}"
-              local ip6="${slot_ipv6[$s]:-}"
-
-              if [ -z "$ip6" ] || [ "$ip6" = "NESSUNO" ]; then
-                slot_status[$s]="ERR"
+          # Valuta gli esiti di una lista di slot. Ritorna (via variabile globale
+          # SLOT_DA_RIPROVARE, azzerata prima della chiamata) gli slot falliti o
+          # in collisione, cosi' il chiamante sa esattamente quali ripetere.
+          elabora_esiti() {
+            SLOT_DA_RIPROVARE=()
+            local file_list=("$@")
+            for esito_file in "${file_list[@]}"; do
+              if [ ! -f "$esito_file" ]; then
+                echo "  FALLITO: nessun report generato ($esito_file)"
                 continue
               fi
 
-              if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
-                if [ -z "$ip4" ] || [ "$ip4" = "NESSUNO" ]; then
-                  slot_status[$s]="ERR"
-                  continue
-                fi
+              leggi_esito "$esito_file"
+
+              if [ -n "$PARSED_ERR" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
               fi
 
-              local d_v4=0
-              local d_v6=0
-
-              if [ -n "${visti_v6[$ip6]:-}" ]; then
-                d_v6=1
+              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
               fi
 
-              if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
-                if [ -n "${visti_v4[$ip4]:-}" ]; then
-                  d_v4=1
-                fi
+              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
               fi
 
-              if [ "$d_v6" -eq 1 ] || [ "$d_v4" -eq 1 ]; then
-                slot_status[$s]="DUP"
-              else
-                slot_status[$s]="OK"
-                visti_v6[$ip6]=$s
-                if [ -n "$ip4" ] && [ "$ip4" != "NESSUNO" ]; then
-                  visti_v4[$ip4]=$s
-                fi
+              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
               fi
+
+              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 duplicato con slot ${ipv6_visti[$PARSED_IP6]})"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
+              fi
+
+              ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
+              ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
+              ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
+              ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
+              SLOT_OK+=("$PARSED_SLOT")
+              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
             done
           }
 
-          echo "=== ONDATA 1: Avvio di $NODI_NECESSARI nodi WARP (prefix: $PREFIX_CONTAINER, ritardo: ${DELAY_MIN}-${DELAY_MAX}s) ==="
+          echo "=== STEP 1 - ONDATA 1: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s) ==="
           ondata1_pids=()
           ondata1_files=()
 
-          for s in $(seq 1 "$NODI_NECESSARI"); do
-            CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
-            id="n$CONTATORE_GLOBALE"
-            port=$((PORTA_BASE + CONTATORE_GLOBALE))
-            container_name="${PREFIX_CONTAINER}_${id}"
-            out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
+          for slot in $(seq 1 "$NODI_NECESSARI"); do
+            port=$((PORTA_BASE + slot))
+            out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
             ondata1_files+=("$out")
 
-            slot_container[$s]=$container_name
-            slot_porta[$s]=$port
-            slot_ipv4[$s]=""
-            slot_ipv6[$s]=""
-            slot_pronto[$s]="0"
-            slot_status[$s]="ERR"
-
-            avvia_e_verifica_nodo "$id" "$port" "$out" "$container_name" &
+            avvia_e_verifica_nodo "$slot" "$port" "$out" &
             ondata1_pids+=($!)
 
-            if [ "$s" -lt "$NODI_NECESSARI" ]; then
-              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$s"'+systime()); print min+rand()*(max-min)}')
-              echo "  [Slot $s] Container $container_name avviato su porta $port. Prossimo nodo tra ${DELAY}s..."
+            if [ "$slot" -lt "$NODI_NECESSARI" ]; then
+              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
+              echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
               sleep "$DELAY"
             else
-              echo "  [Slot $s] Container $container_name avviato su porta $port. Ultimo nodo dell'ondata 1."
+              echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata 1."
             fi
           done
 
-          echo ""
-          echo "Attendo che tutti i nodi completino la verifica (polling attivo)..."
+          echo "Attendo che tutti gli slot completino la verifica..."
           for pid in "${ondata1_pids[@]}"; do
             wait "$pid" 2>/dev/null || true
           done
 
-          for out_file in "${ondata1_files[@]}"; do
-            if [ -f "$out_file" ]; then
-              leggi_esito "$out_file"
-              for s in $(seq 1 "$NODI_NECESSARI"); do
-                if [ "${slot_porta[$s]}" = "$PARSED_PORT" ]; then
-                  slot_container[$s]=$PARSED_CONTAINER
-                  slot_ipv4[$s]=$PARSED_IP4
-                  slot_ipv6[$s]=$PARSED_IP6
-                  slot_pronto[$s]=$PARSED_TPRONTO
-                  break
-                fi
-              done
-            fi
-          done
-
-          aggiorna_esiti_slot
-
           echo ""
-          echo "=== ESITI ONDATA 1 ==="
-          for s in $(seq 1 "$NODI_NECESSARI"); do
-            echo "  [Slot $s] Porta ${slot_porta[$s]}: Stato=${slot_status[$s]} (IPv4: ${slot_ipv4[$s]:-NESSUNO} | IPv6: ${slot_ipv6[$s]:-NESSUNO} | Pronto in ${slot_pronto[$s]}s)"
-          done
+          echo "=== STEP 1 - ESITI ONDATA 1 ==="
+          elabora_esiti "${ondata1_files[@]}"
+          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI (tempo residuo $(tempo_residuo)s)"
 
           ONDATA=1
-          MAX_ONDATE=3
-          while [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
+          SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
+          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ]; do
             RESIDUO=$(tempo_residuo)
-            if [ "$RESIDUO" -le 15 ]; then
-              echo ""
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Procedo con i nodi attuali."
+            if [ "$RESIDUO" -le 10 ]; then
+              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Arresto."
               break
             fi
 
-            slot_da_rimpiazzare=()
-            for s in $(seq 1 "$NODI_NECESSARI"); do
-              if [ "${slot_status[$s]}" != "OK" ]; then
-                slot_da_rimpiazzare+=("$s")
-              fi
-            done
-
-            rimpiazzi_necessari=${#slot_da_rimpiazzare[@]}
-            if [ "$rimpiazzi_necessari" -eq 0 ]; then
-              echo ""
-              echo "Tutti i nodi sono unici e funzionanti! Nessun rimpiazzo necessario."
-              break
-            fi
-
-            echo ""
-            echo "Attendo un cooldown di 10 secondi per prevenire il rate-limit di Cloudflare..."
-            sleep 10
+            echo "Cooldown 4s per prevenire rate-limit di registrazione..."
+            sleep 4
 
             ONDATA=$((ONDATA + 1))
             echo ""
-            echo "=== ONDATA $ONDATA: provo a rimpiazzare $rimpiazzi_necessari nodi non ottimali (tempo residuo: $(tempo_residuo)s) ==="
+            echo "=== STEP 1 - ONDATA $ONDATA: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
 
             retry_pids=()
             retry_files=()
-            unset slot_di_file
-            declare -A slot_di_file
 
-            for idx in "${!slot_da_rimpiazzare[@]}"; do
-              s="${slot_da_rimpiazzare[$idx]}"
-              CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
-              id="n$CONTATORE_GLOBALE"
-              port=$((PORTA_BASE + CONTATORE_GLOBALE))
-              container_name="${PREFIX_CONTAINER}_${id}"
-              out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
-
+            n_mancanti=${#SLOT_MANCANTI[@]}
+            idx=0
+            for slot in "${SLOT_MANCANTI[@]}"; do
+              idx=$((idx + 1))
+              port=$((PORTA_BASE + slot))
+              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
               retry_files+=("$out")
-              slot_di_file["$out"]=$s
 
-              avvia_e_verifica_nodo "$id" "$port" "$out" "$container_name" &
+              avvia_e_verifica_nodo "$slot" "$port" "$out" &
               retry_pids+=($!)
 
-              if [ "$idx" -lt $((rimpiazzi_necessari - 1)) ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
-                echo "  [Slot $s] Avvio sostituto $container_name su porta $port. Prossimo tra ${DELAY}s..."
+              if [ "$idx" -lt "$n_mancanti" ]; then
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()+'"$ONDATA"'); print min+rand()*(max-min)}')
                 sleep "$DELAY"
-              else
-                echo "  [Slot $s] Avvio sostituto $container_name su porta $port. Ultimo della wave."
               fi
             done
 
-            echo ""
-            echo "Attendo che i nodi sostitutivi completino la verifica..."
             for pid in "${retry_pids[@]}"; do
               wait "$pid" 2>/dev/null || true
             done
 
-            echo ""
-            echo "=== ESITI RETRY ONDATA $ONDATA ==="
-            for out_file in "${retry_files[@]}"; do
-              s="${slot_di_file[$out_file]}"
-              if [ ! -f "$out_file" ]; then
-                echo "  [Slot $s] Sostituto FALLITO (nessun report generato)"
-                continue
-              fi
-
-              leggi_esito "$out_file"
-
-              if [ -n "$PARSED_ERR" ] || [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ] || [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-                echo "  [Slot $s] Sostituto $PARSED_CONTAINER non idoneo (${PARSED_ERR:-IP mancanti}). Tengo il container attuale."
-                rimuovi_nodo_container "$PARSED_CONTAINER"
-                continue
-              fi
-
-              duplicato=0
-              for s_check in $(seq 1 "$NODI_NECESSARI"); do
-                if [ "$s_check" != "$s" ] && [ "${slot_status[$s_check]}" = "OK" ]; then
-                  if [ "${slot_ipv6[$s_check]}" = "$PARSED_IP6" ]; then
-                    duplicato=1
-                    break
-                  fi
-                  if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
-                    if [ "${slot_ipv4[$s_check]}" = "$PARSED_IP4" ]; then
-                      duplicato=1
-                      break
-                    fi
-                  fi
-                fi
-              done
-
-              if [ "$duplicato" -eq 1 ]; then
-                echo "  [Slot $s] Sostituto $PARSED_CONTAINER ha un IP duplicato con un nodo OK. Tengo il container attuale."
-                rimuovi_nodo_container "$PARSED_CONTAINER"
-                continue
-              fi
-
-              echo "  [Slot $s] Rimpiazzo completato! Rimuovo il vecchio container ${slot_container[$s]} ed imposto il nuovo $PARSED_CONTAINER"
-              rimuovi_nodo_container "${slot_container[$s]}"
-
-              slot_container[$s]=$PARSED_CONTAINER
-              slot_porta[$s]=$PARSED_PORT
-              slot_ipv4[$s]=$PARSED_IP4
-              slot_ipv6[$s]=$PARSED_IP6
-              slot_pronto[$s]=$PARSED_TPRONTO
-
-              aggiorna_esiti_slot
-            done
-
-            echo ""
-            echo "Stato slot aggiornato dopo ondata $ONDATA:"
-            for s in $(seq 1 "$NODI_NECESSARI"); do
-              echo "  [Slot $s] Porta ${slot_porta[$s]}: Stato=${slot_status[$s]} (IPv4: ${slot_ipv4[$s]:-NESSUNO} | IPv6: ${slot_ipv6[$s]:-NESSUNO})"
-            done
+            echo "=== STEP 1 - ESITI ONDATA $ONDATA ==="
+            elabora_esiti "${retry_files[@]}"
+            SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
+            echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
           done
+
+          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
+            echo "::error::STEP 1: ottenuti solo ${#SLOT_OK[@]}/$NODI_NECESSARI slot validi."
+            exit 1
+          fi
 
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
-          echo "======================================================"
-          echo "RISULTATO FINALE ($PREFIX_CONTAINER): Generati comunque tutti gli slot."
-          echo "Tempo impiegato: ${ELAPSED_FINALE}s (budget: ${BUDGET_TOTALE_SECONDI}s)"
-          echo "======================================================"
+          echo "=== STEP 1 completata: 6/6 slot (porte $((PORTA_BASE+1))-$((PORTA_BASE+NODI_NECESSARI))), IPv4+IPv6 tutti univoci, in ${ELAPSED_FINALE}s ==="
+          for slot in $(seq 1 "$NODI_NECESSARI"); do
+            echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
+          done
+        env:
+          CONTAINER_PREFIX: step1
+      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+        run: |
+          cat << 'EOF' > m2_step1_setup.py
+          import json
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
 
-          {
-            echo "{"
-            for s in $(seq 1 "$NODI_NECESSARI"); do
-              comma=","
-              if [ "$s" -eq "$NODI_NECESSARI" ]; then
-                comma=""
-              fi
-              printf '  "%d": {"container": "%s", "porta": %s, "ipv4": "%s", "ipv6": "%s"}%s\n' \
-                "$s" "${slot_container[$s]:-VUOTO}" "${slot_porta[$s]:-0}" \
-                "${slot_ipv4[$s]:-NESSUNO}" "${slot_ipv6[$s]:-NESSUNO}" "$comma"
-            done
-            echo "}"
-          } > "$MAPPA_OUTPUT"
+          # Suddivisione matematica statica (Chunking) per performance ottimali
+          for i in range(1, 7):
+              chunk = TARGETS[i-1::6]
+              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+          print("Code distribuite Step 1 generate con successo.")
+          EOF
+          python -u m2_step1_setup.py
 
-          echo ""
-          echo "Mappa nodo->porta scritta in: $MAPPA_OUTPUT"
-          cat "$MAPPA_OUTPUT"
-
-          echo ""
-          UNIVOCI_V6=$(for s in $(seq 1 "$NODI_NECESSARI"); do echo "${slot_ipv6[$s]:-VUOTO}"; done | sort -u | wc -l)
-          echo "=== IPv6 univoci finali ottenuti: $UNIVOCI_V6 / $NODI_NECESSARI ==="
-          SCRIPT_EOF
-          chmod +x registra_warp.sh
-
-          # 2. extraction_utils.py
+      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
+        run: |
           cat << 'EOF' > extraction_utils.py
+          """
+          Modulo condiviso tra Step 1 e Step 2.
+          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
+          retry, validazione WAF o altra logica di scraping.
+          """
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
+
           from bs4 import BeautifulSoup
           from markdownify import markdownify as md_convert
 
           STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
                                       "form", "noscript", "iframe", "svg"]
+
           TRACKING_PARAMS_PREFIXES = ("utm_",)
           TRACKING_PARAMS_EXACT = {
               "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
@@ -439,6 +355,7 @@ jobs:
               "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
               "share", "share_id", "si"
           }
+
           JUNK_LINK_DOMAINS = (
               "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
               "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
@@ -447,6 +364,7 @@ jobs:
               "addtoany.com", "sharethis.com", "mailto:"
           )
 
+
           def _is_junk_domain(netloc, full_href):
               netloc_low = netloc.lower()
               href_low = full_href.lower()
@@ -454,6 +372,7 @@ jobs:
                   if junk in netloc_low or href_low.startswith(junk):
                       return True
               return False
+
 
           def _clean_query(query_string):
               if not query_string:
@@ -469,36 +388,48 @@ jobs:
                   cleaned_pairs.append((key, value))
               return urlencode(cleaned_pairs)
 
+
           def clean_link_href(raw_href, page_url):
               if not raw_href:
                   return None
+
               raw_href = raw_href.strip()
               if not raw_href or raw_href.startswith("javascript:"):
                   return None
               if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
                   return None
+
               try:
                   absolute = urljoin(page_url, raw_href)
               except Exception:
                   return None
+
               try:
                   parts = urlsplit(absolute)
               except Exception:
                   return None
+
               if parts.scheme not in ("http", "https", "mailto"):
                   return None
+
               if parts.scheme == "mailto":
                   return None
+
               page_parts = urlsplit(page_url)
               same_path = (parts.netloc == page_parts.netloc and
                            parts.path.rstrip("/") == page_parts.path.rstrip("/"))
+
               if same_path and parts.fragment and not parts.query:
                   return None
+
               if _is_junk_domain(parts.netloc, absolute):
                   return None
+
               cleaned_query = _clean_query(parts.query)
+
               rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
                                      cleaned_query, ""))
+
               page_rebuilt_parts = urlsplit(page_url)
               page_cleaned_query = _clean_query(page_rebuilt_parts.query)
               page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
@@ -510,16 +441,21 @@ jobs:
                                                  cleaned_query, ""))
               if rebuilt_no_trailing == page_rebuilt:
                   return None
+
               return rebuilt
+
 
           def _strip_anchor_tag(a_tag):
               a_tag.replace_with(a_tag.get_text())
 
+
           def html_to_clean_markdown(html, page_url):
               soup = BeautifulSoup(html, "html.parser")
+
               for tag_name in STRUCTURAL_TAGS_TO_STRIP:
                   for tag in soup.find_all(tag_name):
                       tag.decompose()
+
               for a_tag in soup.find_all("a"):
                   href = a_tag.get("href")
                   cleaned = clean_link_href(href, page_url)
@@ -530,37 +466,50 @@ jobs:
                       for attr in list(a_tag.attrs):
                           if attr not in ("href", "title"):
                               del a_tag[attr]
+
               markdown_text = md_convert(
                   str(soup),
                   heading_style="ATX",
                   bullets="-",
                   strip=["img"],
               )
+
               markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
               markdown_text = markdown_text.strip()
+
               return markdown_text
           EOF
 
-          # 3. nugget_extractor.py
+      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
+        run: |
           cat << 'EOF' > nugget_extractor.py
+          """
+          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
+          """
           import json
           import re
           import os
           import time
           import asyncio
           import difflib
+
           from google import genai
 
           MODEL_NAME = "gemini-3.1-flash-live-preview"
+
           CONFIG_LIVE = {
               "response_modalities": ["AUDIO"],
               "output_audio_transcription": {}
           }
+
           NUGGET_TIMEOUT_SECONDS = 40.0
+
           TPM_LIMIT_DICHIARATO = 65_000
           TPM_SAFETY_MARGIN = 0.75
           TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)
+
           COOLDOWN_SECONDS = 65.0
+
           QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
 
           NUGGET_PROMPT_TEMPLATE = """
@@ -599,10 +548,12 @@ jobs:
           {testo}
           """
 
+
           def _stima_token(testo):
               if not testo:
                   return 0
               return max(1, len(testo) // 4)
+
 
           class TokenBucket:
               def __init__(self, capacity_tokens, refill_period_seconds=60.0):
@@ -636,11 +587,13 @@ jobs:
                                 flush=True)
                           await asyncio.sleep(wait_seconds)
 
+
           class GeminiKeyPool:
               def __init__(self, api_keys):
                   api_keys = [k for k in api_keys if k]
                   if not api_keys:
                       raise ValueError("Nessuna API key Gemini fornita")
+
                   self.entries = []
                   for key in api_keys:
                       self.entries.append({
@@ -679,6 +632,7 @@ jobs:
                   entry = await self._pick_entry(label)
                   stima = _stima_token(payload)
                   await entry["bucket"].acquire(stima, label=label)
+
                   accumulated_text = ""
                   try:
                       async def run_session():
@@ -691,8 +645,10 @@ jobs:
                                           accumulated_text += response.server_content.output_transcription.text
                                   if response.server_content and response.server_content.turn_complete:
                                       break
+
                       await asyncio.wait_for(run_session(), timeout=timeout_seconds)
                       return accumulated_text.strip(), None
+
                   except (asyncio.TimeoutError, TimeoutError):
                       return None, "timeout"
                   except Exception as e:
@@ -715,15 +671,20 @@ jobs:
                   pass
               return None
 
+
           def _calcola_confidence(quote_originale, testo_sorgente):
               if not quote_originale or not testo_sorgente:
                   return "low"
+
               quote_norm = re.sub(r'\s+', ' ', quote_originale).strip().lower()
               testo_norm = re.sub(r'\s+', ' ', testo_sorgente).strip().lower()
+
               if not quote_norm:
                   return "low"
+
               if quote_norm in testo_norm:
                   return "high"
+
               finestra = len(quote_norm)
               if finestra < 8 or len(testo_norm) < finestra:
                   best_ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm).ratio()
@@ -737,12 +698,14 @@ jobs:
                           best_ratio = ratio
                       if best_ratio > 0.95:
                           break
+
               if best_ratio >= 0.85:
                   return "high"
               elif best_ratio >= 0.60:
                   return "medium"
               else:
                   return "low"
+
 
           def scrivi_nuggets_jsonl(nuggets, jsonl_path):
               if not nuggets:
@@ -751,27 +714,34 @@ jobs:
                   for n in nuggets:
                       f.write(json.dumps(n, ensure_ascii=False) + "\n")
 
+
           async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
                                     node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
                                     max_key_attempts=None):
               if not testo_markdown or len(testo_markdown.strip()) < 50:
                   return []
+
               label = f"[NODO {node_id}] " if node_id is not None else ""
               payload = NUGGET_PROMPT_TEMPLATE.format(
                   topic=topic,
                   source_url=source_url,
                   testo=testo_markdown
               )
+
               if max_key_attempts is None:
                   max_key_attempts = len(key_pool.entries)
+
               ultimo_motivo = None
               for tentativo in range(max_key_attempts):
                   accumulated_text, errore = await key_pool.esegui_con_pool(payload, timeout_seconds, label=label)
+
                   if errore is None:
                       parsed = _estrai_json_da_risposta(accumulated_text)
                       if parsed is None:
-                          print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. Output grezzo: {accumulated_text[:80]}...", flush=True)
+                          print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
+                                f"Output grezzo: {accumulated_text[:80]}...", flush=True)
                           return None
+
                       nuggets = []
                       for item in parsed:
                           if not isinstance(item, dict):
@@ -781,6 +751,7 @@ jobs:
                           category = str(item.get("category", "altro")).strip() or "altro"
                           if not fact:
                               continue
+
                           confidence = _calcola_confidence(quote, testo_markdown)
                           nuggets.append({
                               "fact": fact,
@@ -789,29 +760,38 @@ jobs:
                               "confidence": confidence,
                               "quote_originale": quote
                           })
+
                       print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
                       return nuggets
+
                   elif errore == "quota":
                       ultimo_motivo = "quota"
-                      print(f"{label}[NUGGET] Quota superata su {source_url}, provo con un'altra chiave ({tentativo + 1}/{max_key_attempts})...", flush=True)
+                      print(f"{label}[NUGGET] Quota superata su {source_url}, "
+                            f"provo con un'altra chiave ({tentativo + 1}/{max_key_attempts})...", flush=True)
                       continue
+
                   elif errore == "timeout":
                       print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}.", flush=True)
                       return None
+
                   else:
                       print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
                       return None
-              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} (ultimo motivo: {ultimo_motivo})", flush=True)
+
+              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
+                    f"(ultimo motivo: {ultimo_motivo})", flush=True)
               return None
           EOF
 
-          # 4. nugget_estrattore_standalone.py
+      - name: Creazione Processo Estrattore Nugget INDIPENDENTE
+        run: |
           cat << 'EOF' > nugget_estrattore_standalone.py
           import asyncio
           import glob
           import json
           import os
           import time
+
           from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
 
           SCRAPED_CONTENT_GLOB = "scraped_content_node_*.jsonl"
@@ -823,7 +803,9 @@ jobs:
           TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
 
           _jsonl_lock = asyncio.Lock()
+
           righe_lette_per_file = {}
+
 
           def carica_gemini_api_keys():
               keys = []
@@ -839,11 +821,13 @@ jobs:
                   i += 1
               return keys
 
+
           async def salva_nuggets(nuggets):
               if not nuggets:
                   return
               async with _jsonl_lock:
                   scrivi_nuggets_jsonl(nuggets, NUGGETS_OUTPUT_PATH)
+
 
           def leggi_righe_nuove():
               righe_nuove_totali = []
@@ -853,30 +837,37 @@ jobs:
                           tutte_le_righe = f.readlines()
                   except Exception:
                       continue
+
                   gia_lette = righe_lette_per_file.get(filename, 0)
                   nuove = tutte_le_righe[gia_lette:]
                   if nuove:
                       righe_nuove_totali.extend(nuove)
                   righe_lette_per_file[filename] = len(tutte_le_righe)
+
               return righe_nuove_totali
+
 
           async def main():
               api_keys = carica_gemini_api_keys()
               if not api_keys:
-                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato immediatamente.", flush=True)
+                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato "
+                        "immediatamente.", flush=True)
                   return
+
               try:
                   key_pool = GeminiKeyPool(api_keys)
                   print(f"[ESTRATTORE] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
               except Exception as e:
-                  print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. Processo terminato.", flush=True)
+                  print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. "
+                        f"Processo terminato.", flush=True)
                   return
 
               nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
               tasks_in_volo = []
               ultima_riga_vista = time.monotonic()
 
-              print(f"[ESTRATTORE] Avvio polling su '{SCRAPED_CONTENT_GLOB}' (ogni {POLL_INTERVAL_SECONDS:.0f}s, topic='{TARGET_TOPIC}')...", flush=True)
+              print(f"[ESTRATTORE] Avvio polling su '{SCRAPED_CONTENT_GLOB}' "
+                    f"(ogni {POLL_INTERVAL_SECONDS:.0f}s, topic='{TARGET_TOPIC}')...", flush=True)
 
               async def processa_riga(source_url, testo_markdown):
                   async with nugget_semaphore:
@@ -894,6 +885,7 @@ jobs:
                   righe_nuove = leggi_righe_nuove()
                   if righe_nuove:
                       ultima_riga_vista = time.monotonic()
+
                   for riga in righe_nuove:
                       riga = riga.strip()
                       if not riga:
@@ -902,6 +894,7 @@ jobs:
                           record = json.loads(riga)
                       except json.JSONDecodeError:
                           continue
+
                       source_url = record.get("source_url")
                       testo_markdown = record.get("testo_markdown")
                       if source_url and testo_markdown:
@@ -910,23 +903,29 @@ jobs:
 
                   tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
                   scraping_e_finito = os.path.exists(SCRAPING_DONE_FLAG_PATH)
+
                   if scraping_e_finito and not tasks_in_volo:
                       inattivo_da = time.monotonic() - ultima_riga_vista
                       if inattivo_da > FINAL_GRACE_SECONDS:
-                          print(f"[ESTRATTORE] Segnale di fine scraping ricevuto e nessun task in volo: chiusura.", flush=True)
+                          print(f"[ESTRATTORE] Segnale di fine scraping ricevuto e nessun "
+                                f"task in volo: chiusura.", flush=True)
                           break
+
                   await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
               if tasks_in_volo:
                   print(f"[ESTRATTORE] Attesa completamento {len(tasks_in_volo)} estrazioni residue...", flush=True)
                   await asyncio.gather(*tasks_in_volo, return_exceptions=True)
+
               print(f"[ESTRATTORE] Terminato. Nugget salvati in {NUGGETS_OUTPUT_PATH}", flush=True)
+
 
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
 
-          # 5. m2_step1.py (Forzato IPv6 esclusivo con libcurl, e fallback IPv4)
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, sincrono come da baseline)
+        run: |
           cat << 'EOF' > m2_step1.py
           import time
           import sys
@@ -935,46 +934,28 @@ jobs:
           import json
           import re
           from bs4 import BeautifulSoup
-          from curl_cffi import requests, CurlOpt
+          from curl_cffi import requests
           from extraction_utils import html_to_clean_markdown
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
+          ACTIVE_PORT = 40000 + node_id
 
-          WARP_MAP_PATH = os.environ.get("WARP_MAP_PATH", "/tmp/warp_node_map_step1.json")
-          with open(WARP_MAP_PATH, "r", encoding="utf-8") as f:
-              warp_map = json.load(f)
-
-          nodo_info = warp_map.get(str(node_id))
-          if nodo_info is None:
-              print(f"[NODO {node_id}] Nessuna voce nella mappa WARP {WARP_MAP_PATH}. Uscita.", flush=True)
-              sys.exit(0)
-
-          ACTIVE_PORT = int(nodo_info["porta"])
-          EXPECTED_IPV4 = nodo_info.get("ipv4", "")
-          EXPECTED_IPV6 = nodo_info.get("ipv6", "")
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
+
 
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
-                      # CurlOpt.IPRESOLVE: 2 forza l'IPv6 per aggirare il WAF
-                      resp = test_session.get("https://api64.ipify.org?format=json", timeout=6, curl_options={CurlOpt.IPRESOLVE: 2})
+                      resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
                       if resp.status_code == 200:
                           ip_address = resp.json().get("ip", "Sconosciuto")
                           return True, ip_address
-                  except:
-                      try:
-                          # Fallback su IPv4 se l'host o la rete non supporta IPv6
-                          resp = test_session.get("https://api64.ipify.org?format=json", timeout=6, curl_options={CurlOpt.IPRESOLVE: 1})
-                          if resp.status_code == 200:
-                              ip_address = resp.json().get("ip", "Sconosciuto")
-                              return True, ip_address
-                      except: pass
+                  except: pass
                   time.sleep(delay)
               return False, None
 
@@ -982,7 +963,9 @@ jobs:
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
               if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
+
               low_html = html.lower()
+
               title_match = re.search(r"<title[^>]*>(.*?)</title>", low_html, re.DOTALL)
               if title_match:
                   title_text = title_match.group(1).strip()
@@ -991,6 +974,7 @@ jobs:
                   for wt in waf_titles:
                       if wt in title_text:
                           return False, f"WAF rilevato nel titolo della pagina: {wt}"
+
               blocking_indicators = [
                   "challenge-platform", "access denied", "403 forbidden", "cloudflare",
                   "just a moment", "security verification", "please enable js", "enable javascript",
@@ -1003,6 +987,7 @@ jobs:
                   "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
                   "checking the site connection security"
               ]
+
               for ind in blocking_indicators:
                   if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
@@ -1023,62 +1008,53 @@ jobs:
 
           is_active, outbound_ip = verify_proxy_active(ACTIVE_PORT)
           if not is_active: sys.exit(0)
-          print(f"[NODO {node_id}] Proxy attivo su porta {ACTIVE_PORT}! IP di uscita utilizzato: {outbound_ip} (atteso IPv4: {EXPECTED_IPV4} | IPv6 nodo: {EXPECTED_IPV6})", flush=True)
+          print(f"[NODO {node_id}] Proxy attivo! IP di uscita utilizzato: {outbound_ip}", flush=True)
 
           queue_file = f"/tmp/step1_queue_{node_id}.json"
           if not os.path.exists(queue_file): sys.exit(0)
-          with open(queue_file, "r") as f: targets = json.load(f)
+
+          with open(queue_file, "r") as f:
+              targets = json.load(f)
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
           failed_targets = []
+
           session = requests.Session(impersonate="chrome120")
           session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
           session.headers.update({
               "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
           })
+
           forza_diagnostici_step2 = os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1"
 
           for url in targets:
               if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
-                  print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 (FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
+                  print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
+                        f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
                   failed_targets.append(url)
                   continue
 
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
-              
-              is_ok = False
-              err_msg = ""
               try:
-                  resp = session.get(url, timeout=12, curl_options={CurlOpt.IPRESOLVE: 2})
+                  resp = session.get(url, timeout=12)
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+
                   if is_ok:
-                      print(f"[NODO {node_id}] -> Successo in IPv6!", flush=True)
-              except Exception as e:
-                  is_ok = False
-                  err_msg = f"Errore rete IPv6: {e}"
+                      if any(site in url for site in DIAGNOSTIC_SITES):
+                          soup = BeautifulSoup(resp.text, 'html.parser')
+                          text = soup.get_text(separator=' ', strip=True)
+                      else:
+                          text = html_to_clean_markdown(resp.text, url)
+                          pubblica_contenuto_scrapato(url, text, "step1")
 
-              if not is_ok:
-                  print(f"[NODO {node_id}] -> IPv6 non supportato o fallito ({err_msg}). Provo fallback IPv4...", flush=True)
-                  try:
-                      resp = session.get(url, timeout=12, curl_options={CurlOpt.IPRESOLVE: 1})
-                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-                      if is_ok:
-                          print(f"[NODO {node_id}] -> Successo in IPv4!", flush=True)
-                  except Exception as e:
-                      is_ok = False
-                      err_msg = f"Errore rete IPv4: {e}"
-
-              if is_ok:
-                  if any(site in url for site in DIAGNOSTIC_SITES):
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)
+                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
-                      text = html_to_clean_markdown(resp.text, url)
-                      pubblica_contenuto_scrapato(url, text, "step1")
-                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-              else:
-                  print(f"[NODO {node_id}] -> Bloccato anche in fallback IPv4: {err_msg}", flush=True)
+                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
+                      failed_targets.append(url)
+              except Exception as e:
+                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
                   failed_targets.append(url)
 
               time.sleep(random.uniform(1.0, 2.0))
@@ -1087,10 +1063,292 @@ jobs:
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
           EOF
 
-          # 6. m2_step2_setup.py
+      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
+        run: |
+          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
+          echo $! > estrattore_nugget.pid
+          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
+
+      - name: Esecuzione Scraping Parallelo - STEP 1
+        run: |
+          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
+
+          PIDS=()
+          for i in {1..6}; do
+            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+      - name: Pulizia Container WARP STEP 1 (libera le porte per il nuovo setup)
+        run: |
+          echo "Arresto e rimozione dei 6 container WARP dello Step 1, per liberare le porte 40001-40006..."
+          for i in {1..6}; do
+            docker rm -f "warp_step1_slot${i}" || true
+          done
+          echo "Container Step 1 rimossi."
+
+      - name: Setup Container WARP STEP 2 (Nuovi IP) (IPv4+IPv6 univoci, client ufficiale)
+        run: |
+          set -o pipefail
+          START_TS=$(date +%s)
+
+          NODI_NECESSARI=6
+          BUDGET_TOTALE_SECONDI=90
+          DELAY_MIN=2
+          DELAY_MAX=3
+          PORTA_BASE=40000
+
+          # Ogni slot 1..6 ha una porta FISSA (PORTA_BASE+slot), che e' quella
+          # attesa dallo scraper Python (ACTIVE_PORT = 40000 + node_id).
+          # Un nodo che fallisce o duplica viene semplicemente RIPROVATO sullo
+          # stesso slot/porta, cosi' non serve mai spostare o rinominare nulla.
+          declare -A ipv4_di_slot
+          declare -A ipv6_di_slot
+          declare -A ipv4_visti
+          declare -A ipv6_visti
+          SLOT_OK=()
+
+          tempo_residuo() {
+            local elapsed=$(( $(date +%s) - START_TS ))
+            echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
+          }
+
+          avvia_e_verifica_nodo() {
+            local slot=$1
+            local port=$2
+            local out_file=$3
+            local ip4=""
+            local ip6=""
+            local t_pronto="0"
+            local err_msg=""
+            local t_start
+            t_start=$(date +%s)
+
+            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
+
+            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
+
+            local run_out
+            if ! run_out=$(docker run -d \
+              --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
+              --cap-add NET_ADMIN \
+              --cap-add MKNOD \
+              --cap-add AUDIT_WRITE \
+              --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+              --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+              -e WARP_SLEEP=1 \
+              -p "$port":1080 \
+              caomingjun/warp:latest 2>&1); then
+              err_msg="Docker run fallito: $(echo "$run_out" | tr -d '\r\n')"
+              return 0
+            fi
+
+            local pronto=0
+            local trace=""
+            for _ in $(seq 1 60); do
+              trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
+                pronto=1
+                t_pronto=$(( $(date +%s) - t_start ))
+                break
+              fi
+              sleep 0.5
+            done
+
+            if [ "$pronto" -eq 1 ]; then
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
+              wait
+
+              ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+              ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+              rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
+
+              if [ -z "$ip4" ]; then
+                ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
+              fi
+              if [ -z "$ip6" ]; then
+                ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+              fi
+            else
+              err_msg="Timeout WARP (warp=on non rilevato dopo 30s)"
+            fi
+
+            return 0
+          }
+
+          rimuovi_nodo_slot() {
+            local slot=$1
+            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
+          }
+
+          leggi_esito() {
+            local esito_file=$1
+            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
+          }
+
+          # Valuta gli esiti di una lista di slot. Ritorna (via variabile globale
+          # SLOT_DA_RIPROVARE, azzerata prima della chiamata) gli slot falliti o
+          # in collisione, cosi' il chiamante sa esattamente quali ripetere.
+          elabora_esiti() {
+            SLOT_DA_RIPROVARE=()
+            local file_list=("$@")
+            for esito_file in "${file_list[@]}"; do
+              if [ ! -f "$esito_file" ]; then
+                echo "  FALLITO: nessun report generato ($esito_file)"
+                continue
+              fi
+
+              leggi_esito "$esito_file"
+
+              if [ -n "$PARSED_ERR" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
+              fi
+
+              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
+              fi
+
+              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
+              fi
+
+              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
+              fi
+
+              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 duplicato con slot ${ipv6_visti[$PARSED_IP6]})"
+                rimuovi_nodo_slot "$PARSED_SLOT"
+                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                continue
+              fi
+
+              ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
+              ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
+              ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
+              ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
+              SLOT_OK+=("$PARSED_SLOT")
+              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
+            done
+          }
+
+          echo "=== STEP 2 (Nuovi IP) - ONDATA 1: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s) ==="
+          ondata1_pids=()
+          ondata1_files=()
+
+          for slot in $(seq 1 "$NODI_NECESSARI"); do
+            port=$((PORTA_BASE + slot))
+            out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
+            ondata1_files+=("$out")
+
+            avvia_e_verifica_nodo "$slot" "$port" "$out" &
+            ondata1_pids+=($!)
+
+            if [ "$slot" -lt "$NODI_NECESSARI" ]; then
+              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
+              echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
+              sleep "$DELAY"
+            else
+              echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata 1."
+            fi
+          done
+
+          echo "Attendo che tutti gli slot completino la verifica..."
+          for pid in "${ondata1_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA 1 ==="
+          elabora_esiti "${ondata1_files[@]}"
+          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI (tempo residuo $(tempo_residuo)s)"
+
+          ONDATA=1
+          SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
+          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ]; do
+            RESIDUO=$(tempo_residuo)
+            if [ "$RESIDUO" -le 10 ]; then
+              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Arresto."
+              break
+            fi
+
+            echo "Cooldown 4s per prevenire rate-limit di registrazione..."
+            sleep 4
+
+            ONDATA=$((ONDATA + 1))
+            echo ""
+            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
+
+            retry_pids=()
+            retry_files=()
+
+            n_mancanti=${#SLOT_MANCANTI[@]}
+            idx=0
+            for slot in "${SLOT_MANCANTI[@]}"; do
+              idx=$((idx + 1))
+              port=$((PORTA_BASE + slot))
+              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
+              retry_files+=("$out")
+
+              avvia_e_verifica_nodo "$slot" "$port" "$out" &
+              retry_pids+=($!)
+
+              if [ "$idx" -lt "$n_mancanti" ]; then
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()+'"$ONDATA"'); print min+rand()*(max-min)}')
+                sleep "$DELAY"
+              fi
+            done
+
+            for pid in "${retry_pids[@]}"; do
+              wait "$pid" 2>/dev/null || true
+            done
+
+            echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA $ONDATA ==="
+            elabora_esiti "${retry_files[@]}"
+            SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
+            echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
+          done
+
+          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
+            echo "::error::STEP 2 (Nuovi IP): ottenuti solo ${#SLOT_OK[@]}/$NODI_NECESSARI slot validi."
+            exit 1
+          fi
+
+          ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
+          echo ""
+          echo "=== STEP 2 (Nuovi IP) completata: 6/6 slot (porte $((PORTA_BASE+1))-$((PORTA_BASE+NODI_NECESSARI))), IPv4+IPv6 tutti univoci, in ${ELAPSED_FINALE}s ==="
+          for slot in $(seq 1 "$NODI_NECESSARI"); do
+            echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
+          done
+        env:
+          CONTAINER_PREFIX: step2
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        run: |
           cat << 'EOF' > m2_step2_setup.py
           import json
           import os
+
           merged_failed = []
           for i in range(1, 7):
               filename = f"failed_node_{i}.json"
@@ -1098,15 +1356,20 @@ jobs:
                   with open(filename, "r", encoding="utf-8") as f:
                       try: merged_failed.extend(json.load(f))
                       except Exception: pass
+
           unique_failed = list(dict.fromkeys(merged_failed))
+
           for i in range(1, 7):
               chunk = unique_failed[i-1::6]
               with open(f"/tmp/step2_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
+
           print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
           EOF
+          python -u m2_step2_setup.py
 
-          # 7. m2_step2.py (Corretto in socks5:// per supportare nativamente Chromium)
+      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
+        run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
           import time
@@ -1121,19 +1384,8 @@ jobs:
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
+          INITIAL_PORT = 40000 + node_id
 
-          WARP_MAP_PATH = os.environ.get("WARP_MAP_PATH", "/tmp/warp_node_map_step2.json")
-          with open(WARP_MAP_PATH, "r", encoding="utf-8") as f:
-              warp_map = json.load(f)
-
-          nodo_info = warp_map.get(str(node_id))
-          if nodo_info is None:
-              print(f"[NODO {node_id}] Nessuna voce nella mappa WARP {WARP_MAP_PATH}. Uscita.", flush=True)
-              sys.exit(0)
-
-          INITIAL_PORT = int(nodo_info["porta"])
-          EXPECTED_IPV4 = nodo_info.get("ipv4", "")
-          EXPECTED_IPV6 = nodo_info.get("ipv6", "")
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
 
           def get_query_from_url(url, default="migliore carbonara roma"):
@@ -1162,13 +1414,16 @@ jobs:
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
+
               with open(queue_file, "r") as f: targets = json.load(f)
               if not targets:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
                   return
+
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -1176,7 +1431,8 @@ jobs:
                   "--fingerprint-storage-quota=5000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente su porta {INITIAL_PORT}...", flush=True)
+
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
                   context = await launch_persistent_context_async(
                       profile_dir,
@@ -1188,6 +1444,7 @@ jobs:
                       args=base_args
                   )
                   page = await context.new_page()
+
                   try:
                       await page.goto("https://api64.ipify.org?format=json", timeout=12000)
                       page_text = await page.locator("body").inner_text()
@@ -1196,19 +1453,23 @@ jobs:
                       print(f"[NODO {node_id}] [STEP 2] Sessione avviata. IP di uscita CloakBrowser: {outbound_ip}", flush=True)
                   except Exception as e:
                       print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
+
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
+
               except Exception as e:
                   print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
                   return
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+
               for url in targets:
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
                       query_to_search = get_query_from_url(url)
+
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -1217,6 +1478,7 @@ jobs:
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
                       elif "startpage.com" in url:
                           await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
@@ -1225,6 +1487,7 @@ jobs:
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
                       elif "html.duckduckgo.com" in url:
                           await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
@@ -1233,11 +1496,15 @@ jobs:
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
+
                       await asyncio.sleep(6)
+
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
@@ -1245,6 +1512,7 @@ jobs:
 
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
+
                       title_blocked = False
                       title_reason = ""
                       if soup.title and soup.title.string:
@@ -1256,8 +1524,10 @@ jobs:
                                   title_blocked = True
                                   title_reason = f"WAF nel titolo: {wt}"
                                   break
+
                       text_full = html_to_clean_markdown(raw_html, url)
                       text_lower_full = text_full.lower()
+
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -1267,6 +1537,7 @@ jobs:
                           "unusual traffic from your computer network"
                       ]
                       is_blocked = title_blocked or any(b in text_lower_full for b in blocking_indicators)
+
                       if len(text_full) > 300 and not is_blocked:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_full}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
@@ -1275,12 +1546,16 @@ jobs:
                           motivo = title_reason if title_blocked else "Blocco WAF/Captcha o contenuto insufficiente"
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({motivo})\n"
                           print(f"[NODO {node_id}] -> Fallito: {motivo}", flush=True)
+
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+
                   await asyncio.sleep(random.uniform(4.0, 7.0))
+
               try: await context.close()
               except: pass
+
               with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                   f.write(results)
 
@@ -1288,170 +1563,9 @@ jobs:
               asyncio.run(main())
           EOF
 
-          # 8. merge_nuggets.py
-          cat << 'EOF' > merge_nuggets.py
-          import json
-          import os
-          import glob
-          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
-          merged_nuggets = []
-          per_file_stats = {}
-          for filename in jsonl_files:
-              count = 0
-              corrotte = 0
-              try:
-                  with open(filename, "r", encoding="utf-8") as f:
-                      for riga in f:
-                          riga = riga.strip()
-                          if not riga:
-                              continue
-                          try:
-                              nugget = json.loads(riga)
-                              merged_nuggets.append(nugget)
-                              count += 1
-                          except json.JSONDecodeError:
-                              corrotte += 1
-              except Exception as e:
-                  print(f"Errore lettura {filename}: {e}", flush=True)
-              per_file_stats[filename] = count
-              if corrotte:
-                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
-
-          seen = set()
-          nuggets_deduplicati = []
-          for n in merged_nuggets:
-              fact_norm = (n.get("fact") or "").strip().lower()
-              url_norm = (n.get("source_url") or "").strip().lower()
-              key = (fact_norm, url_norm)
-              if key in seen:
-                  continue
-              seen.add(key)
-              nuggets_deduplicati.append(n)
-
-          confidence_counts = {"high": 0, "medium": 0, "low": 0}
-          for n in nuggets_deduplicati:
-              c = n.get("confidence", "low")
-              if c in confidence_counts:
-                  confidence_counts[c] += 1
-
-          output_finale = {
-              "stats": {
-                  "file_jsonl_trovati": len(jsonl_files),
-                  "totale_nugget_grezzi": len(merged_nuggets),
-                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
-                  "per_file": per_file_stats,
-                  "per_confidence": confidence_counts
-              },
-              "nuggets": nuggets_deduplicati
-          }
-          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
-              json.dump(output_finale, f, indent=2, ensure_ascii=False)
-          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici salvati in nuggets_finale.json", flush=True)
-          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
-          EOF
-          chmod +x extraction_utils.py nugget_extractor.py nugget_estrattore_standalone.py m2_step1.py m2_step2_setup.py m2_step2.py merge_nuggets.py
-
-      - name: Registrazione Nodi WARP Dual-Stack - STEP 1 (Solo IPv6 Unici)
-        run: |
-          NODI_NECESSARI="$NODI_NECESSARI" \
-          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
-          DELAY_MIN="$WARP_DELAY_MIN" \
-          DELAY_MAX="$WARP_DELAY_MAX" \
-          PORTA_BASE="$WARP_PORTA_BASE" \
-          PREFIX_CONTAINER="warpstep1" \
-          MAPPA_OUTPUT="/tmp/warp_node_map_step1.json" \
-          bash registra_warp.sh
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 1
-        run: |
-          cat << 'EOF' > m2_step1_setup.py
-          import json
-          TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
-          ]
-          for i in range(1, 7):
-              chunk = TARGETS[i-1::6]
-              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-          print("Code distribuite Step 1 generate con successo.")
-          EOF
-          python -u m2_step1_setup.py
-
-      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
-        run: |
-          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
-          echo $! > estrattore_nugget.pid
-          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
-
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          if [ ! -f /tmp/warp_node_map_step1.json ]; then
-            echo "Mappa WARP Step 1 non trovata. Impossibile proseguire con lo Step 1."
-            exit 1
-          fi
-          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-
-          PIDS=()
-          for i in {1..6}; do
-            WARP_MAP_PATH="/tmp/warp_node_map_step1.json" python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
-      - name: Rigenerazione Pulita Nodi WARP per lo STEP 2 (Nuovi IPv4+IPv6 Unici)
-        if: always()
-        run: |
-          echo 'Eliminazione container WARP dello Step 1 per forzare nuove registrazioni con nuovi IP...'
-          docker ps -a --format '{{.Names}}' | grep '^warpstep1_' | xargs -r docker rm -f || true
-
-          NODI_NECESSARI="$NODI_NECESSARI" \
-          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
-          DELAY_MIN="$WARP_DELAY_MIN" \
-          DELAY_MAX="$WARP_DELAY_MAX" \
-          PORTA_BASE="$WARP_PORTA_BASE" \
-          PREFIX_CONTAINER="warpstep2" \
-          MAPPA_OUTPUT="/tmp/warp_node_map_step2.json" \
-          bash registra_warp.sh
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 2
-        if: always()
-        run: |
-          python -u m2_step2_setup.py
-
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         if: always()
         run: |
-          if [ ! -f /tmp/warp_node_map_step2.json ]; then
-            echo "Mappa WARP Step 2 non trovata. Skip dello Step 2."
-            exit 0
-          fi
           echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
@@ -1459,7 +1573,7 @@ jobs:
 
           PIDS=()
           for i in {1..6}; do
-            WARP_MAP_PATH="/tmp/warp_node_map_step2.json" python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
             PIDS+=($!)
             sleep 1.5
           done
@@ -1467,7 +1581,10 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-          docker ps -a --format '{{.Names}}' | grep -E '^warpstep(1|2)_' | xargs -r docker rm -f || true
+          for i in {1..6}; do
+            docker rm -f "warp_step1_slot${i}" || true
+            docker rm -f "warp_step2_slot${i}" || true
+          done
 
           touch output_node_1_step1.txt output_node_1_step2.txt \
                 output_node_2_step1.txt output_node_2_step2.txt \
@@ -1511,12 +1628,74 @@ jobs:
       - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
         if: always()
         run: |
-          python -u merge_nuggets.py
+          cat << 'EOF' > merge_nuggets.py
+          import json
+          import os
+          import glob
 
-      - name: Pulizia Finale Container WARP
-        if: always()
-        run: |
-          docker ps -a --format '{{.Names}}' | grep -E '^warpstep(1|2)_' | xargs -r docker rm -f || true
+          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
+
+          merged_nuggets = []
+          per_file_stats = {}
+
+          for filename in jsonl_files:
+              count = 0
+              corrotte = 0
+              try:
+                  with open(filename, "r", encoding="utf-8") as f:
+                      for riga in f:
+                          riga = riga.strip()
+                          if not riga:
+                              continue
+                          try:
+                              nugget = json.loads(riga)
+                              merged_nuggets.append(nugget)
+                              count += 1
+                          except json.JSONDecodeError:
+                              corrotte += 1
+              except Exception as e:
+                  print(f"Errore lettura {filename}: {e}", flush=True)
+
+              per_file_stats[filename] = count
+              if corrotte:
+                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
+
+          seen = set()
+          nuggets_deduplicati = []
+          for n in merged_nuggets:
+              fact_norm = (n.get("fact") or "").strip().lower()
+              url_norm = (n.get("source_url") or "").strip().lower()
+              key = (fact_norm, url_norm)
+              if key in seen:
+                  continue
+              seen.add(key)
+              nuggets_deduplicati.append(n)
+
+          confidence_counts = {"high": 0, "medium": 0, "low": 0}
+          for n in nuggets_deduplicati:
+              c = n.get("confidence", "low")
+              if c in confidence_counts:
+                  confidence_counts[c] += 1
+
+          output_finale = {
+              "stats": {
+                  "file_jsonl_trovati": len(jsonl_files),
+                  "totale_nugget_grezzi": len(merged_nuggets),
+                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
+                  "per_file": per_file_stats,
+                  "per_confidence": confidence_counts
+              },
+              "nuggets": nuggets_deduplicati
+          }
+
+          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+              json.dump(output_finale, f, indent=2, ensure_ascii=False)
+
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+                f"salvati in nuggets_finale.json", flush=True)
+          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+          EOF
+          python -u merge_nuggets.py
 
       - name: Upload Artifact Macchina 2 (Testo Grezzo)
         if: always()
