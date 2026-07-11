@@ -7,7 +7,7 @@ env:
   NODI_NECESSARI: 6
   BUDGET_TOTALE_SECONDI: 33
   DELAY_MIN: 4
-  DELAY_MAX: 5
+  DELAY_MAX: 6
 
 jobs:
   test:
