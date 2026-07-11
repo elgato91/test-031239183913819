@@ -1,218 +1,62 @@
-name: Test Architettura Scraping (Engine Blindato)
+name: Test WARP Client Ufficiale (caomingjun)
 
 on:
   workflow_dispatch:
 
 jobs:
-  machine2_cdp_insocket:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+      - name: Pull immagine
+        run: docker pull caomingjun/warp:latest
 
-      - name: Installazione Font di Sistema (Inclusi Font Microsoft)
+      - name: Avvia 6 nodi scaglionati (client ufficiale)
         run: |
-          sudo apt-get update
-          # Accettazione automatica non interattiva dell'EULA Microsoft per i font core di Windows
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
-          # Aggiorna la cache dei font di sistema
-          fc-cache -f -v
+          for i in 1 2 3 4 5 6; do
+            PORT=$((1080 + i))
+            docker run -d \
+              --name "warp_$i" \
+              --cap-add NET_ADMIN \
+              --cap-add MKNOD \
+              --cap-add AUDIT_WRITE \
+              --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+              --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+              -e WARP_SLEEP=2 \
+              -p "$PORT":1080 \
+              caomingjun/warp:latest
 
-      - name: Installazione Dipendenze
+            DELAY=$(awk -v min=4 -v max=6 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
+            echo "Nodo $i avviato su porta $PORT, attendo ${DELAY}s..."
+            sleep "$DELAY"
+          done
+
+          echo ""
+          echo "=== Attesa registrazione (25s) ==="
+          sleep 25
+
+      - name: Verifica stato e IP di uscita per nodo
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests
-          playwright install-deps chromium
+          for i in 1 2 3 4 5 6; do
+            PORT=$((1080 + i))
+            echo "--- Nodo $i (porta $PORT) ---"
+            docker logs "warp_$i" 2>&1 | tail -5
+            TRACE=$(curl -s --max-time 10 -x "socks5h://127.0.0.1:$PORT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+            echo "$TRACE"
+            echo ""
+          done
 
-      - name: Setup Cloudflare WARP
+      - name: Riepilogo IP
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update && sudo apt-get install cloudflare-warp
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos connect
-          sleep 5
+          echo "=== Riepilogo compatto ==="
+          for i in 1 2 3 4 5 6; do
+            PORT=$((1080 + i))
+            IP=$(curl -s --max-time 8 -x "socks5h://127.0.0.1:$PORT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2)
+            echo "Nodo $i (porta $PORT): $IP"
+          done
 
-      - name: Avvio Xvfb (Virtual Display Stabile)
+      - name: Pulizia
+        if: always()
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: Creazione script Python (Macchina 2)
-        run: |
-          cat << 'EOF' > m2_insocket.py
-          import time
-          import requests
-          from cloakbrowser import launch_context
-          from bs4 import BeautifulSoup
-
-          TARGETS = [
-              "https://api64.ipify.org?format=json",
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.yelp.it/search?find_desc=roma&find_loc=Milano",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://www.booking.com/searchresults.html?ss=Rome",
-              "https://www.afar.com/hotels/the-best-new-hotels-of-2026",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.glassdoor.com/Overview/Working-at-Google-EI_IE9079.11,17.htm",
-              "https://alex-canter-84751.medium.com/eating-through-los-angeles-alex-canters-top-100-restaurants-for-2022-95ad5c47f5b6",
-              "https://www.canadianinsider.com/money-is-moving"
-          ]
-
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-          results = ""
-
-          def extract_text(html_content, url):
-              soup = BeautifulSoup(html_content, 'html.parser')
-              text = soup.get_text(separator=' ', strip=True)
-              if any(site in url for site in DIAGNOSTIC_SITES):
-                  return text
-              return text[:5000]
-
-          # Rilevamento geografico robusto multi-stage per allineare l'IP
-          print("Rilevamento parametri geografici dell'IP di rete...", flush=True)
-          timezone = "UTC"
-          locale = "en-US"
-          
-          # Interroga servizi alternativi se uno di essi applica il rate-limiting al runner GHA
-          geo_services = [
-              ("http://ip-api.com/json/", lambda d: (d.get("timezone"), d.get("countryCode", "US"))),
-              ("https://ipapi.co/json/", lambda d: (d.get("timezone"), d.get("languages", "en-US").split(",")[0])),
-              ("https://ipwho.is/", lambda d: (d.get("timezone"), d.get("country_code", "US")))
-          ]
-          
-          for url, parse_func in geo_services:
-              try:
-                  print(f"Tentativo con {url}...", flush=True)
-                  response = requests.get(url, timeout=5)
-                  if response.status_code == 200:
-                      data = response.json()
-                      tz, loc = parse_func(data)
-                      if tz:
-                          timezone = tz
-                          locale = loc
-                          print(f"Allineamento completato -> Timezone: {timezone} | Locale: {locale}", flush=True)
-                          break
-              except Exception as e:
-                  print(f"Avviso: {url} non raggiungibile o in rate-limit ({e}). Provo il servizio successivo...", flush=True)
-
-          print("Avviando CloakBrowser con i parametri allineati...", flush=True)
-          
-          # launch_context in-memory (stateless) per garantire isolamento e velocità nel loop multi-target.
-          # Passiamo timezone e locale direttamente come argomenti C++ per patchare nativamente anche i Web Workers.
-          context = launch_context(
-              headless=False,
-              humanize=True,
-              timezone=timezone,
-              locale=locale,
-              viewport={"width": 1920, "height": 1080},
-              args=[
-                  "--no-sandbox", 
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint-timezone={timezone}",  # Forza la timezone nel core C++ (inclusi i Worker)
-                  f"--fingerprint-locale={locale}",      # Forza la lingua nel core C++ (inclusi i Worker)
-                  "--fingerprint=42069"                  # Mantiene un seed hardware stabile e credibile
-              ]
-          )
-
-          for url in TARGETS:
-              results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\n"
-              print(f"Analizzando: {url}", flush=True)
-              try:
-                  page = context.new_page()
-
-                  # GESTIONE SPECIFICA YELP (Warm-up della sessione sulla home page)
-                  if "yelp.com" in url or "yelp.it" in url:
-                      print("Esecuzione del warm-up su Yelp...", flush=True)
-                      # Carica prima la home page legittima per ottenere cookie validi
-                      page.goto("https://www.yelp.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(3)
-                      # Naviga ora verso l'URL di ricerca reale
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # Navigazione simulata per Startpage
-                  elif "startpage.com/sp/search" in url:
-                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      page.type("input#q", "migliore carbonara roma", delay=150)
-                      page.keyboard.press("Enter")
-                  
-                  # Navigazione simulata per DuckDuckGo
-                  elif "html.duckduckgo.com/html/" in url:
-                      page.goto("https://duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
-                      time.sleep(2)
-                      page.type("input[name=q]", "migliore carbonara roma", delay=150)
-                      page.keyboard.press("Enter")
-                      
-                  else:
-                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                  
-                  # GESTIONE SPECIFICA YAHOO FINANCE (Attesa del caricamento della tabella dati asincrona)
-                  if "finance.yahoo.com" in url:
-                      print("In attesa del caricamento dei dati di Yahoo Finance...", flush=True)
-                      page.wait_for_selector('section[data-testid="qsp-statistics"]', timeout=15000)
-                      time.sleep(2)
-
-                  # Movimento scorrimento simulato
-                  try:
-                      for _ in range(3):
-                          page.mouse.wheel(0, 300)
-                          time.sleep(1)
-                  except:
-                      pass
-
-                  # Attese necessarie per permettere la profilazione diagnostica completa
-                  if "creepjs" in url:
-                      time.sleep(20) 
-                  elif "pixelscan" in url:
-                      time.sleep(10)
-                  elif any(test in url for test in ["sannysoft", "browserleaks", "incolumitas", "deviceinfo"]):
-                      time.sleep(5)
-                  else:
-                      time.sleep(6)
-
-                  raw_html = page.content()
-                  results += f"TESTO ESTRATTO:\n{extract_text(raw_html, url)}\n"
-                  page.close()
-
-              except Exception as e:
-                  print(f"Errore critico su {url}: {e}", flush=True)
-                  results += f"ERRORE GLOBALE: {str(e)}\n"
-                  try:
-                      page.close()
-                  except:
-                      pass
-
-          context.close()
-
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              f.write(results)
-          EOF
-
-      - name: Esecuzione Scraping Macchina 2
-        run: python -u m2_insocket.py
-
-      - name: Upload Artifact Macchina 2
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
+          for i in 1 2 3 4 5 6; do
+            docker rm -f "warp_$i" || true
+          done
