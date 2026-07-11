@@ -6,8 +6,8 @@ on:
 env:
   NODI_NECESSARI: 6
   BUDGET_TOTALE_SECONDI: 90
-  DELAY_MIN: 4
-  DELAY_MAX: 6
+  DELAY_MIN: 1
+  DELAY_MAX: 2
 
 jobs:
   test:
@@ -35,8 +35,7 @@ jobs:
             echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
           }
 
-          # Scrive sempre 5 campi separati da '|' (mai spazi) nel file di output
-          # per evitare errori di parsing in caso di campi vuoti.
+          # Funzione in background 100% silenziosa. Comunica solo tramite file di esito.
           avvia_e_verifica_nodo() {
             local id=$1
             local port=$2
@@ -44,14 +43,18 @@ jobs:
             local ip4=""
             local ip6=""
             local t_pronto="0"
+            local err_msg=""
             local t_start
             t_start=$(date +%s)
 
-            trap 'echo "${id}|${port}|${ip4}|${ip6}|${t_pronto}" > "$out_file"' EXIT
+            trap 'echo "${id}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
 
+            # Rimuovi eventuali container residui con lo stesso nome
             docker rm -f "warp_$id" > /dev/null 2>&1 || true
 
-            if ! docker run -d \
+            # Avvia il container catturando l'eventuale errore di sistema
+            local run_out
+            if ! run_out=$(docker run -d \
               --name "warp_$id" \
               --cap-add NET_ADMIN \
               --cap-add MKNOD \
@@ -60,7 +63,8 @@ jobs:
               --sysctl net.ipv4.conf.all.src_valid_mark=1 \
               -e WARP_SLEEP=1 \
               -p "$port":1080 \
-              caomingjun/warp:latest > /dev/null 2>&1; then
+              caomingjun/warp:latest 2>&1); then
+              err_msg="Docker run fallito: $(echo "$run_out" | tr -d '\r\n')"
               return 0
             fi
 
@@ -77,20 +81,21 @@ jobs:
             done
 
             if [ "$pronto" -eq 1 ]; then
-              # Ottieni IPv4 delegando la risoluzione al container
-              ip4=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
-              if [ -z "$ip4" ]; then
-                ip4=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-              fi
+              # Ottieni IPv4 e IPv6 in parallelo per azzerare i tempi morti di curl
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${id}") &
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${id}") &
+              wait
+
+              ip4=$(cat "/tmp/ip4_${id}" 2>/dev/null || true)
+              ip6=$(cat "/tmp/ip6_${id}" 2>/dev/null || true)
+              rm -f "/tmp/ip4_${id}" "/tmp/ip6_${id}"
+
+              # Fallback IPv4 tramite trace se icanhazip fallisce
               if [ -z "$ip4" ]; then
                 ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
               fi
-
-              # Ottieni IPv6 delegando la risoluzione al container (endpoint solo IPv6)
-              ip6=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
-              if [ -z "$ip6" ]; then
-                ip6=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-              fi
+            else
+              err_msg="Timeout WARP (warp=on non rilevato dopo 30s)"
             fi
 
             return 0
@@ -101,16 +106,71 @@ jobs:
             docker rm -f "warp_$id" > /dev/null 2>&1 || true
           }
 
-          # Legge un file esito a 5 campi pipe-separated in 5 variabili globali:
-          # PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO
+          # Legge un file esito a 6 campi pipe-separated in 6 variabili globali
           leggi_esito() {
             local esito_file=$1
-            IFS='|' read -r PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO < "$esito_file"
+            IFS='|' read -r PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
           }
 
-          echo "=== ONDATA 1: avvio $NODI_NECESSARI nodi scaglionati (${DELAY_MIN}-${DELAY_MAX}s) ==="
-          declare -A pid_di_nodo
-          declare -A file_di_nodo
+          # Funzione centralizzata per analizzare gli esiti in modo sincrono e ordinato
+          elabora_esiti() {
+            local file_list=("$@")
+            for esito_file in "${file_list[@]}"; do
+              if [ ! -f "$esito_file" ]; then
+                local filename
+                filename=$(basename "$esito_file")
+                local id="${filename#esito_}"
+                id="${id%.txt}"
+                echo "  [$id] FALLITO: Nessun report generato dal nodo"
+                rimuovi_nodo "$id"
+                continue
+              fi
+
+              leggi_esito "$esito_file"
+
+              if [ -n "$PARSED_ERR" ]; then
+                echo "  [$PARSED_ID] Porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
+              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
+                echo "  [$PARSED_ID] Porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
+              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
+                echo "  [$PARSED_ID] Porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
+              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                echo "  [$PARSED_ID] Porta $PARSED_PORT: FALLITO (IPv4 duplicato con nodo ${ipv4_visti[$PARSED_IP4]})"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
+              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
+                echo "  [$PARSED_ID] Porta $PARSED_PORT: FALLITO (IPv6 duplicato con nodo ${ipv6_visti[$PARSED_IP6]})"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
+              # Superati tutti i controlli: nodo valido
+              ipv4_visti[$PARSED_IP4]=$PARSED_ID
+              ipv6_visti[$PARSED_IP6]=$PARSED_ID
+              ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
+              ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
+              NODI_OK+=("$PARSED_ID")
+              echo "  [$PARSED_ID] Porta $PARSED_PORT: OK (Pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
+            done
+          }
+
+          echo "=== ONDATA 1: Avvio di $NODI_NECESSARI nodi (ritardo: ${DELAY_MIN}-${DELAY_MAX}s) ==="
+          ondata1_pids=()
+          ondata1_files=()
 
           for i in $(seq 1 "$NODI_NECESSARI"); do
             CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
@@ -118,69 +178,29 @@ jobs:
             port=$((PORTA_BASE + CONTATORE_GLOBALE))
             porta_di_nodo[$id]=$port
             out="/tmp/esito_${id}.txt"
-            file_di_nodo[$id]=$out
+            ondata1_files+=("$out")
 
             avvia_e_verifica_nodo "$id" "$port" "$out" &
-            pid_di_nodo[$id]=$!
+            ondata1_pids+=($!)
 
             if [ "$i" -lt "$NODI_NECESSARI" ]; then
               DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
-              echo "Nodo $id avviato (porta $port), prossimo tra ${DELAY}s..."
+              echo "  [$id] Container avviato su porta $port. Prossimo nodo tra ${DELAY}s..."
               sleep "$DELAY"
             else
-              echo "Nodo $id avviato (porta $port), ultimo dell'ondata 1."
+              echo "  [$id] Container avviato su porta $port. Ultimo nodo dell'ondata 1."
             fi
           done
 
           echo ""
-          echo "Attendo che tutti i nodi completino la verifica (polling attivo, nessuna attesa fissa)..."
-          for id in "${!pid_di_nodo[@]}"; do
-            wait "${pid_di_nodo[$id]}" 2>/dev/null || true
+          echo "Attendo che tutti i nodi completino la verifica (polling attivo)..."
+          for pid in "${ondata1_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
           done
 
           echo ""
-          echo "=== Esiti ondata 1 (con timing per nodo) ==="
-          for id in "${!file_di_nodo[@]}"; do
-            esito_file="${file_di_nodo[$id]}"
-            if [ ! -f "$esito_file" ]; then
-              echo "Nodo $id (porta ${porta_di_nodo[$id]}): FALLITO (nessun esito)"
-              rimuovi_nodo "$id"
-              continue
-            fi
-
-            leggi_esito "$esito_file"
-            echo "Nodo $PARSED_ID (porta $PARSED_PORT): IPv4=${PARSED_IP4:-NESSUNO} IPv6=${PARSED_IP6:-NESSUNO} (pronto in ${PARSED_TPRONTO}s dal suo avvio)"
-
-            if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-              echo "  -> IPv4 non ottenuto, verra' sostituito"
-              rimuovi_nodo "$PARSED_ID"
-              continue
-            fi
-
-            if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-              echo "  -> IPv6 non ottenuto, verra' sostituito"
-              rimuovi_nodo "$PARSED_ID"
-              continue
-            fi
-
-            if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-              echo "  -> IPv4 duplicato (gia' usato da nodo ${ipv4_visti[$PARSED_IP4]}), verra' sostituito"
-              rimuovi_nodo "$PARSED_ID"
-              continue
-            fi
-
-            if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
-              echo "  -> IPv6 duplicato (gia' usato da nodo ${ipv6_visti[$PARSED_IP6]}), verra' sostituito"
-              rimuovi_nodo "$PARSED_ID"
-              continue
-            fi
-
-            ipv4_visti[$PARSED_IP4]=$PARSED_ID
-            ipv6_visti[$PARSED_IP6]=$PARSED_ID
-            ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
-            ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
-            NODI_OK+=("$PARSED_ID")
-          done
+          echo "=== ESITI ONDATA 1 ==="
+          elabora_esiti "${ondata1_files[@]}"
 
           echo ""
           echo "Nodi validi dopo ondata 1: ${#NODI_OK[@]}/$NODI_NECESSARI"
@@ -191,17 +211,17 @@ jobs:
             RESIDUO=$(tempo_residuo)
             if [ "$RESIDUO" -le 10 ]; then
               echo ""
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Mi fermo qui."
+              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Arresto."
               break
             fi
 
             ONDATA=$((ONDATA + 1))
             MANCANTI=$((NODI_NECESSARI - ${#NODI_OK[@]}))
             echo ""
-            echo "=== ONDATA $ONDATA: servono ancora $MANCANTI nodi, tempo residuo ${RESIDUO}s ==="
+            echo "=== ONDATA $ONDATA: Avvio di $MANCANTI nodi sostitutivi (tempo residuo: ${RESIDUO}s) ==="
 
-            declare -A pid_retry
-            declare -A file_retry
+            retry_pids=()
+            retry_files=()
 
             for i in $(seq 1 "$MANCANTI"); do
               CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
@@ -209,68 +229,30 @@ jobs:
               port=$((PORTA_BASE + CONTATORE_GLOBALE))
               porta_di_nodo[$id]=$port
               out="/tmp/esito_${id}.txt"
-              file_retry[$id]=$out
+              retry_files+=("$out")
 
               avvia_e_verifica_nodo "$id" "$port" "$out" &
-              pid_retry[$id]=$!
+              retry_pids+=($!)
 
               if [ "$i" -lt "$MANCANTI" ]; then
                 DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
+                echo "  [$id] Container avviato su porta $port. Prossimo nodo tra ${DELAY}s..."
                 sleep "$DELAY"
+              else
+                echo "  [$id] Container avviato su porta $port. Ultimo nodo dell'ondata $ONDATA."
               fi
             done
 
-            for id in "${!pid_retry[@]}"; do
-              wait "${pid_retry[$id]}" 2>/dev/null || true
+            echo ""
+            echo "Attendo che i nodi sostitutivi completino la verifica..."
+            for pid in "${retry_pids[@]}"; do
+              wait "$pid" 2>/dev/null || true
             done
 
-            for id in "${!file_retry[@]}"; do
-              esito_file="${file_retry[$id]}"
-              if [ ! -f "$esito_file" ]; then
-                echo "Nodo $id (porta ${porta_di_nodo[$id]}): FALLITO"
-                rimuovi_nodo "$id"
-                continue
-              fi
+            echo ""
+            echo "=== ESITI ONDATA $ONDATA ==="
+            elabora_esiti "${retry_files[@]}"
 
-              leggi_esito "$esito_file"
-              echo "Nodo $PARSED_ID (porta $PARSED_PORT): IPv4=${PARSED_IP4:-NESSUNO} IPv6=${PARSED_IP6:-NESSUNO} (pronto in ${PARSED_TPRONTO}s)"
-
-              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                echo "  -> IPv4 non ottenuto, scartato"
-                rimuovi_nodo "$PARSED_ID"
-                continue
-              fi
-
-              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-                echo "  -> IPv6 non ottenuto, scartato"
-                rimuovi_nodo "$PARSED_ID"
-                continue
-              fi
-
-              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  -> IPv4 duplicato, scartato"
-                rimuovi_nodo "$PARSED_ID"
-                continue
-              fi
-
-              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
-                echo "  -> IPv6 duplicato, scartato"
-                rimuovi_nodo "$PARSED_ID"
-                continue
-              fi
-
-              ipv4_visti[$PARSED_IP4]=$PARSED_ID
-              ipv6_visti[$PARSED_IP6]=$PARSED_ID
-              ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
-              ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
-              NODI_OK+=("$PARSED_ID")
-
-              if [ "${#NODI_OK[@]}" -ge "$NODI_NECESSARI" ]; then
-                break
-              fi
-            done
-
-            unset pid_retry file_retry
             echo "Nodi validi dopo ondata $ONDATA: ${#NODI_OK[@]}/$NODI_NECESSARI"
           done
 
