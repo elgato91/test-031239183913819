@@ -18,7 +18,7 @@ jobs:
 
       - name: Registrazione scaglionata con retry mirato fino a 6 IP univoci
         run: |
-          set -uo pipefail
+          set -o pipefail
           START_TS=$(date +%s)
 
           declare -A porta_di_nodo
@@ -37,30 +37,46 @@ jobs:
           # legge l'IP, e restituisce esito. Ogni nodo è indipendente e non blocca gli altri
           # perché viene lanciato in background dal chiamante.
           avvia_e_verifica_nodo() {
+            # Questa funzione gira in una subshell di background (chiamata con &).
+            # Se un qualsiasi comando qui dentro fallisce ed eredita "set -e" dal
+            # contesto GitHub Actions, l'intera subshell può terminare PRIMA di
+            # scrivere out_file, lasciando il chiamante con un file mancante.
+            # Per questo ogni comando a rischio è protetto esplicitamente con
+            # "|| true" / gestione dell'exit code, e la scrittura finale su
+            # out_file avviene sempre, in un trap EXIT.
             local id=$1
             local port=$2
             local out_file=$3
+            local ip=""
 
-            docker run --name "wp-$id" \
+            # Scrive comunque il file quando la funzione esce, qualunque sia il motivo
+            trap 'echo "$id $port ${ip:-}" > "$out_file"' EXIT
+
+            # Rimuove eventuali container residui con lo stesso nome da run precedenti
+            docker rm -f "wp-$id" > /dev/null 2>&1 || true
+
+            if ! docker run --name "wp-$id" \
               --network host \
               -e SOCKS5_PORT="$port" \
               -e DNS=2606:4700:4700::1111,1.1.1.1 \
-              -d "ghcr.io/kingcc/warproxy:latest" > /dev/null 2>&1
+              -d "ghcr.io/kingcc/warproxy:latest" > /dev/null 2>&1; then
+              # docker run fallito: usciamo subito, il trap scrive comunque il file con ip vuoto
+              return 0
+            fi
 
             # Polling attivo: appena il tunnel è su, esce subito invece di aspettare
             # un tempo fisso. Max 18s di attesa per singolo nodo.
-            local ip=""
             for _ in $(seq 1 18); do
               local trace
-              trace=$(curl -s --max-time 2 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
-              if echo "$trace" | grep -q "warp=on"; then
+              trace=$(curl -s --max-time 2 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
                 ip=$(echo "$trace" | grep "^ip=" | cut -d= -f2)
                 break
               fi
               sleep 1
             done
 
-            echo "$id $port $ip" > "$out_file"
+            return 0
           }
 
           rimuovi_nodo() {
@@ -101,7 +117,14 @@ jobs:
           echo ""
           echo "=== Esiti ondata 1 ==="
           for id in "${!file_di_nodo[@]}"; do
-            read -r rid rport rip < "${file_di_nodo[$id]}"
+            esito_file="${file_di_nodo[$id]}"
+            if [ ! -f "$esito_file" ]; then
+              echo "Nodo $id (porta ${porta_di_nodo[$id]}): IP=FALLITO (nessun file di esito prodotto)"
+              rimuovi_nodo "$id"
+              continue
+            fi
+
+            read -r rid rport rip < "$esito_file"
             echo "Nodo $rid (porta $rport): IP=${rip:-FALLITO}"
 
             if [ -z "$rip" ]; then
@@ -168,7 +191,14 @@ jobs:
             done
 
             for id in "${!file_retry[@]}"; do
-              read -r rid rport rip < "${file_retry[$id]}"
+              esito_file="${file_retry[$id]}"
+              if [ ! -f "$esito_file" ]; then
+                echo "Nodo $id (porta ${porta_di_nodo[$id]}): IP=FALLITO (nessun file di esito prodotto)"
+                rimuovi_nodo "$id"
+                continue
+              fi
+
+              read -r rid rport rip < "$esito_file"
               echo "Nodo $rid (porta $rport): IP=${rip:-FALLITO}"
 
               if [ -z "$rip" ]; then
