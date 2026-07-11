@@ -53,11 +53,11 @@ jobs:
         run: docker pull caomingjun/warp:latest
 
       # ============================================================================
-      # GENERAZIONE DI TUTTI GLI SCRIPT ALL'INIZIO (Garantisce che i file esistano sempre)
+      # GENERAZIONE DI TUTTI GLI SCRIPT ALL'INIZIO (Garantisce l'esistenza dei file)
       # ============================================================================
       - name: Generazione di tutti gli script Python e Shell
         run: |
-          # 1. Script di registrazione WARP con Pool Autoriparante
+          # 1. Script di registrazione WARP con Pool Autoriparante (Sintassi corretta senza -lT)
           cat << 'SCRIPT_EOF' > registra_warp.sh
           #!/usr/bin/env bash
           set -o pipefail
@@ -170,17 +170,39 @@ jobs:
               local ip4="${slot_ipv4[$s]:-}"
               local ip6="${slot_ipv6[$s]:-}"
 
-              if [ -z "$ip4" ] || [ "$ip4" = "NESSUNO" ] || [ -z "$ip6" ] || [ "$ip6" = "NESSUNO" ]; then
+              if [ -z "$ip6" ] || [ "$ip6" = "NESSUNO" ]; then
                 slot_status[$s]="ERR"
                 continue
               fi
 
-              if [ -n "${visti_v4[$ip4]:-}" ] || [ -n "${visti_v6[$ip6]:-}" ]; then
+              if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
+                if [ -z "$ip4" ] || [ "$ip4" = "NESSUNO" ]; then
+                  slot_status[$s]="ERR"
+                  continue
+                fi
+              fi
+
+              local d_v4=0
+              local d_v6=0
+
+              if [ -n "${visti_v6[$ip6]:-}" ]; then
+                d_v6=1
+              fi
+
+              if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
+                if [ -n "${visti_v4[$ip4]:-}" ]; then
+                  d_v4=1
+                fi
+              fi
+
+              if [ "$d_v6" -eq 1 ] || [ "$d_v4" -eq 1 ]; then
                 slot_status[$s]="DUP"
               else
                 slot_status[$s]="OK"
-                visti_v4[$ip4]=$s
                 visti_v6[$ip6]=$s
+                if [ -n "$ip4" ] && [ "$ip4" != "NESSUNO" ]; then
+                  visti_v4[$ip4]=$s
+                fi
               fi
             done
           }
@@ -279,6 +301,7 @@ jobs:
 
             retry_pids=()
             retry_files=()
+            unset slot_di_file
             declare -A slot_di_file
 
             for idx in "${!slot_da_rimpiazzare[@]}"; do
@@ -327,12 +350,18 @@ jobs:
                 continue
               fi
 
-              local duplicato=0
+              duplicato=0
               for s_check in $(seq 1 "$NODI_NECESSARI"); do
                 if [ "$s_check" != "$s" ] && [ "${slot_status[$s_check]}" = "OK" ]; then
-                  if [ "${slot_ipv4[$s_check]}" = "$PARSED_IP4" ] || [ "${slot_ipv6[$s_check]}" = "$PARSED_IP6" ]; then
+                  if [ "${slot_ipv6[$s_check]}" = "$PARSED_IP6" ]; then
                     duplicato=1
                     break
+                  fi
+                  if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
+                    if [ "${slot_ipv4[$s_check]}" = "$PARSED_IP4" ]; then
+                      duplicato=1
+                      break
+                    fi
                   fi
                 fi
               done
@@ -643,8 +672,7 @@ jobs:
 
               def _mark_cooldown(self, entry, label=""):
                   entry["cooldown_until"] = time.monotonic() + COOLDOWN_SECONDS
-                  print(f"{label}[KEY-POOL] Chiave in cooldown per {COOLDOWN_SECONDS:.0f}s "
-                        f"(quota TPM superata)", flush=True)
+                  print(f"{label}[KEY-POOL] Chiave in cooldown per {COOLDOWN_SECONDS:.0f}s (quota TPM superata)", flush=True)
 
               async def esegui_con_pool(self, payload, timeout_seconds, label=""):
                   entry = await self._pick_entry(label)
@@ -933,11 +961,17 @@ jobs:
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
-                      resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
+                      resp = test_session.get("https://api64.ipify.org?format=json", timeout=6, ip_resolve="v6")
                       if resp.status_code == 200:
                           ip_address = resp.json().get("ip", "Sconosciuto")
                           return True, ip_address
-                  except: pass
+                  except:
+                      try:
+                          resp = test_session.get("https://api64.ipify.org?format=json", timeout=6, ip_resolve="v4")
+                          if resp.status_code == 200:
+                              ip_address = resp.json().get("ip", "Sconosciuto")
+                              return True, ip_address
+                      except: pass
                   time.sleep(delay)
               return False, None
 
@@ -1007,25 +1041,43 @@ jobs:
                   print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 (FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
                   failed_targets.append(url)
                   continue
+
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+              
+              is_ok = False
+              err_msg = ""
               try:
-                  resp = session.get(url, timeout=12)
+                  resp = session.get(url, timeout=12, ip_resolve="v6")
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
                   if is_ok:
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          soup = BeautifulSoup(resp.text, 'html.parser')
-                          text = soup.get_text(separator=' ', strip=True)
-                      else:
-                          text = html_to_clean_markdown(resp.text, url)
-                          pubblica_contenuto_scrapato(url, text, "step1")
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
-                      failed_targets.append(url)
+                      print(f"[NODO {node_id}] -> Successo in IPv6!", flush=True)
               except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                  is_ok = False
+                  err_msg = f"Errore rete IPv6: {e}"
+
+              if not is_ok:
+                  print(f"[NODO {node_id}] -> IPv6 non supportato o fallito ({err_msg}). Provo fallback IPv4...", flush=True)
+                  try:
+                      resp = session.get(url, timeout=12, ip_resolve="v4")
+                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+                      if is_ok:
+                          print(f"[NODO {node_id}] -> Successo in IPv4!", flush=True)
+                  except Exception as e:
+                      is_ok = False
+                      err_msg = f"Errore rete IPv4: {e}"
+
+              if is_ok:
+                  if any(site in url for site in DIAGNOSTIC_SITES):
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      text = soup.get_text(separator=' ', strip=True)
+                  else:
+                      text = html_to_clean_markdown(resp.text, url)
+                      pubblica_contenuto_scrapato(url, text, "step1")
+                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+              else:
+                  print(f"[NODO {node_id}] -> Bloccato anche in fallback IPv4: {err_msg}", flush=True)
                   failed_targets.append(url)
+
               time.sleep(random.uniform(1.0, 2.0))
 
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
@@ -1121,13 +1173,13 @@ jobs:
                   "--fingerprint-storage-quota=5000",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping) su porta {INITIAL_PORT} (atteso IPv4: {EXPECTED_IPV4} | IPv6 nodo: {EXPECTED_IPV6})...", flush=True)
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente su porta {INITIAL_PORT}...", flush=True)
               try:
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
                       humanize=True,
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                      proxy=f"socks5h://127.0.0.1:{INITIAL_PORT}",
                       viewport={"width": 1920, "height": 1080},
                       geoip=True,
                       args=base_args
@@ -1295,7 +1347,7 @@ jobs:
           print(f"Distribuzione confidence: {confidence_counts}", flush=True)
           EOF
 
-      - name: Registrazione Nodi WARP Dual-Stack - STEP 1 (IPv4+IPv6 unici)
+      - name: Registrazione Nodi WARP Dual-Stack - STEP 1 (Solo IPv6 Unici)
         run: |
           NODI_NECESSARI="$NODI_NECESSARI" \
           BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
@@ -1369,18 +1421,21 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      # ============================================================================
-      # OTTIMIZZAZIONE CRITICA: RIUTILIZZO NATIVO DEI NODI STEP 1 PER LO STEP 2
-      # ============================================================================
-      - name: Riutilizzo dei Nodi WARP dello Step 1 per lo Step 2
+      # Rigenerazione nodi con IP completamente diversi
+      - name: Rigenerazione Pulita Nodi WARP per lo STEP 2 (Nuovi IPv4+IPv6 Unici)
         if: always()
         run: |
-          if [ -f /tmp/warp_node_map_step1.json ]; then
-            echo "Riutilizzo la mappa dei nodi dello Step 1 per lo Step 2 per evitare nuovi rate-limit..."
-            cp /tmp/warp_node_map_step1.json /tmp/warp_node_map_step2.json
-          else
-            echo "::warning::Mappa Step 1 non trovata. Lo Step 2 girerà sugli IP disponibili dell'host."
-          fi
+          echo 'Eliminazione container WARP dello Step 1 per forzare nuove registrazioni con nuovi IP...'
+          docker ps -a --format '{{.Names}}' | grep '^warpstep1_' | xargs -r docker rm -f || true
+
+          NODI_NECESSARI="$NODI_NECESSARI" \
+          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
+          DELAY_MIN="$WARP_DELAY_MIN" \
+          DELAY_MAX="$WARP_DELAY_MAX" \
+          PORTA_BASE="$WARP_PORTA_BASE" \
+          PREFIX_CONTAINER="warpstep2" \
+          MAPPA_OUTPUT="/tmp/warp_node_map_step2.json" \
+          bash registra_warp.sh
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         if: always()
