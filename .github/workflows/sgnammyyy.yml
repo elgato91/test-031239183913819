@@ -53,7 +53,7 @@ jobs:
         run: docker pull caomingjun/warp:latest
 
       # ============================================================================
-      # GENERAZIONE DI TUTTI GLI SCRIPT ALL'INIZIO (Previene errori No Such File)
+      # GENERAZIONE DI TUTTI GLI SCRIPT ALL'INIZIO (Garantisce che i file esistano sempre)
       # ============================================================================
       - name: Generazione di tutti gli script Python e Shell
         run: |
@@ -73,13 +73,12 @@ jobs:
 
           START_TS=$(date +%s)
 
-          # Definizione degli Slot Fisici da 1 a NODI_NECESSARI
           declare -A slot_container
           declare -A slot_porta
           declare -A slot_ipv4
           declare -A slot_ipv6
           declare -A slot_pronto
-          declare -A slot_status # "OK" (unico), "DUP" (duplicato), "ERR" (connessione fallita)
+          declare -A slot_status
 
           CONTATORE_GLOBALE=0
 
@@ -163,7 +162,6 @@ jobs:
             IFS='|' read -r PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR PARSED_CONTAINER < "$esito_file"
           }
 
-          # Aggiorna lo stato di unicità (OK, DUP, ERR) per i nostri slot fisici
           aggiorna_esiti_slot() {
             declare -A visti_v4
             declare -A visti_v6
@@ -199,7 +197,6 @@ jobs:
             out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
             ondata1_files+=("$out")
 
-            # Assegnazione iniziale dello slot (provvisoria)
             slot_container[$s]=$container_name
             slot_porta[$s]=$port
             slot_ipv4[$s]=""
@@ -225,7 +222,6 @@ jobs:
             wait "$pid" 2>/dev/null || true
           done
 
-          # Popoliamo gli slot con i report generati
           for out_file in "${ondata1_files[@]}"; do
             if [ -f "$out_file" ]; then
               leggi_esito "$out_file"
@@ -249,10 +245,9 @@ jobs:
             echo "  [Slot $s] Porta ${slot_porta[$s]}: Stato=${slot_status[$s]} (IPv4: ${slot_ipv4[$s]:-NESSUNO} | IPv6: ${slot_ipv6[$s]:-NESSUNO} | Pronto in ${slot_pronto[$s]}s)"
           done
 
-          # Avvio delle ondate di rimpiazzo (fino a 3 ondate totali)
           ONDATA=1
           MAX_ONDATE=3
-          while [ "$ONDATA" -lT "$MAX_ONDATE" ]; do
+          while [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
             RESIDUO=$(tempo_residuo)
             if [ "$RESIDUO" -le 15 ]; then
               echo ""
@@ -260,7 +255,6 @@ jobs:
               break
             fi
 
-            # Identifica gli slot non ottimali (duplicati o in errore)
             slot_da_rimpiazzare=()
             for s in $(seq 1 "$NODI_NECESSARI"); do
               if [ "${slot_status[$s]}" != "OK" ]; then
@@ -333,7 +327,6 @@ jobs:
                 continue
               fi
 
-              # Verifica se l'IP del sostituto collide con uno slot già valido ("OK")
               local duplicato=0
               for s_check in $(seq 1 "$NODI_NECESSARI"); do
                 if [ "$s_check" != "$s" ] && [ "${slot_status[$s_check]}" = "OK" ]; then
@@ -350,7 +343,6 @@ jobs:
                 continue
               fi
 
-              # Rimpiazzo sicuro dell'hot-swap avvenuto con successo
               echo "  [Slot $s] Rimpiazzo completato! Rimuovo il vecchio container ${slot_container[$s]} ed imposto il nuovo $PARSED_CONTAINER"
               rimuovi_nodo_container "${slot_container[$s]}"
 
@@ -377,7 +369,6 @@ jobs:
           echo "Tempo impiegato: ${ELAPSED_FINALE}s (budget: ${BUDGET_TOTALE_SECONDI}s)"
           echo "======================================================"
 
-          # Generazione del file JSON della mappa di uscita (Sempre presente con NODI_NECESSARI chiavi)
           {
             echo "{"
             for s in $(seq 1 "$NODI_NECESSARI"); do
@@ -613,7 +604,7 @@ jobs:
                           wait_seconds = min(wait_seconds, 20.0)
                           print(f"{label}[TPM-BUCKET] Budget insufficiente "
                                 f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
-                                fLush=True)
+                                flush=True)
                           await asyncio.sleep(wait_seconds)
 
           class GeminiKeyPool:
@@ -1303,3 +1294,184 @@ jobs:
           print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici salvati in nuggets_finale.json", flush=True)
           print(f"Distribuzione confidence: {confidence_counts}", flush=True)
           EOF
+
+      - name: Registrazione Nodi WARP Dual-Stack - STEP 1 (IPv4+IPv6 unici)
+        run: |
+          NODI_NECESSARI="$NODI_NECESSARI" \
+          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
+          DELAY_MIN="$WARP_DELAY_MIN" \
+          DELAY_MAX="$WARP_DELAY_MAX" \
+          PORTA_BASE="$WARP_PORTA_BASE" \
+          PREFIX_CONTAINER="warpstep1" \
+          MAPPA_OUTPUT="/tmp/warp_node_map_step1.json" \
+          bash registra_warp.sh
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 1
+        run: |
+          cat << 'EOF' > m2_step1_setup.py
+          import json
+          TARGETS = [
+              "https://tls.browserleaks.com/json",
+              "https://bot.sannysoft.com/",
+              "https://abrahamjuliot.github.io/creepjs/",
+              "https://pixelscan.net/",
+              "https://bot.incolumitas.com/",
+              "https://www.deviceinfo.me/",
+              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://www.google.com/search?q=cosa+vedere+roma",
+              "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.bloomberg.com/markets/stocks",
+              "https://www.morningstar.com/stocks/xnas/aapl/quote",
+              "https://finance.yahoo.com/quote/AAPL/key-statistics",
+              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
+              "https://www.passportindex.org/passport/italy/",
+              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
+              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
+              "https://www.bing.com/search?q=migliore+carbonara+roma",
+              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
+              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
+              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.canadianinsider.com/money-is-moving"
+          ]
+          for i in range(1, 7):
+              chunk = TARGETS[i-1::6]
+              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
+                  json.dump(chunk, f)
+          print("Code distribuite Step 1 generate con successo.")
+          EOF
+          python -u m2_step1_setup.py
+
+      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
+        run: |
+          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
+          echo $! > estrattore_nugget.pid
+          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
+
+      - name: Esecuzione Scraping Parallelo - STEP 1
+        run: |
+          if [ ! -f /tmp/warp_node_map_step1.json ]; then
+            echo "Mappa WARP Step 1 non trovata. Impossibile proseguire."
+            exit 1
+          fi
+          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
+          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
+          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
+          TAIL_PID=$!
+
+          PIDS=()
+          for i in {1..6}; do
+            WARP_MAP_PATH="/tmp/warp_node_map_step1.json" python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+      - name: Rigenerazione Pulita Nodi WARP per lo STEP 2 (Nuovi IPv4+IPv6 Unici)
+        if: always()
+        run: |
+          echo 'Eliminazione container WARP dello Step 1 per forzare nuove registrazioni con nuovi IP...'
+          docker ps -a --format '{{.Names}}' | grep '^warpstep1_' | xargs -r docker rm -f || true
+
+          NODI_NECESSARI="$NODI_NECESSARI" \
+          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
+          DELAY_MIN="$WARP_DELAY_MIN" \
+          DELAY_MAX="$WARP_DELAY_MAX" \
+          PORTA_BASE="$WARP_PORTA_BASE" \
+          PREFIX_CONTAINER="warpstep2" \
+          MAPPA_OUTPUT="/tmp/warp_node_map_step2.json" \
+          bash registra_warp.sh
+
+      - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        if: always()
+        run: |
+          python -u m2_step2_setup.py
+
+      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
+        if: always()
+        run: |
+          if [ ! -f /tmp/warp_node_map_step2.json ]; then
+            echo "Mappa WARP Step 2 non trovata. Skip dello Step 2."
+            exit 0
+          fi
+          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
+          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
+          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
+          TAIL_PID=$!
+
+          PIDS=()
+          for i in {1..6}; do
+            WARP_MAP_PATH="/tmp/warp_node_map_step2.json" python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            PIDS+=($!)
+            sleep 1.5
+          done
+
+          wait "${PIDS[@]}"
+          kill $TAIL_PID || true
+
+          docker ps -a --format '{{.Names}}' | grep -E '^warpstep(1|2)_' | xargs -r docker rm -f || true
+
+          touch output_node_1_step1.txt output_node_1_step2.txt \
+                output_node_2_step1.txt output_node_2_step2.txt \
+                output_node_3_step1.txt output_node_3_step2.txt \
+                output_node_4_step1.txt output_node_4_step2.txt \
+                output_node_5_step1.txt output_node_5_step2.txt \
+                output_node_6_step1.txt output_node_6_step2.txt
+
+          cat output_node_1_step1.txt output_node_1_step2.txt \
+              output_node_2_step1.txt output_node_2_step2.txt \
+              output_node_3_step1.txt output_node_3_step2.txt \
+              output_node_4_step1.txt output_node_4_step2.txt \
+              output_node_5_step1.txt output_node_5_step2.txt \
+              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
+
+      - name: Attesa Coda Residua Estrattore Nugget (segnale esplicito di fine scraping)
+        if: always()
+        run: |
+          touch scraping_completato.flag
+          echo "Segnale di fine scraping inviato all'estrattore."
+
+          if [ -f estrattore_nugget.pid ]; then
+            PID=$(cat estrattore_nugget.pid)
+            echo "Attendo la chiusura naturale del processo estrattore (PID $PID), max 90s..."
+            for i in {1..90}; do
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "Processo estrattore terminato naturalmente dopo ${i}s."
+                break
+              fi
+              sleep 1
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Timeout di sicurezza raggiunto (90s dopo il segnale): chiudo forzatamente il processo estrattore residuo."
+              kill "$PID" 2>/dev/null || true
+            fi
+          fi
+          touch nuggets_estrattore.jsonl
+          echo "--- log estrattore nugget ---"
+          cat estrattore_nugget.log || true
+
+      - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
+        if: always()
+        run: |
+          python -u merge_nuggets.py
+
+      - name: Pulizia Finale Container WARP
+        if: always()
+        run: |
+          docker ps -a --format '{{.Names}}' | grep -E '^warpstep(1|2)_' | xargs -r docker rm -f || true
+
+      - name: Upload Artifact Macchina 2 (Testo Grezzo)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risultati_Macchina2
+          path: output_macchina2_cdp.txt
+
+      - name: Upload Artifact Nugget (JSON Strutturato)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuggets_Macchina2
+          path: nuggets_finale.json
