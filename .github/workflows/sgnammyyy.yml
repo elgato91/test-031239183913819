@@ -44,21 +44,24 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP STEP 1 (IPv4+IPv6 univoci, client ufficiale)
+      - name: Setup Container WARP STEP 1 (client ufficiale, permissivo, solo IPv6 univoco)
         run: |
           set -o pipefail
           START_TS=$(date +%s)
 
           NODI_NECESSARI=6
           BUDGET_TOTALE_SECONDI=150
+          MAX_ONDATE=3
           DELAY_MIN=2
           DELAY_MAX=3
           PORTA_BASE=40000
+          # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
+          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
+          # un IPv4 duplicato tra nodi NON viene scartato, perche' il traffico verso
+          # target dual-stack passera' comunque quasi sempre da IPv6 (nativo, nessuna
+          # modifica necessaria: e' il sistema/WireGuard a preferirlo via Happy Eyeballs).
+          RICHIEDI_IPV4_UNIVOCO=0
 
-          # Ogni slot 1..6 ha una porta FISSA (PORTA_BASE+slot), che e' quella
-          # attesa dallo scraper Python (ACTIVE_PORT = 40000 + node_id).
-          # Un nodo che fallisce o duplica viene semplicemente RIPROVATO sullo
-          # stesso slot/porta, cosi' non serve mai spostare o rinominare nulla.
           declare -A ipv4_di_slot
           declare -A ipv6_di_slot
           declare -A ipv4_visti
@@ -144,9 +147,10 @@ jobs:
             IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
           }
 
-          # Valuta gli esiti di una lista di slot. Ritorna (via variabile globale
-          # SLOT_DA_RIPROVARE, azzerata prima della chiamata) gli slot falliti o
-          # in collisione, cosi' il chiamante sa esattamente quali ripetere.
+          # Valuta gli esiti. In modalita' permissiva (RICHIEDI_IPV4_UNIVOCO=0) la
+          # dedup e la scarto avvengono SOLO su IPv6; un IPv4 duplicato tra nodi
+          # viene accettato e tenuto, non causa retry. In modalita' rigorosa
+          # entrambi devono essere univoci o lo slot viene rifatto.
           elabora_esiti() {
             SLOT_DA_RIPROVARE=()
             local file_list=("$@")
@@ -165,22 +169,8 @@ jobs:
                 continue
               fi
 
-              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
               if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
                 echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
                 rimuovi_nodo_slot "$PARSED_SLOT"
                 SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
                 continue
@@ -193,6 +183,24 @@ jobs:
                 continue
               fi
 
+              if [ "$RICHIEDI_IPV4_UNIVOCO" = "1" ]; then
+                if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
+                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
+                  rimuovi_nodo_slot "$PARSED_SLOT"
+                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                  continue
+                fi
+
+                if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
+                  rimuovi_nodo_slot "$PARSED_SLOT"
+                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                  continue
+                fi
+              elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva, il traffico passera' comunque da IPv6)"
+              fi
+
               ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
               ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
               ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
@@ -202,7 +210,7 @@ jobs:
             done
           }
 
-          echo "=== STEP 1 - ONDATA 1: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s) ==="
+          echo "=== STEP 1 - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
           ondata1_pids=()
           ondata1_files=()
 
@@ -235,10 +243,10 @@ jobs:
 
           ONDATA=1
           SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ]; do
+          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
             RESIDUO=$(tempo_residuo)
             if [ "$RESIDUO" -le 10 ]; then
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Arresto."
+              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Procedo con gli slot ottenuti finora."
               break
             fi
 
@@ -247,7 +255,7 @@ jobs:
 
             ONDATA=$((ONDATA + 1))
             echo ""
-            echo "=== STEP 1 - ONDATA $ONDATA: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
+            echo "=== STEP 1 - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
 
             retry_pids=()
             retry_files=()
@@ -279,19 +287,23 @@ jobs:
             echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
           done
 
-          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::error::STEP 1: ottenuti solo ${#SLOT_OK[@]}/$NODI_NECESSARI slot validi."
-            exit 1
-          fi
-
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
-          echo "=== STEP 1 completata: 6/6 slot (porte $((PORTA_BASE+1))-$((PORTA_BASE+NODI_NECESSARI))), IPv4+IPv6 tutti univoci, in ${ELAPSED_FINALE}s ==="
+          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
+            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot con i requisiti richiesti. Si prosegue comunque: gli slot mancanti restano non registrati e verranno saltati dallo scraper."
+          fi
+          echo "=== STEP 1 completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
           for slot in $(seq 1 "$NODI_NECESSARI"); do
-            echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
+            if [ -n "${ipv4_di_slot[$slot]:-}" ]; then
+              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
+            else
+              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
+            fi
           done
         env:
           CONTAINER_PREFIX: step1
+          MODALITA_LABEL: permissivo, solo IPv6 univoco
+
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
           cat << 'EOF' > m2_step1_setup.py
@@ -1094,21 +1106,24 @@ jobs:
           done
           echo "Container Step 1 rimossi."
 
-      - name: Setup Container WARP STEP 2 (Nuovi IP) (IPv4+IPv6 univoci, client ufficiale)
+      - name: Setup Container WARP STEP 2 (Nuovi IP) (client ufficiale, rigoroso, IPv4+IPv6 univoci)
         run: |
           set -o pipefail
           START_TS=$(date +%s)
 
           NODI_NECESSARI=6
           BUDGET_TOTALE_SECONDI=150
+          MAX_ONDATE=3
           DELAY_MIN=2
           DELAY_MAX=3
           PORTA_BASE=40000
+          # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
+          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
+          # un IPv4 duplicato tra nodi NON viene scartato, perche' il traffico verso
+          # target dual-stack passera' comunque quasi sempre da IPv6 (nativo, nessuna
+          # modifica necessaria: e' il sistema/WireGuard a preferirlo via Happy Eyeballs).
+          RICHIEDI_IPV4_UNIVOCO=1
 
-          # Ogni slot 1..6 ha una porta FISSA (PORTA_BASE+slot), che e' quella
-          # attesa dallo scraper Python (ACTIVE_PORT = 40000 + node_id).
-          # Un nodo che fallisce o duplica viene semplicemente RIPROVATO sullo
-          # stesso slot/porta, cosi' non serve mai spostare o rinominare nulla.
           declare -A ipv4_di_slot
           declare -A ipv6_di_slot
           declare -A ipv4_visti
@@ -1194,9 +1209,10 @@ jobs:
             IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
           }
 
-          # Valuta gli esiti di una lista di slot. Ritorna (via variabile globale
-          # SLOT_DA_RIPROVARE, azzerata prima della chiamata) gli slot falliti o
-          # in collisione, cosi' il chiamante sa esattamente quali ripetere.
+          # Valuta gli esiti. In modalita' permissiva (RICHIEDI_IPV4_UNIVOCO=0) la
+          # dedup e la scarto avvengono SOLO su IPv6; un IPv4 duplicato tra nodi
+          # viene accettato e tenuto, non causa retry. In modalita' rigorosa
+          # entrambi devono essere univoci o lo slot viene rifatto.
           elabora_esiti() {
             SLOT_DA_RIPROVARE=()
             local file_list=("$@")
@@ -1215,22 +1231,8 @@ jobs:
                 continue
               fi
 
-              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
               if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
                 echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
                 rimuovi_nodo_slot "$PARSED_SLOT"
                 SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
                 continue
@@ -1243,6 +1245,24 @@ jobs:
                 continue
               fi
 
+              if [ "$RICHIEDI_IPV4_UNIVOCO" = "1" ]; then
+                if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
+                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
+                  rimuovi_nodo_slot "$PARSED_SLOT"
+                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                  continue
+                fi
+
+                if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
+                  rimuovi_nodo_slot "$PARSED_SLOT"
+                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+                  continue
+                fi
+              elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva, il traffico passera' comunque da IPv6)"
+              fi
+
               ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
               ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
               ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
@@ -1252,7 +1272,7 @@ jobs:
             done
           }
 
-          echo "=== STEP 2 (Nuovi IP) - ONDATA 1: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s) ==="
+          echo "=== STEP 2 (Nuovi IP) - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
           ondata1_pids=()
           ondata1_files=()
 
@@ -1285,10 +1305,10 @@ jobs:
 
           ONDATA=1
           SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ]; do
+          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
             RESIDUO=$(tempo_residuo)
             if [ "$RESIDUO" -le 10 ]; then
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Arresto."
+              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Procedo con gli slot ottenuti finora."
               break
             fi
 
@@ -1297,7 +1317,7 @@ jobs:
 
             ONDATA=$((ONDATA + 1))
             echo ""
-            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
+            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
 
             retry_pids=()
             retry_files=()
@@ -1329,19 +1349,22 @@ jobs:
             echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
           done
 
-          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::error::STEP 2 (Nuovi IP): ottenuti solo ${#SLOT_OK[@]}/$NODI_NECESSARI slot validi."
-            exit 1
-          fi
-
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
-          echo "=== STEP 2 (Nuovi IP) completata: 6/6 slot (porte $((PORTA_BASE+1))-$((PORTA_BASE+NODI_NECESSARI))), IPv4+IPv6 tutti univoci, in ${ELAPSED_FINALE}s ==="
+          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
+            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot con i requisiti richiesti. Si prosegue comunque: gli slot mancanti restano non registrati e verranno saltati dallo scraper."
+          fi
+          echo "=== STEP 2 (Nuovi IP) completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
           for slot in $(seq 1 "$NODI_NECESSARI"); do
-            echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
+            if [ -n "${ipv4_di_slot[$slot]:-}" ]; then
+              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
+            else
+              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
+            fi
           done
         env:
           CONTAINER_PREFIX: step2
+          MODALITA_LABEL: rigoroso, IPv4+IPv6 univoci
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
@@ -1587,7 +1610,6 @@ jobs:
           kill $TAIL_PID || true
 
           for i in {1..6}; do
-            docker rm -f "warp_step1_slot${i}" || true
             docker rm -f "warp_step2_slot${i}" || true
           done
 
