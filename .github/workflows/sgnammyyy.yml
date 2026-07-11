@@ -1,13 +1,13 @@
-name: WARP Ufficiale - 6 Nodi IPv4+IPv6 Univoci
+name: WARP Ufficiale - Ottimizzazione Tempo (4-6s fisso)
 
 on:
   workflow_dispatch:
 
 env:
   NODI_NECESSARI: 6
-  BUDGET_TOTALE_SECONDI: 35
-  DELAY_MIN: 2
-  DELAY_MAX: 3
+  BUDGET_TOTALE_SECONDI: 90
+  DELAY_MIN: 4
+  DELAY_MAX: 6
 
 jobs:
   test:
@@ -16,7 +16,7 @@ jobs:
       - name: Pull immagine
         run: docker pull caomingjun/warp:latest
 
-      - name: Registrazione con verifica IPv4+IPv6 e retry mirato sui soli nodi in collisione IPv4
+      - name: Registrazione con polling aggressivo e timing dettagliato per nodo
         run: |
           set -o pipefail
           START_TS=$(date +%s)
@@ -25,6 +25,7 @@ jobs:
           declare -A ipv4_di_nodo
           declare -A ipv6_di_nodo
           declare -A ipv4_visti
+          declare -A tempo_pronto_di_nodo
           NODI_OK=()
           CONTATORE_GLOBALE=0
           PORTA_BASE=1080
@@ -34,17 +35,17 @@ jobs:
             echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
           }
 
-          # Avvia un nodo con il client ufficiale e attende la registrazione
-          # tramite polling attivo. Il trap EXIT garantisce che il file di
-          # esito venga scritto anche se qualche comando intermedio fallisce.
           avvia_e_verifica_nodo() {
             local id=$1
             local port=$2
             local out_file=$3
             local ip4=""
             local ip6=""
+            local t_pronto=""
+            local t_start
+            t_start=$(date +%s)
 
-            trap 'echo "$id $port ${ip4:-} ${ip6:-}" > "$out_file"' EXIT
+            trap 'echo "$id $port ${ip4:-} ${ip6:-} ${t_pronto:-0}" > "$out_file"' EXIT
 
             docker rm -f "warp_$id" > /dev/null 2>&1 || true
 
@@ -55,30 +56,29 @@ jobs:
               --cap-add AUDIT_WRITE \
               --sysctl net.ipv6.conf.all.disable_ipv6=0 \
               --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-              -e WARP_SLEEP=2 \
+              -e WARP_SLEEP=1 \
               -p "$port":1080 \
               caomingjun/warp:latest > /dev/null 2>&1; then
               return 0
             fi
 
-            # Polling attivo: prova ogni secondo, max 25s, finche' il tunnel
-            # non risponde warp=on. Poi legge sia IPv4 che IPv6 forzando il
-            # protocollo (socks5 semplice, non socks5h, per far risolvere
-            # l'hostname localmente e obbligare il tunnel su quella famiglia).
+            # Polling molto piu' aggressivo (ogni 0.5s) per catturare il momento
+            # esatto in cui il tunnel diventa pronto, invece di un'attesa fissa.
             local pronto=0
-            for _ in $(seq 1 25); do
+            for _ in $(seq 1 60); do
               local trace
-              trace=$(curl -s --max-time 2 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+              trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
               if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
                 pronto=1
+                t_pronto=$(( $(date +%s) - t_start ))
                 break
               fi
-              sleep 1
+              sleep 0.5
             done
 
             if [ "$pronto" -eq 1 ]; then
-              ip4=$(curl -s --max-time 6 --ipv4 -x "socks5://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || true)
-              ip6=$(curl -s --max-time 6 --ipv6 -x "socks5://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || true)
+              ip4=$(curl -s --max-time 5 --ipv4 -x "socks5://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || true)
+              ip6=$(curl -s --max-time 5 --ipv6 -x "socks5://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || true)
             fi
 
             return 0
@@ -114,13 +114,13 @@ jobs:
           done
 
           echo ""
-          echo "Attendo che tutti i nodi completino la verifica..."
+          echo "Attendo che tutti i nodi completino la verifica (polling attivo, nessuna attesa fissa)..."
           for id in "${!pid_di_nodo[@]}"; do
             wait "${pid_di_nodo[$id]}" 2>/dev/null || true
           done
 
           echo ""
-          echo "=== Esiti ondata 1 ==="
+          echo "=== Esiti ondata 1 (con timing per nodo) ==="
           for id in "${!file_di_nodo[@]}"; do
             esito_file="${file_di_nodo[$id]}"
             if [ ! -f "$esito_file" ]; then
@@ -129,8 +129,8 @@ jobs:
               continue
             fi
 
-            read -r rid rport rip4 rip6 < "$esito_file"
-            echo "Nodo $rid (porta $rport): IPv4=${rip4:-NESSUNO} IPv6=${rip6:-NESSUNO}"
+            read -r rid rport rip4 rip6 rtpronto < "$esito_file"
+            echo "Nodo $rid (porta $rport): IPv4=${rip4:-NESSUNO} IPv6=${rip6:-NESSUNO} (pronto in ${rtpronto}s dal suo avvio)"
 
             if [ -z "$rip4" ]; then
               echo "  -> IPv4 non ottenuto, verra' sostituito"
@@ -151,15 +151,13 @@ jobs:
           done
 
           echo ""
-          echo "Nodi validi (IPv4 univoco) dopo ondata 1: ${#NODI_OK[@]}/$NODI_NECESSARI"
+          echo "Nodi validi dopo ondata 1: ${#NODI_OK[@]}/$NODI_NECESSARI"
           echo "Tempo residuo: $(tempo_residuo)s"
 
-          # --- Retry mirato sui soli posti mancanti ---
           ONDATA=1
           while [ "${#NODI_OK[@]}" -lt "$NODI_NECESSARI" ]; do
             RESIDUO=$(tempo_residuo)
             if [ "$RESIDUO" -le 10 ]; then
-              echo ""
               echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Mi fermo qui."
               break
             fi
@@ -184,7 +182,7 @@ jobs:
               pid_retry[$id]=$!
 
               if [ "$i" -lt "$MANCANTI" ]; then
-                DELAY=$(awk -v min=3 -v max=5 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
                 sleep "$DELAY"
               fi
             done
@@ -196,13 +194,13 @@ jobs:
             for id in "${!file_retry[@]}"; do
               esito_file="${file_retry[$id]}"
               if [ ! -f "$esito_file" ]; then
-                echo "Nodo $id (porta ${porta_di_nodo[$id]}): FALLITO (nessun esito)"
+                echo "Nodo $id (porta ${porta_di_nodo[$id]}): FALLITO"
                 rimuovi_nodo "$id"
                 continue
               fi
 
-              read -r rid rport rip4 rip6 < "$esito_file"
-              echo "Nodo $rid (porta $rport): IPv4=${rip4:-NESSUNO} IPv6=${rip6:-NESSUNO}"
+              read -r rid rport rip4 rip6 rtpronto < "$esito_file"
+              echo "Nodo $rid (porta $rport): IPv4=${rip4:-NESSUNO} IPv6=${rip6:-NESSUNO} (pronto in ${rtpronto}s)"
 
               if [ -z "$rip4" ]; then
                 echo "  -> IPv4 non ottenuto, scartato"
@@ -233,7 +231,7 @@ jobs:
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
           echo "======================================================"
-          echo "RISULTATO FINALE: ${#NODI_OK[@]}/$NODI_NECESSARI nodi con IPv4 univoco"
+          echo "RISULTATO FINALE: ${#NODI_OK[@]}/$NODI_NECESSARI nodi"
           echo "Tempo impiegato: ${ELAPSED_FINALE}s (budget: ${BUDGET_TOTALE_SECONDI}s)"
           echo "======================================================"
           for id in "${NODI_OK[@]}"; do
@@ -241,23 +239,12 @@ jobs:
           done
 
           echo ""
-          echo "=== Verifica incrociata: anche gli IPv6 sono tutti univoci tra loro? ==="
           UNIVOCI_V6=$(for id in "${NODI_OK[@]}"; do echo "${ipv6_di_nodo[$id]:-VUOTO}"; done | sort -u | wc -l)
-          echo "IPv6 univoci tra i nodi selezionati: $UNIVOCI_V6 / ${#NODI_OK[@]}"
-
-          > /tmp/nodi_attivi.txt
-          for id in "${NODI_OK[@]}"; do
-            echo "${id} ${porta_di_nodo[$id]} ${ipv4_di_nodo[$id]} ${ipv6_di_nodo[$id]:-}" >> /tmp/nodi_attivi.txt
-          done
-          cat /tmp/nodi_attivi.txt
+          echo "=== IPv6 univoci tra i nodi selezionati: $UNIVOCI_V6 / ${#NODI_OK[@]} ==="
 
           if [ "${#NODI_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::error::Ottenuti solo ${#NODI_OK[@]}/$NODI_NECESSARI IPv4 univoci entro il budget."
+            echo "::error::Ottenuti solo ${#NODI_OK[@]}/$NODI_NECESSARI IPv4 univoci."
             exit 1
-          fi
-
-          if [ "$ELAPSED_FINALE" -gt "$BUDGET_TOTALE_SECONDI" ]; then
-            echo "::warning::Budget superato: ${ELAPSED_FINALE}s > ${BUDGET_TOTALE_SECONDI}s"
           fi
 
       - name: Pulizia
