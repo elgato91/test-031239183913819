@@ -25,6 +25,7 @@ jobs:
           declare -A ipv4_di_nodo
           declare -A ipv6_di_nodo
           declare -A ipv4_visti
+          declare -A ipv6_visti
           NODI_OK=()
           CONTATORE_GLOBALE=0
           PORTA_BASE=1080
@@ -34,9 +35,8 @@ jobs:
             echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
           }
 
-          # Scrive sempre 5 campi separati da '|' (mai spazi), cosi' i campi
-          # vuoti (es. IPv6 non ottenuto) non fanno collassare gli altri
-          # durante il parsing con IFS='|' read.
+          # Scrive sempre 5 campi separati da '|' (mai spazi) nel file di output
+          # per evitare errori di parsing in caso di campi vuoti.
           avvia_e_verifica_nodo() {
             local id=$1
             local port=$2
@@ -65,8 +65,8 @@ jobs:
             fi
 
             local pronto=0
+            local trace=""
             for _ in $(seq 1 60); do
-              local trace
               trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
               if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
                 pronto=1
@@ -77,8 +77,20 @@ jobs:
             done
 
             if [ "$pronto" -eq 1 ]; then
-              ip4=$(curl -s --max-time 5 --ipv4 -x "socks5://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || true)
-              ip6=$(curl -s --max-time 5 --ipv6 -x "socks5://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || true)
+              # Ottieni IPv4 delegando la risoluzione al container
+              ip4=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
+              if [ -z "$ip4" ]; then
+                ip4=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+              fi
+              if [ -z "$ip4" ]; then
+                ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
+              fi
+
+              # Ottieni IPv6 delegando la risoluzione al container (endpoint solo IPv6)
+              ip6=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
+              if [ -z "$ip6" ]; then
+                ip6=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+              fi
             fi
 
             return 0
@@ -139,8 +151,14 @@ jobs:
             leggi_esito "$esito_file"
             echo "Nodo $PARSED_ID (porta $PARSED_PORT): IPv4=${PARSED_IP4:-NESSUNO} IPv6=${PARSED_IP6:-NESSUNO} (pronto in ${PARSED_TPRONTO}s dal suo avvio)"
 
-            if [ -z "$PARSED_IP4" ]; then
+            if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
               echo "  -> IPv4 non ottenuto, verra' sostituito"
+              rimuovi_nodo "$PARSED_ID"
+              continue
+            fi
+
+            if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
+              echo "  -> IPv6 non ottenuto, verra' sostituito"
               rimuovi_nodo "$PARSED_ID"
               continue
             fi
@@ -151,7 +169,14 @@ jobs:
               continue
             fi
 
+            if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
+              echo "  -> IPv6 duplicato (gia' usato da nodo ${ipv6_visti[$PARSED_IP6]}), verra' sostituito"
+              rimuovi_nodo "$PARSED_ID"
+              continue
+            fi
+
             ipv4_visti[$PARSED_IP4]=$PARSED_ID
+            ipv6_visti[$PARSED_IP6]=$PARSED_ID
             ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
             ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
             NODI_OK+=("$PARSED_ID")
@@ -210,8 +235,14 @@ jobs:
               leggi_esito "$esito_file"
               echo "Nodo $PARSED_ID (porta $PARSED_PORT): IPv4=${PARSED_IP4:-NESSUNO} IPv6=${PARSED_IP6:-NESSUNO} (pronto in ${PARSED_TPRONTO}s)"
 
-              if [ -z "$PARSED_IP4" ]; then
+              if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
                 echo "  -> IPv4 non ottenuto, scartato"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
+              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
+                echo "  -> IPv6 non ottenuto, scartato"
                 rimuovi_nodo "$PARSED_ID"
                 continue
               fi
@@ -222,7 +253,14 @@ jobs:
                 continue
               fi
 
+              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
+                echo "  -> IPv6 duplicato, scartato"
+                rimuovi_nodo "$PARSED_ID"
+                continue
+              fi
+
               ipv4_visti[$PARSED_IP4]=$PARSED_ID
+              ipv6_visti[$PARSED_IP6]=$PARSED_ID
               ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
               ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
               NODI_OK+=("$PARSED_ID")
@@ -251,7 +289,7 @@ jobs:
           echo "=== IPv6 univoci tra i nodi selezionati: $UNIVOCI_V6 / ${#NODI_OK[@]} ==="
 
           if [ "${#NODI_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::error::Ottenuti solo ${#NODI_OK[@]}/$NODI_NECESSARI IPv4 univoci."
+            echo "::error::Ottenuti solo ${#NODI_OK[@]}/$NODI_NECESSARI nodi validi con IPv4 e IPv6 univoci."
             exit 1
           fi
 
