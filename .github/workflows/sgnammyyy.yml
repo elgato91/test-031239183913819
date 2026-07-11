@@ -282,12 +282,12 @@ jobs:
             declare -A slot_di_file
 
             for idx in "${!slot_da_rimpiazzare[@]}"; do
-              local s="${slot_da_rimpiazzare[$idx]}"
+              s="${slot_da_rimpiazzare[$idx]}"
               CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
-              local id="n$CONTATORE_GLOBALE"
-              local port=$((PORTA_BASE + CONTATORE_GLOBALE))
-              local container_name="${PREFIX_CONTAINER}_${id}"
-              local out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
+              id="n$CONTATORE_GLOBALE"
+              port=$((PORTA_BASE + CONTATORE_GLOBALE))
+              container_name="${PREFIX_CONTAINER}_${id}"
+              out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
 
               retry_files+=("$out")
               slot_di_file["$out"]=$s
@@ -296,7 +296,7 @@ jobs:
               retry_pids+=($!)
 
               if [ "$idx" -lt $((rimpiazzi_necessari - 1)) ]; then
-                local DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
                 echo "  [Slot $s] Avvio sostituto $container_name su porta $port. Prossimo tra ${DELAY}s..."
                 sleep "$DELAY"
               else
@@ -313,7 +313,7 @@ jobs:
             echo ""
             echo "=== ESITI RETRY ONDATA $ONDATA ==="
             for out_file in "${retry_files[@]}"; do
-              local s="${slot_di_file[$out_file]}"
+              s="${slot_di_file[$out_file]}"
               if [ ! -f "$out_file" ]; then
                 echo "  [Slot $s] Sostituto FALLITO (nessun report generato)"
                 continue
@@ -327,7 +327,7 @@ jobs:
                 continue
               fi
 
-              local duplicato=0
+              duplicato=0
               for s_check in $(seq 1 "$NODI_NECESSARI"); do
                 if [ "$s_check" != "$s" ] && [ "${slot_status[$s_check]}" = "OK" ]; then
                   if [ "${slot_ipv4[$s_check]}" = "$PARSED_IP4" ] || [ "${slot_ipv6[$s_check]}" = "$PARSED_IP6" ]; then
@@ -372,7 +372,7 @@ jobs:
           {
             echo "{"
             for s in $(seq 1 "$NODI_NECESSARI"); do
-              local comma=","
+              comma=","
               if [ "$s" -eq "$NODI_NECESSARI" ]; then
                 comma=""
               fi
@@ -834,7 +834,7 @@ jobs:
           async def main():
               api_keys = carica_gemini_api_keys()
               if not api_keys:
-                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato immediatamente.", flush=True)
+                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trouvata. Processo terminato immediatamente.", flush=True)
                   return
               try:
                   key_pool = GeminiKeyPool(api_keys)
