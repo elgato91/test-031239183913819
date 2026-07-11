@@ -1,13 +1,7 @@
-name: WARP 6 Nodi Univoci - Enterprise
+name: Test WARP IPv4+IPv6 Separati Per Nodo
 
 on:
   workflow_dispatch:
-
-env:
-  NODI_NECESSARI: 6
-  BUDGET_TOTALE_SECONDI: 75
-  DELAY_MIN: 8
-  DELAY_MAX: 12
 
 jobs:
   test:
@@ -16,243 +10,70 @@ jobs:
       - name: Pull immagine
         run: docker pull ghcr.io/kingcc/warproxy:latest
 
-      - name: Registrazione scaglionata con retry mirato fino a 6 IP univoci
+      - name: Avvia 6 nodi scaglionati
         run: |
-          set -o pipefail
-          START_TS=$(date +%s)
-
-          declare -A porta_di_nodo
-          declare -A ip_di_nodo
-          declare -A ip_visti
-          NODI_OK=()
-          CONTATORE_GLOBALE=0
-          PORTA_BASE=40000
-
-          tempo_residuo() {
-            local elapsed=$(( $(date +%s) - START_TS ))
-            echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
-          }
-
-          # Avvia UN nodo, attende la sua registrazione (polling attivo, non sleep fisso),
-          # legge l'IP, e restituisce esito. Ogni nodo è indipendente e non blocca gli altri
-          # perché viene lanciato in background dal chiamante.
-          avvia_e_verifica_nodo() {
-            # Questa funzione gira in una subshell di background (chiamata con &).
-            # Se un qualsiasi comando qui dentro fallisce ed eredita "set -e" dal
-            # contesto GitHub Actions, l'intera subshell può terminare PRIMA di
-            # scrivere out_file, lasciando il chiamante con un file mancante.
-            # Per questo ogni comando a rischio è protetto esplicitamente con
-            # "|| true" / gestione dell'exit code, e la scrittura finale su
-            # out_file avviene sempre, in un trap EXIT.
-            local id=$1
-            local port=$2
-            local out_file=$3
-            local ip=""
-
-            # Scrive comunque il file quando la funzione esce, qualunque sia il motivo
-            trap 'echo "$id $port ${ip:-}" > "$out_file"' EXIT
-
-            # Rimuove eventuali container residui con lo stesso nome da run precedenti
-            docker rm -f "wp-$id" > /dev/null 2>&1 || true
-
-            if ! docker run --name "wp-$id" \
+          for i in 1 2 3 4 5 6; do
+            PORT=$((40000 + i))
+            docker run --name wp-$i \
               --network host \
-              -e SOCKS5_PORT="$port" \
+              -e SOCKS5_PORT=$PORT \
               -e DNS=2606:4700:4700::1111,1.1.1.1 \
-              -d "ghcr.io/kingcc/warproxy:latest" > /dev/null 2>&1; then
-              # docker run fallito: usciamo subito, il trap scrive comunque il file con ip vuoto
-              return 0
-            fi
+              -d ghcr.io/kingcc/warproxy:latest
 
-            # Polling attivo: appena il tunnel è su, esce subito invece di aspettare
-            # un tempo fisso. Max 18s di attesa per singolo nodo.
-            for _ in $(seq 1 18); do
-              local trace
-              trace=$(curl -s --max-time 2 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-                ip=$(echo "$trace" | grep "^ip=" | cut -d= -f2)
-                break
-              fi
-              sleep 1
-            done
-
-            return 0
-          }
-
-          rimuovi_nodo() {
-            local id=$1
-            docker rm -f "wp-$id" > /dev/null 2>&1 || true
-          }
-
-          echo "=== ONDATA 1: avvio $NODI_NECESSARI nodi scaglionati (${DELAY_MIN}-${DELAY_MAX}s tra uno e l'altro) ==="
-          declare -A pid_di_nodo
-          declare -A file_di_nodo
-
-          for i in $(seq 1 "$NODI_NECESSARI"); do
-            CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
-            id="n$CONTATORE_GLOBALE"
-            port=$((PORTA_BASE + CONTATORE_GLOBALE))
-            porta_di_nodo[$id]=$port
-            out="/tmp/esito_${id}.txt"
-            file_di_nodo[$id]=$out
-
-            avvia_e_verifica_nodo "$id" "$port" "$out" &
-            pid_di_nodo[$id]=$!
-
-            if [ "$i" -lt "$NODI_NECESSARI" ]; then
-              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
-              echo "Nodo $id avviato (porta $port), prossimo tra ${DELAY}s..."
-              sleep "$DELAY"
-            else
-              echo "Nodo $id avviato (porta $port), ultimo dell'ondata 1."
-            fi
+            DELAY=$(awk -v min=4 -v max=6 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
+            echo "Nodo $i avviato su porta $PORT, attendo ${DELAY}s..."
+            sleep "$DELAY"
           done
 
           echo ""
-          echo "Attendo che tutti i nodi dell'ondata 1 completino la verifica (in parallelo, max ~18s residui)..."
-          for id in "${!pid_di_nodo[@]}"; do
-            wait "${pid_di_nodo[$id]}" 2>/dev/null || true
+          echo "=== Attesa registrazione (25s) ==="
+          sleep 25
+
+      - name: Misura IPv4 e IPv6 SEPARATAMENTE per ciascun nodo (protocollo forzato)
+        run: |
+          echo "Per ogni nodo interrogo cdn-cgi/trace forzando --ipv4 e poi --ipv6"
+          echo "sulla STESSA porta SOCKS5, per vedere se il tunnel espone entrambi gli indirizzi."
+          echo ""
+
+          declare -A ipv4_di_nodo
+          declare -A ipv6_di_nodo
+
+          for i in 1 2 3 4 5 6; do
+            PORT=$((40000 + i))
+
+            IP4=$(curl -s --max-time 8 --ipv4 -x "socks5h://127.0.0.1:$PORT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2)
+            IP6=$(curl -s --max-time 8 --ipv6 -x "socks5h://127.0.0.1:$PORT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2)
+
+            ipv4_di_nodo[$i]="${IP4:-NESSUNO}"
+            ipv6_di_nodo[$i]="${IP6:-NESSUNO}"
+
+            echo "Nodo $i (porta $PORT):"
+            echo "  IPv4 forzato -> ${IP4:-NESSUNO}"
+            echo "  IPv6 forzato -> ${IP6:-NESSUNO}"
           done
 
           echo ""
-          echo "=== Esiti ondata 1 ==="
-          for id in "${!file_di_nodo[@]}"; do
-            esito_file="${file_di_nodo[$id]}"
-            if [ ! -f "$esito_file" ]; then
-              echo "Nodo $id (porta ${porta_di_nodo[$id]}): IP=FALLITO (nessun file di esito prodotto)"
-              rimuovi_nodo "$id"
-              continue
-            fi
-
-            read -r rid rport rip < "$esito_file"
-            echo "Nodo $rid (porta $rport): IP=${rip:-FALLITO}"
-
-            if [ -z "$rip" ]; then
-              echo "  -> fallito a registrarsi, verrà sostituito"
-              rimuovi_nodo "$rid"
-              continue
-            fi
-
-            if [ -n "${ip_visti[$rip]:-}" ]; then
-              echo "  -> IP duplicato (già usato da nodo ${ip_visti[$rip]}), verrà sostituito"
-              rimuovi_nodo "$rid"
-              continue
-            fi
-
-            ip_visti[$rip]=$rid
-            ip_di_nodo[$rid]=$rip
-            NODI_OK+=("$rid")
+          echo "=== Riepilogo IPv4 (controllo duplicati) ==="
+          for i in 1 2 3 4 5 6; do
+            echo "Nodo $i -> ${ipv4_di_nodo[$i]}"
           done
 
           echo ""
-          echo "Nodi validi dopo ondata 1: ${#NODI_OK[@]}/$NODI_NECESSARI"
-          echo "Tempo residuo: $(tempo_residuo)s"
-
-          # --- Ondate di retry mirate, solo sui posti mancanti ---
-          ONDATA=1
-          while [ "${#NODI_OK[@]}" -lt "$NODI_NECESSARI" ]; do
-            RESIDUO=$(tempo_residuo)
-            if [ "$RESIDUO" -le 6 ]; then
-              echo ""
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Mi fermo qui."
-              break
-            fi
-
-            ONDATA=$((ONDATA + 1))
-            MANCANTI=$((NODI_NECESSARI - ${#NODI_OK[@]}))
-            echo ""
-            echo "=== ONDATA $ONDATA: servono ancora $MANCANTI nodi, tempo residuo ${RESIDUO}s ==="
-
-            declare -A pid_retry
-            declare -A file_retry
-
-            for i in $(seq 1 "$MANCANTI"); do
-              CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
-              id="n$CONTATORE_GLOBALE"
-              port=$((PORTA_BASE + CONTATORE_GLOBALE))
-              porta_di_nodo[$id]=$port
-              out="/tmp/esito_${id}.txt"
-              file_retry[$id]=$out
-
-              avvia_e_verifica_nodo "$id" "$port" "$out" &
-              pid_retry[$id]=$!
-
-              # Nei retry usiamo un delay più corto perché il tempo stringe,
-              # ma non zero: manteniamo comunque una scaglionatura minima
-              # per non ripetere l'errore delle 11 registrazioni simultanee.
-              if [ "$i" -lt "$MANCANTI" ]; then
-                DELAY=$(awk -v min=2 -v max=3.5 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
-                sleep "$DELAY"
-              fi
-            done
-
-            for id in "${!pid_retry[@]}"; do
-              wait "${pid_retry[$id]}" 2>/dev/null || true
-            done
-
-            for id in "${!file_retry[@]}"; do
-              esito_file="${file_retry[$id]}"
-              if [ ! -f "$esito_file" ]; then
-                echo "Nodo $id (porta ${porta_di_nodo[$id]}): IP=FALLITO (nessun file di esito prodotto)"
-                rimuovi_nodo "$id"
-                continue
-              fi
-
-              read -r rid rport rip < "$esito_file"
-              echo "Nodo $rid (porta $rport): IP=${rip:-FALLITO}"
-
-              if [ -z "$rip" ]; then
-                echo "  -> fallito, scartato"
-                rimuovi_nodo "$rid"
-                continue
-              fi
-
-              if [ -n "${ip_visti[$rip]:-}" ]; then
-                echo "  -> IP duplicato, scartato"
-                rimuovi_nodo "$rid"
-                continue
-              fi
-
-              ip_visti[$rip]=$rid
-              ip_di_nodo[$rid]=$rip
-              NODI_OK+=("$rid")
-
-              if [ "${#NODI_OK[@]}" -ge "$NODI_NECESSARI" ]; then
-                break
-              fi
-            done
-
-            unset pid_retry file_retry
-            echo "Nodi validi dopo ondata $ONDATA: ${#NODI_OK[@]}/$NODI_NECESSARI"
+          echo "=== Riepilogo IPv6 (controllo duplicati) ==="
+          for i in 1 2 3 4 5 6; do
+            echo "Nodo $i -> ${ipv6_di_nodo[$i]}"
           done
 
-          ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
-          echo "======================================================"
-          echo "RISULTATO FINALE: ${#NODI_OK[@]}/$NODI_NECESSARI nodi con IP univoco"
-          echo "Tempo impiegato: ${ELAPSED_FINALE}s (budget: ${BUDGET_TOTALE_SECONDI}s)"
-          echo "======================================================"
-          for id in "${NODI_OK[@]}"; do
-            echo "  $id (porta ${porta_di_nodo[$id]}) -> ${ip_di_nodo[$id]}"
-          done
-
-          # Salva la mappatura nodo->porta per gli step successivi dello scraper
-          > /tmp/nodi_attivi.txt
-          for id in "${NODI_OK[@]}"; do
-            echo "${id} ${porta_di_nodo[$id]} ${ip_di_nodo[$id]}" >> /tmp/nodi_attivi.txt
-          done
-          cat /tmp/nodi_attivi.txt
-
-          if [ "${#NODI_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::error::Ottenuti solo ${#NODI_OK[@]}/$NODI_NECESSARI IP univoci entro il budget."
-            exit 1
-          fi
-
-          if [ "$ELAPSED_FINALE" -gt "$BUDGET_TOTALE_SECONDI" ]; then
-            echo "::warning::Budget superato: ${ELAPSED_FINALE}s > ${BUDGET_TOTALE_SECONDI}s"
-          fi
+          echo "=== Conteggio univoci ==="
+          UNIVOCI_V4=$(printf '%s\n' "${ipv4_di_nodo[@]}" | sort -u | wc -l)
+          UNIVOCI_V6=$(printf '%s\n' "${ipv6_di_nodo[@]}" | sort -u | wc -l)
+          echo "IPv4 univoci: $UNIVOCI_V4 / 6"
+          echo "IPv6 univoci: $UNIVOCI_V6 / 6"
 
       - name: Pulizia
         if: always()
         run: |
-          docker ps -a --format '{{.Names}}' | grep '^wp-' | xargs -r docker rm -f || true
+          for i in 1 2 3 4 5 6; do
+            docker rm -f wp-$i || true
+          done
