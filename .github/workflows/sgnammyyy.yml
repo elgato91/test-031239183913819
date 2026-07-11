@@ -6,8 +6,8 @@ on:
 env:
   NODI_NECESSARI: 6
   BUDGET_TOTALE_SECONDI: 90
-  DELAY_MIN: 1
-  DELAY_MAX: 2
+  DELAY_MIN: 2
+  DELAY_MAX: 3
 
 jobs:
   test:
@@ -35,7 +35,7 @@ jobs:
             echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
           }
 
-          # Funzione in background 100% silenziosa. Comunica solo tramite file di esito.
+          # Funzione in background silenziosa. Comunica solo tramite file di esito.
           avvia_e_verifica_nodo() {
             local id=$1
             local port=$2
@@ -93,6 +93,11 @@ jobs:
               # Fallback IPv4 tramite trace se icanhazip fallisce
               if [ -z "$ip4" ]; then
                 ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
+              fi
+
+              # Fallback IPv6 tramite api6.ipify.org se icanhazip fallisce
+              if [ -z "$ip6" ]; then
+                ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
               fi
             else
               err_msg="Timeout WARP (warp=on non rilevato dopo 30s)"
@@ -215,10 +220,15 @@ jobs:
               break
             fi
 
+            # Cooldown per prevenire il rate-limit di registrazione Cloudflare (POST /reg)
+            echo ""
+            echo "Attendo un cooldown di 4 secondi per prevenire il rate-limit di Cloudflare..."
+            sleep 4
+
             ONDATA=$((ONDATA + 1))
             MANCANTI=$((NODI_NECESSARI - ${#NODI_OK[@]}))
             echo ""
-            echo "=== ONDATA $ONDATA: Avvio di $MANCANTI nodi sostitutivi (tempo residuo: ${RESIDUO}s) ==="
+            echo "=== ONDATA $ONDATA: Avvio di $MANCANTI nodi sostitutivi (tempo residuo: $(tempo_residuo)s) ==="
 
             retry_pids=()
             retry_files=()
