@@ -25,7 +25,6 @@ jobs:
           declare -A ipv4_di_nodo
           declare -A ipv6_di_nodo
           declare -A ipv4_visti
-          declare -A tempo_pronto_di_nodo
           NODI_OK=()
           CONTATORE_GLOBALE=0
           PORTA_BASE=1080
@@ -35,17 +34,20 @@ jobs:
             echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
           }
 
+          # Scrive sempre 5 campi separati da '|' (mai spazi), cosi' i campi
+          # vuoti (es. IPv6 non ottenuto) non fanno collassare gli altri
+          # durante il parsing con IFS='|' read.
           avvia_e_verifica_nodo() {
             local id=$1
             local port=$2
             local out_file=$3
             local ip4=""
             local ip6=""
-            local t_pronto=""
+            local t_pronto="0"
             local t_start
             t_start=$(date +%s)
 
-            trap 'echo "$id $port ${ip4:-} ${ip6:-} ${t_pronto:-0}" > "$out_file"' EXIT
+            trap 'echo "${id}|${port}|${ip4}|${ip6}|${t_pronto}" > "$out_file"' EXIT
 
             docker rm -f "warp_$id" > /dev/null 2>&1 || true
 
@@ -62,8 +64,6 @@ jobs:
               return 0
             fi
 
-            # Polling molto piu' aggressivo (ogni 0.5s) per catturare il momento
-            # esatto in cui il tunnel diventa pronto, invece di un'attesa fissa.
             local pronto=0
             for _ in $(seq 1 60); do
               local trace
@@ -87,6 +87,13 @@ jobs:
           rimuovi_nodo() {
             local id=$1
             docker rm -f "warp_$id" > /dev/null 2>&1 || true
+          }
+
+          # Legge un file esito a 5 campi pipe-separated in 5 variabili globali:
+          # PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO
+          leggi_esito() {
+            local esito_file=$1
+            IFS='|' read -r PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO < "$esito_file"
           }
 
           echo "=== ONDATA 1: avvio $NODI_NECESSARI nodi scaglionati (${DELAY_MIN}-${DELAY_MAX}s) ==="
@@ -129,25 +136,25 @@ jobs:
               continue
             fi
 
-            read -r rid rport rip4 rip6 rtpronto < "$esito_file"
-            echo "Nodo $rid (porta $rport): IPv4=${rip4:-NESSUNO} IPv6=${rip6:-NESSUNO} (pronto in ${rtpronto}s dal suo avvio)"
+            leggi_esito "$esito_file"
+            echo "Nodo $PARSED_ID (porta $PARSED_PORT): IPv4=${PARSED_IP4:-NESSUNO} IPv6=${PARSED_IP6:-NESSUNO} (pronto in ${PARSED_TPRONTO}s dal suo avvio)"
 
-            if [ -z "$rip4" ]; then
+            if [ -z "$PARSED_IP4" ]; then
               echo "  -> IPv4 non ottenuto, verra' sostituito"
-              rimuovi_nodo "$rid"
+              rimuovi_nodo "$PARSED_ID"
               continue
             fi
 
-            if [ -n "${ipv4_visti[$rip4]:-}" ]; then
-              echo "  -> IPv4 duplicato (gia' usato da nodo ${ipv4_visti[$rip4]}), verra' sostituito"
-              rimuovi_nodo "$rid"
+            if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
+              echo "  -> IPv4 duplicato (gia' usato da nodo ${ipv4_visti[$PARSED_IP4]}), verra' sostituito"
+              rimuovi_nodo "$PARSED_ID"
               continue
             fi
 
-            ipv4_visti[$rip4]=$rid
-            ipv4_di_nodo[$rid]=$rip4
-            ipv6_di_nodo[$rid]=$rip6
-            NODI_OK+=("$rid")
+            ipv4_visti[$PARSED_IP4]=$PARSED_ID
+            ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
+            ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
+            NODI_OK+=("$PARSED_ID")
           done
 
           echo ""
@@ -158,6 +165,7 @@ jobs:
           while [ "${#NODI_OK[@]}" -lt "$NODI_NECESSARI" ]; do
             RESIDUO=$(tempo_residuo)
             if [ "$RESIDUO" -le 10 ]; then
+              echo ""
               echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Mi fermo qui."
               break
             fi
@@ -199,25 +207,25 @@ jobs:
                 continue
               fi
 
-              read -r rid rport rip4 rip6 rtpronto < "$esito_file"
-              echo "Nodo $rid (porta $rport): IPv4=${rip4:-NESSUNO} IPv6=${rip6:-NESSUNO} (pronto in ${rtpronto}s)"
+              leggi_esito "$esito_file"
+              echo "Nodo $PARSED_ID (porta $PARSED_PORT): IPv4=${PARSED_IP4:-NESSUNO} IPv6=${PARSED_IP6:-NESSUNO} (pronto in ${PARSED_TPRONTO}s)"
 
-              if [ -z "$rip4" ]; then
+              if [ -z "$PARSED_IP4" ]; then
                 echo "  -> IPv4 non ottenuto, scartato"
-                rimuovi_nodo "$rid"
+                rimuovi_nodo "$PARSED_ID"
                 continue
               fi
 
-              if [ -n "${ipv4_visti[$rip4]:-}" ]; then
+              if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
                 echo "  -> IPv4 duplicato, scartato"
-                rimuovi_nodo "$rid"
+                rimuovi_nodo "$PARSED_ID"
                 continue
               fi
 
-              ipv4_visti[$rip4]=$rid
-              ipv4_di_nodo[$rid]=$rip4
-              ipv6_di_nodo[$rid]=$rip6
-              NODI_OK+=("$rid")
+              ipv4_visti[$PARSED_IP4]=$PARSED_ID
+              ipv4_di_nodo[$PARSED_ID]=$PARSED_IP4
+              ipv6_di_nodo[$PARSED_ID]=$PARSED_IP6
+              NODI_OK+=("$PARSED_ID")
 
               if [ "${#NODI_OK[@]}" -ge "$NODI_NECESSARI" ]; then
                 break
