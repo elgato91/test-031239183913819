@@ -50,7 +50,6 @@ jobs:
           START_TS=$(date +%s)
 
           NODI_NECESSARI=6
-          BUDGET_TOTALE_SECONDI=150
           MAX_ONDATE=3
           DELAY_MIN=2
           DELAY_MAX=3
@@ -67,11 +66,6 @@ jobs:
           declare -A ipv4_visti
           declare -A ipv6_visti
           SLOT_OK=()
-
-          tempo_residuo() {
-            local elapsed=$(( $(date +%s) - START_TS ))
-            echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
-          }
 
           avvia_e_verifica_nodo() {
             local slot=$1
@@ -105,7 +99,7 @@ jobs:
 
             local pronto=0
             local trace=""
-            for _ in $(seq 1 60); do
+            for _ in $(seq 1 50); do
               trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
               if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
                 pronto=1
@@ -131,7 +125,7 @@ jobs:
                 ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
               fi
             else
-              err_msg="Timeout WARP (warp=on non rilevato dopo 30s)"
+              err_msg="Timeout WARP (warp=on non rilevato dopo 25s)"
             fi
 
             return 0
@@ -239,23 +233,17 @@ jobs:
           echo ""
           echo "=== STEP 1 - ESITI ONDATA 1 ==="
           elabora_esiti "${ondata1_files[@]}"
-          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI (tempo residuo $(tempo_residuo)s)"
+          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
 
           ONDATA=1
           SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
           while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
-            RESIDUO=$(tempo_residuo)
-            if [ "$RESIDUO" -le 10 ]; then
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Procedo con gli slot ottenuti finora."
-              break
-            fi
-
             echo "Cooldown 4s per prevenire rate-limit di registrazione..."
             sleep 4
 
             ONDATA=$((ONDATA + 1))
             echo ""
-            echo "=== STEP 1 - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
+            echo "=== STEP 1 - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
 
             retry_pids=()
             retry_files=()
@@ -1106,13 +1094,20 @@ jobs:
           done
           echo "Container Step 1 rimossi."
 
+          # Cooldown deliberato: registrare 6 nuovi device WARP subito dopo aver
+          # gia' registrato 6 device (Step 1) sullo stesso IP host fa scattare
+          # un tasso di timeout molto piu' alto in ondata 1 (osservato empiricamente:
+          # 5/6 falliti al primo tentativo quando il gap era di pochi secondi).
+          # Un cooldown piu' ampio riduce il burst percepito da Cloudflare.
+          echo "Cooldown di 10s prima del setup WARP Step 2..."
+          sleep 10
+
       - name: Setup Container WARP STEP 2 (Nuovi IP) (client ufficiale, rigoroso, IPv4+IPv6 univoci)
         run: |
           set -o pipefail
           START_TS=$(date +%s)
 
           NODI_NECESSARI=6
-          BUDGET_TOTALE_SECONDI=150
           MAX_ONDATE=3
           DELAY_MIN=2
           DELAY_MAX=3
@@ -1129,11 +1124,6 @@ jobs:
           declare -A ipv4_visti
           declare -A ipv6_visti
           SLOT_OK=()
-
-          tempo_residuo() {
-            local elapsed=$(( $(date +%s) - START_TS ))
-            echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
-          }
 
           avvia_e_verifica_nodo() {
             local slot=$1
@@ -1167,7 +1157,7 @@ jobs:
 
             local pronto=0
             local trace=""
-            for _ in $(seq 1 60); do
+            for _ in $(seq 1 50); do
               trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
               if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
                 pronto=1
@@ -1193,7 +1183,7 @@ jobs:
                 ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
               fi
             else
-              err_msg="Timeout WARP (warp=on non rilevato dopo 30s)"
+              err_msg="Timeout WARP (warp=on non rilevato dopo 25s)"
             fi
 
             return 0
@@ -1301,23 +1291,17 @@ jobs:
           echo ""
           echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA 1 ==="
           elabora_esiti "${ondata1_files[@]}"
-          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI (tempo residuo $(tempo_residuo)s)"
+          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
 
           ONDATA=1
           SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
           while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
-            RESIDUO=$(tempo_residuo)
-            if [ "$RESIDUO" -le 10 ]; then
-              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Procedo con gli slot ottenuti finora."
-              break
-            fi
-
             echo "Cooldown 4s per prevenire rate-limit di registrazione..."
             sleep 4
 
             ONDATA=$((ONDATA + 1))
             echo ""
-            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} (tempo residuo $(tempo_residuo)s) ==="
+            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
 
             retry_pids=()
             retry_files=()
