@@ -25,14 +25,14 @@ jobs:
               -p "$PORT":1080 \
               caomingjun/warp:latest
 
-            DELAY=$(awk -v min=4 -v max=6 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
+            DELAY=$(awk -v min=2 -v max=4 'BEGIN{srand('"$i"'+systime()); print min+rand()*(max-min)}')
             echo "Nodo $i avviato su porta $PORT, attendo ${DELAY}s..."
             sleep "$DELAY"
           done
 
           echo ""
           echo "=== Attesa registrazione (25s) ==="
-          sleep 25
+          sleep 10
 
       - name: Verifica stato e IP di uscita per nodo
         run: |
