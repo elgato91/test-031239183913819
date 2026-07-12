@@ -62,6 +62,13 @@ jobs:
           # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
           RICHIEDI_IPV4_UNIVOCO=0
 
+          # Polling leggero anti race-condition di registrazione WARP:
+          # il client warp-svc a volte tenta Connect prima che la
+          # registrazione device sia completata (err=MissingRegistration).
+          # Pochi tentativi spaziati, non polling aggressivo continuo.
+          MAX_TENTATIVI_REGISTRAZIONE=4
+          ATTESA_TRA_TENTATIVI_SECONDI=6
+
           declare -A ipv4_di_slot
           declare -A ipv6_di_slot
           declare -A ipv4_visti
@@ -91,7 +98,10 @@ jobs:
           }
 
           # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
-          # parallelo tra loro (un curl a testa, non un loop di polling).
+          # parallelo tra loro (un curl a testa, non un loop di polling
+          # pesante). Include un piccolo retry interno sulla sola rilevazione
+          # di warp=on, per assorbire la race condition di registrazione
+          # (MissingRegistration) del client warp-svc appena avviato.
           verifica_nodo() {
             local slot=$1
             local port=$2
@@ -102,11 +112,24 @@ jobs:
 
             trap 'echo "${slot}|${port}|${ip4}|${ip6}|${err_msg}" > "$out_file"' EXIT
 
-            local trace
-            trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+            local trace=""
+            local tentativo=1
+            while [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; do
+              trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+
+              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
+                break
+              fi
+
+              echo "  [slot $slot] tentativo $tentativo/$MAX_TENTATIVI_REGISTRAZIONE: warp=on non ancora rilevato (probabile registrazione device in corso), ritento tra ${ATTESA_TRA_TENTATIVI_SECONDI}s..."
+              tentativo=$((tentativo + 1))
+              if [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; then
+                sleep "$ATTESA_TRA_TENTATIVI_SECONDI"
+              fi
+            done
 
             if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-              err_msg="warp=on non rilevato"
+              err_msg="warp=on non rilevato dopo ${MAX_TENTATIVI_REGISTRAZIONE} tentativi"
               echo "  --- Log docker del container warp_${CONTAINER_PREFIX}_slot${slot} (ultime 30 righe) ---"
               docker logs --tail 30 "warp_${CONTAINER_PREFIX}_slot${slot}" 2>&1 | sed 's/^/    /'
               echo "  --- Fine log ---"
@@ -1100,6 +1123,13 @@ jobs:
           # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
           RICHIEDI_IPV4_UNIVOCO=1
 
+          # Polling leggero anti race-condition di registrazione WARP:
+          # il client warp-svc a volte tenta Connect prima che la
+          # registrazione device sia completata (err=MissingRegistration).
+          # Pochi tentativi spaziati, non polling aggressivo continuo.
+          MAX_TENTATIVI_REGISTRAZIONE=4
+          ATTESA_TRA_TENTATIVI_SECONDI=6
+
           declare -A ipv4_di_slot
           declare -A ipv6_di_slot
           declare -A ipv4_visti
@@ -1129,7 +1159,10 @@ jobs:
           }
 
           # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
-          # parallelo tra loro (un curl a testa, non un loop di polling).
+          # parallelo tra loro (un curl a testa, non un loop di polling
+          # pesante). Include un piccolo retry interno sulla sola rilevazione
+          # di warp=on, per assorbire la race condition di registrazione
+          # (MissingRegistration) del client warp-svc appena avviato.
           verifica_nodo() {
             local slot=$1
             local port=$2
@@ -1140,11 +1173,24 @@ jobs:
 
             trap 'echo "${slot}|${port}|${ip4}|${ip6}|${err_msg}" > "$out_file"' EXIT
 
-            local trace
-            trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+            local trace=""
+            local tentativo=1
+            while [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; do
+              trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+
+              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
+                break
+              fi
+
+              echo "  [slot $slot] tentativo $tentativo/$MAX_TENTATIVI_REGISTRAZIONE: warp=on non ancora rilevato (probabile registrazione device in corso), ritento tra ${ATTESA_TRA_TENTATIVI_SECONDI}s..."
+              tentativo=$((tentativo + 1))
+              if [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; then
+                sleep "$ATTESA_TRA_TENTATIVI_SECONDI"
+              fi
+            done
 
             if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-              err_msg="warp=on non rilevato"
+              err_msg="warp=on non rilevato dopo ${MAX_TENTATIVI_REGISTRAZIONE} tentativi"
               echo "  --- Log docker del container warp_${CONTAINER_PREFIX}_slot${slot} (ultime 30 righe) ---"
               docker logs --tail 30 "warp_${CONTAINER_PREFIX}_slot${slot}" 2>&1 | sed 's/^/    /'
               echo "  --- Fine log ---"
