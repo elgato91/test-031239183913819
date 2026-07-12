@@ -56,7 +56,7 @@ jobs:
           MAX_ONDATE=3
           DELAY_MIN=4
           DELAY_MAX=6
-          ATTESA_FINALE_SECONDI=10
+          ATTESA_FINALE_SECONDI=25
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
           # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
@@ -107,6 +107,9 @@ jobs:
 
             if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
               err_msg="warp=on non rilevato"
+              echo "  --- Log docker del container warp_${CONTAINER_PREFIX}_slot${slot} (ultime 30 righe) ---"
+              docker logs --tail 30 "warp_${CONTAINER_PREFIX}_slot${slot}" 2>&1 | sed 's/^/    /'
+              echo "  --- Fine log ---"
               return 0
             fi
 
@@ -1142,6 +1145,9 @@ jobs:
 
             if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
               err_msg="warp=on non rilevato"
+              echo "  --- Log docker del container warp_${CONTAINER_PREFIX}_slot${slot} (ultime 30 righe) ---"
+              docker logs --tail 30 "warp_${CONTAINER_PREFIX}_slot${slot}" 2>&1 | sed 's/^/    /'
+              echo "  --- Fine log ---"
               return 0
             fi
 
