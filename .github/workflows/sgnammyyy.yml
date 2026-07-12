@@ -54,14 +54,12 @@ jobs:
 
           NODI_NECESSARI=6
           MAX_ONDATE=3
-          DELAY_MIN=2
-          DELAY_MAX=3
+          DELAY_MIN=4
+          DELAY_MAX=6
+          ATTESA_FINALE_SECONDI=5
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
-          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
-          # un IPv4 duplicato tra nodi NON viene scartato, perche' il traffico verso
-          # target dual-stack passera' comunque quasi sempre da IPv6 (nativo, nessuna
-          # modifica necessaria: e' il sistema/WireGuard a preferirlo via Happy Eyeballs).
+          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
           RICHIEDI_IPV4_UNIVOCO=0
 
           declare -A ipv4_di_slot
@@ -70,23 +68,17 @@ jobs:
           declare -A ipv6_visti
           SLOT_OK=()
 
-          avvia_e_verifica_nodo() {
+          # Avvia il container e basta. Nessuna verifica, nessun curl qui:
+          # la verifica avviene TUTTA INSIEME dopo che ogni nodo dell'ondata
+          # e' partito e dopo un'unica attesa finale fissa, non un polling
+          # continuo per nodo che genera carico concorrente sull'host.
+          avvia_nodo() {
             local slot=$1
             local port=$2
-            local out_file=$3
-            local ip4=""
-            local ip6=""
-            local t_pronto="0"
-            local err_msg=""
-            local t_start
-            t_start=$(date +%s)
-
-            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
 
             docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
 
-            local run_out
-            if ! run_out=$(docker run -d \
+            docker run -d \
               --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
               --cap-add NET_ADMIN \
               --cap-add MKNOD \
@@ -95,40 +87,42 @@ jobs:
               --sysctl net.ipv4.conf.all.src_valid_mark=1 \
               -e WARP_SLEEP=1 \
               -p "$port":1080 \
-              caomingjun/warp:latest 2>&1); then
-              err_msg="Docker run fallito: $(echo "$run_out" | tr -d '\r\n')"
+              caomingjun/warp:latest > /dev/null 2>&1 || true
+          }
+
+          # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
+          # parallelo tra loro (un curl a testa, non un loop di polling).
+          verifica_nodo() {
+            local slot=$1
+            local port=$2
+            local out_file=$3
+            local ip4=""
+            local ip6=""
+            local err_msg=""
+
+            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${err_msg}" > "$out_file"' EXIT
+
+            local trace
+            trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+
+            if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
+              err_msg="warp=on non rilevato"
               return 0
             fi
 
-            local pronto=0
-            local trace=""
-            for _ in $(seq 1 50); do
-              trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-                pronto=1
-                t_pronto=$(( $(date +%s) - t_start ))
-                break
-              fi
-              sleep 0.5
-            done
+            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
+            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
+            wait
 
-            if [ "$pronto" -eq 1 ]; then
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
-              wait
+            ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+            ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+            rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
 
-              ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
-
-              if [ -z "$ip4" ]; then
-                ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
-              fi
-              if [ -z "$ip6" ]; then
-                ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-              fi
-            else
-              err_msg="Timeout WARP (warp=on non rilevato dopo 25s)"
+            if [ -z "$ip4" ]; then
+              ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
+            fi
+            if [ -z "$ip6" ]; then
+              ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
             fi
 
             return 0
@@ -141,13 +135,9 @@ jobs:
 
           leggi_esito() {
             local esito_file=$1
-            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
+            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_ERR < "$esito_file"
           }
 
-          # Valuta gli esiti. In modalita' permissiva (RICHIEDI_IPV4_UNIVOCO=0) la
-          # dedup e la scarto avvengono SOLO su IPv6; un IPv4 duplicato tra nodi
-          # viene accettato e tenuto, non causa retry. In modalita' rigorosa
-          # entrambi devono essere univoci o lo slot viene rifatto.
           elabora_esiti() {
             SLOT_DA_RIPROVARE=()
             local file_list=("$@")
@@ -195,7 +185,7 @@ jobs:
                   continue
                 fi
               elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva, il traffico passera' comunque da IPv6)"
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva)"
               fi
 
               ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
@@ -203,39 +193,52 @@ jobs:
               ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
               ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
               SLOT_OK+=("$PARSED_SLOT")
-              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
+              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
             done
           }
 
+          esegui_ondata() {
+            local slots=("$@")
+            local n=${#slots[@]}
+            local idx=0
+            local files=()
+
+            for slot in "${slots[@]}"; do
+              idx=$((idx + 1))
+              port=$((PORTA_BASE + slot))
+              avvia_nodo "$slot" "$port"
+
+              if [ "$idx" -lt "$n" ]; then
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
+                echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
+                sleep "$DELAY"
+              else
+                echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata."
+              fi
+            done
+
+            echo "Attesa finale di ${ATTESA_FINALE_SECONDI}s prima della verifica..."
+            sleep "$ATTESA_FINALE_SECONDI"
+
+            local pids=()
+            for slot in "${slots[@]}"; do
+              port=$((PORTA_BASE + slot))
+              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
+              files+=("$out")
+              verifica_nodo "$slot" "$port" "$out" &
+              pids+=($!)
+            done
+
+            for pid in "${pids[@]}"; do
+              wait "$pid" 2>/dev/null || true
+            done
+
+            elabora_esiti "${files[@]}"
+          }
+
           echo "=== STEP 1 - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
-          ondata1_pids=()
-          ondata1_files=()
-
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            port=$((PORTA_BASE + slot))
-            out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-            ondata1_files+=("$out")
-
-            avvia_e_verifica_nodo "$slot" "$port" "$out" &
-            ondata1_pids+=($!)
-
-            if [ "$slot" -lt "$NODI_NECESSARI" ]; then
-              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
-              echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
-              sleep "$DELAY"
-            else
-              echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata 1."
-            fi
-          done
-
-          echo "Attendo che tutti gli slot completino la verifica..."
-          for pid in "${ondata1_pids[@]}"; do
-            wait "$pid" 2>/dev/null || true
-          done
-
-          echo ""
-          echo "=== STEP 1 - ESITI ONDATA 1 ==="
-          elabora_esiti "${ondata1_files[@]}"
+          TUTTI_SLOT=($(seq 1 "$NODI_NECESSARI"))
+          esegui_ondata "${TUTTI_SLOT[@]}"
           echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
 
           ONDATA=1
@@ -247,33 +250,7 @@ jobs:
             ONDATA=$((ONDATA + 1))
             echo ""
             echo "=== STEP 1 - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
-
-            retry_pids=()
-            retry_files=()
-
-            n_mancanti=${#SLOT_MANCANTI[@]}
-            idx=0
-            for slot in "${SLOT_MANCANTI[@]}"; do
-              idx=$((idx + 1))
-              port=$((PORTA_BASE + slot))
-              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-              retry_files+=("$out")
-
-              avvia_e_verifica_nodo "$slot" "$port" "$out" &
-              retry_pids+=($!)
-
-              if [ "$idx" -lt "$n_mancanti" ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()+'"$ONDATA"'); print min+rand()*(max-min)}')
-                sleep "$DELAY"
-              fi
-            done
-
-            for pid in "${retry_pids[@]}"; do
-              wait "$pid" 2>/dev/null || true
-            done
-
-            echo "=== STEP 1 - ESITI ONDATA $ONDATA ==="
-            elabora_esiti "${retry_files[@]}"
+            esegui_ondata "${SLOT_MANCANTI[@]}"
             SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
             echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
           done
@@ -281,7 +258,7 @@ jobs:
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
           if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot con i requisiti richiesti. Si prosegue comunque: gli slot mancanti restano non registrati e verranno saltati dallo scraper."
+            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si prosegue comunque."
           fi
           echo "=== STEP 1 completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
           for slot in $(seq 1 "$NODI_NECESSARI"); do
@@ -1114,12 +1091,10 @@ jobs:
           MAX_ONDATE=3
           DELAY_MIN=4
           DELAY_MAX=6
+          ATTESA_FINALE_SECONDI=5
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
-          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
-          # un IPv4 duplicato tra nodi NON viene scartato, perche' il traffico verso
-          # target dual-stack passera' comunque quasi sempre da IPv6 (nativo, nessuna
-          # modifica necessaria: e' il sistema/WireGuard a preferirlo via Happy Eyeballs).
+          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
           RICHIEDI_IPV4_UNIVOCO=1
 
           declare -A ipv4_di_slot
@@ -1128,23 +1103,17 @@ jobs:
           declare -A ipv6_visti
           SLOT_OK=()
 
-          avvia_e_verifica_nodo() {
+          # Avvia il container e basta. Nessuna verifica, nessun curl qui:
+          # la verifica avviene TUTTA INSIEME dopo che ogni nodo dell'ondata
+          # e' partito e dopo un'unica attesa finale fissa, non un polling
+          # continuo per nodo che genera carico concorrente sull'host.
+          avvia_nodo() {
             local slot=$1
             local port=$2
-            local out_file=$3
-            local ip4=""
-            local ip6=""
-            local t_pronto="0"
-            local err_msg=""
-            local t_start
-            t_start=$(date +%s)
-
-            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
 
             docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
 
-            local run_out
-            if ! run_out=$(docker run -d \
+            docker run -d \
               --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
               --cap-add NET_ADMIN \
               --cap-add MKNOD \
@@ -1153,40 +1122,42 @@ jobs:
               --sysctl net.ipv4.conf.all.src_valid_mark=1 \
               -e WARP_SLEEP=1 \
               -p "$port":1080 \
-              caomingjun/warp:latest 2>&1); then
-              err_msg="Docker run fallito: $(echo "$run_out" | tr -d '\r\n')"
+              caomingjun/warp:latest > /dev/null 2>&1 || true
+          }
+
+          # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
+          # parallelo tra loro (un curl a testa, non un loop di polling).
+          verifica_nodo() {
+            local slot=$1
+            local port=$2
+            local out_file=$3
+            local ip4=""
+            local ip6=""
+            local err_msg=""
+
+            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${err_msg}" > "$out_file"' EXIT
+
+            local trace
+            trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+
+            if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
+              err_msg="warp=on non rilevato"
               return 0
             fi
 
-            local pronto=0
-            local trace=""
-            for _ in $(seq 1 50); do
-              trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-                pronto=1
-                t_pronto=$(( $(date +%s) - t_start ))
-                break
-              fi
-              sleep 0.5
-            done
+            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
+            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
+            wait
 
-            if [ "$pronto" -eq 1 ]; then
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
-              wait
+            ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+            ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
+            rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
 
-              ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
-
-              if [ -z "$ip4" ]; then
-                ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
-              fi
-              if [ -z "$ip6" ]; then
-                ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-              fi
-            else
-              err_msg="Timeout WARP (warp=on non rilevato dopo 25s)"
+            if [ -z "$ip4" ]; then
+              ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
+            fi
+            if [ -z "$ip6" ]; then
+              ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
             fi
 
             return 0
@@ -1199,13 +1170,9 @@ jobs:
 
           leggi_esito() {
             local esito_file=$1
-            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
+            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_ERR < "$esito_file"
           }
 
-          # Valuta gli esiti. In modalita' permissiva (RICHIEDI_IPV4_UNIVOCO=0) la
-          # dedup e la scarto avvengono SOLO su IPv6; un IPv4 duplicato tra nodi
-          # viene accettato e tenuto, non causa retry. In modalita' rigorosa
-          # entrambi devono essere univoci o lo slot viene rifatto.
           elabora_esiti() {
             SLOT_DA_RIPROVARE=()
             local file_list=("$@")
@@ -1253,7 +1220,7 @@ jobs:
                   continue
                 fi
               elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva, il traffico passera' comunque da IPv6)"
+                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva)"
               fi
 
               ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
@@ -1261,39 +1228,52 @@ jobs:
               ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
               ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
               SLOT_OK+=("$PARSED_SLOT")
-              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
+              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
             done
           }
 
+          esegui_ondata() {
+            local slots=("$@")
+            local n=${#slots[@]}
+            local idx=0
+            local files=()
+
+            for slot in "${slots[@]}"; do
+              idx=$((idx + 1))
+              port=$((PORTA_BASE + slot))
+              avvia_nodo "$slot" "$port"
+
+              if [ "$idx" -lt "$n" ]; then
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
+                echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
+                sleep "$DELAY"
+              else
+                echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata."
+              fi
+            done
+
+            echo "Attesa finale di ${ATTESA_FINALE_SECONDI}s prima della verifica..."
+            sleep "$ATTESA_FINALE_SECONDI"
+
+            local pids=()
+            for slot in "${slots[@]}"; do
+              port=$((PORTA_BASE + slot))
+              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
+              files+=("$out")
+              verifica_nodo "$slot" "$port" "$out" &
+              pids+=($!)
+            done
+
+            for pid in "${pids[@]}"; do
+              wait "$pid" 2>/dev/null || true
+            done
+
+            elabora_esiti "${files[@]}"
+          }
+
           echo "=== STEP 2 (Nuovi IP) - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
-          ondata1_pids=()
-          ondata1_files=()
-
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            port=$((PORTA_BASE + slot))
-            out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-            ondata1_files+=("$out")
-
-            avvia_e_verifica_nodo "$slot" "$port" "$out" &
-            ondata1_pids+=($!)
-
-            if [ "$slot" -lt "$NODI_NECESSARI" ]; then
-              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
-              echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
-              sleep "$DELAY"
-            else
-              echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata 1."
-            fi
-          done
-
-          echo "Attendo che tutti gli slot completino la verifica..."
-          for pid in "${ondata1_pids[@]}"; do
-            wait "$pid" 2>/dev/null || true
-          done
-
-          echo ""
-          echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA 1 ==="
-          elabora_esiti "${ondata1_files[@]}"
+          TUTTI_SLOT=($(seq 1 "$NODI_NECESSARI"))
+          esegui_ondata "${TUTTI_SLOT[@]}"
           echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
 
           ONDATA=1
@@ -1305,33 +1285,7 @@ jobs:
             ONDATA=$((ONDATA + 1))
             echo ""
             echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
-
-            retry_pids=()
-            retry_files=()
-
-            n_mancanti=${#SLOT_MANCANTI[@]}
-            idx=0
-            for slot in "${SLOT_MANCANTI[@]}"; do
-              idx=$((idx + 1))
-              port=$((PORTA_BASE + slot))
-              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-              retry_files+=("$out")
-
-              avvia_e_verifica_nodo "$slot" "$port" "$out" &
-              retry_pids+=($!)
-
-              if [ "$idx" -lt "$n_mancanti" ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()+'"$ONDATA"'); print min+rand()*(max-min)}')
-                sleep "$DELAY"
-              fi
-            done
-
-            for pid in "${retry_pids[@]}"; do
-              wait "$pid" 2>/dev/null || true
-            done
-
-            echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA $ONDATA ==="
-            elabora_esiti "${retry_files[@]}"
+            esegui_ondata "${SLOT_MANCANTI[@]}"
             SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
             echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
           done
@@ -1339,7 +1293,7 @@ jobs:
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
           if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot con i requisiti richiesti. Si prosegue comunque: gli slot mancanti restano non registrati e verranno saltati dallo scraper."
+            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si prosegue comunque."
           fi
           echo "=== STEP 2 (Nuovi IP) completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
           for slot in $(seq 1 "$NODI_NECESSARI"); do
