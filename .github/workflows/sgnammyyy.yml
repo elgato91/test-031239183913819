@@ -300,6 +300,7 @@ jobs:
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
+          echo "::group::Scrittura m2_step1_setup.py"
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
@@ -334,10 +335,12 @@ jobs:
                   json.dump(chunk, f)
           print("Code distribuite Step 1 generate con successo.")
           EOF
+          echo "::endgroup::"
           python -u m2_step1_setup.py
 
       - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
         run: |
+          echo "::group::Scrittura extraction_utils.py"
           cat << 'EOF' > extraction_utils.py
           """
           Modulo condiviso tra Step 1 e Step 2.
@@ -485,9 +488,11 @@ jobs:
 
               return markdown_text
           EOF
+          echo "::endgroup::"
 
       - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
         run: |
+          echo "::group::Scrittura nugget_extractor.py"
           cat << 'EOF' > nugget_extractor.py
           """
           Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
@@ -788,9 +793,11 @@ jobs:
                     f"(ultimo motivo: {ultimo_motivo})", flush=True)
               return None
           EOF
+          echo "::endgroup::"
 
       - name: Creazione Processo Estrattore Nugget INDIPENDENTE
         run: |
+          echo "::group::Scrittura nugget_estrattore_standalone.py"
           cat << 'EOF' > nugget_estrattore_standalone.py
           import asyncio
           import glob
@@ -929,9 +936,11 @@ jobs:
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
+          echo "::endgroup::"
 
       - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, sincrono come da baseline)
         run: |
+          echo "::group::Scrittura m2_step1.py"
           cat << 'EOF' > m2_step1.py
           import time
           import sys
@@ -1068,6 +1077,7 @@ jobs:
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
           EOF
+          echo "::endgroup::"
 
       - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
         run: |
@@ -1361,6 +1371,7 @@ jobs:
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
+          echo "::group::Scrittura m2_step2_setup.py"
           cat << 'EOF' > m2_step2_setup.py
           import json
           import os
@@ -1382,10 +1393,12 @@ jobs:
 
           print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
           EOF
+          echo "::endgroup::"
           python -u m2_step2_setup.py
 
       - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
         run: |
+          echo "::group::Scrittura m2_step2.py"
           cat << 'EOF' > m2_step2.py
           import asyncio
           import time
@@ -1600,6 +1613,7 @@ jobs:
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
+          echo "::endgroup::"
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         if: always()
@@ -1670,6 +1684,7 @@ jobs:
       - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
         if: always()
         run: |
+          echo "::group::Scrittura merge_nuggets.py"
           cat << 'EOF' > merge_nuggets.py
           import json
           import os
@@ -1737,6 +1752,7 @@ jobs:
                 f"salvati in nuggets_finale.json", flush=True)
           print(f"Distribuzione confidence: {confidence_counts}", flush=True)
           EOF
+          echo "::endgroup::"
           python -u merge_nuggets.py
 
       - name: Upload Artifact Macchina 2 (Testo Grezzo)
