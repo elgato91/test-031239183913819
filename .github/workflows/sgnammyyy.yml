@@ -546,7 +546,7 @@ jobs:
                   return None
 
               page_parts = urlsplit(page_url)
-              same_path = (parts.netloc == page_parts.netloc attendee and
+              same_path = (parts.netloc == page_parts.netloc and
                            parts.path.rstrip("/") == page_parts.path.rstrip("/"))
 
               if same_path and parts.fragment and not parts.query:
@@ -1641,72 +1641,72 @@ jobs:
         if: always()
         run: |
           cat << 'EOF' > merge_nuggets.py
-import json
-import os
-import glob
+          import json
+          import os
+          import glob
 
-jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
+          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
 
-merged_nuggets = []
-per_file_stats = {}
+          merged_nuggets = []
+          per_file_stats = {}
 
-for filename in jsonl_files:
-    count = 0
-    corrotte = 0
-    try:
-        with open(filename, "r", encoding="utf-8") as f:
-            for riga in f:
-                riga = riga.strip()
-                if not riga:
-                    continue
-                try:
-                    nugget = json.loads(riga)
-                    merged_nuggets.append(nugget)
-                    count += 1
-                except json.JSONDecodeError:
-                    corrotte += 1
-    except Exception as e:
-        print(f"Errore lettura {filename}: {e}", flush=True)
+          for filename in jsonl_files:
+              count = 0
+              corrotte = 0
+              try:
+                  with open(filename, "r", encoding="utf-8") as f:
+                      for riga in f:
+                          riga = riga.strip()
+                          if not riga:
+                              continue
+                          try:
+                              nugget = json.loads(riga)
+                              merged_nuggets.append(nugget)
+                              count += 1
+                          except json.JSONDecodeError:
+                              corrotte += 1
+              except Exception as e:
+                  print(f"Errore lettura {filename}: {e}", flush=True)
 
-    per_file_stats[filename] = count
-    if corrotte:
-        print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
+              per_file_stats[filename] = count
+              if corrotte:
+                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
 
-seen = set()
-nuggets_deduplicati = []
-for n in merged_nuggets:
-    fact_norm = (n.get("fact") or "").strip().lower()
-    url_norm = (n.get("source_url") or "").strip().lower()
-    key = (fact_norm, url_norm)
-    if key in seen:
-        continue
-    seen.add(key)
-    nuggets_deduplicati.append(n)
+          seen = set()
+          nuggets_deduplicati = []
+          for n in merged_nuggets:
+              fact_norm = (n.get("fact") or "").strip().lower()
+              url_norm = (n.get("source_url") or "").strip().lower()
+              key = (fact_norm, url_norm)
+              if key in seen:
+                  continue
+              seen.add(key)
+              nuggets_deduplicati.append(n)
 
-confidence_counts = {"high": 0, "medium": 0, "low": 0}
-for n in nuggets_deduplicati:
-    c = n.get("confidence", "low")
-    if c in confidence_counts:
-        confidence_counts[c] += 1
+          confidence_counts = {"high": 0, "medium": 0, "low": 0}
+          for n in nuggets_deduplicati:
+              c = n.get("confidence", "low")
+              if c in confidence_counts:
+                  confidence_counts[c] += 1
 
-output_finale = {
-    "stats": {
-        "file_jsonl_trovati": len(jsonl_files),
-        "totale_nugget_grezzi": len(merged_nuggets),
-        "totale_nugget_deduplicati": len(nuggets_deduplicati),
-        "per_file": per_file_stats,
-        "per_confidence": confidence_counts
-    },
-    "nuggets": nuggets_deduplicati
-}
+          output_finale = {
+              "stats": {
+                  "file_jsonl_trovati": len(jsonl_files),
+                  "totale_nugget_grezzi": len(merged_nuggets),
+                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
+                  "per_file": per_file_stats,
+                  "per_confidence": confidence_counts
+              },
+              "nuggets": nuggets_deduplicati
+          }
 
-with open("nuggets_finale.json", "w", encoding="utf-8") as f:
-    json.dump(output_finale, f, indent=2, ensure_ascii=False)
+          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+              json.dump(output_finale, f, indent=2, ensure_ascii=False)
 
-print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
-      f"salvati in nuggets_finale.json", flush=True)
-print(f"Distribuzione confidence: {confidence_counts}", flush=True)
-EOF
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+                f"salvati in nuggets_finale.json", flush=True)
+          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+          EOF
           python -u merge_nuggets.py
 
       - name: Pulizia Finale Container WARP
