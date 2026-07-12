@@ -55,7 +55,7 @@ jobs:
           NODI_NECESSARI=6
           MAX_ONDATE=3
           DELAY_MIN=0.5
-          DELAY_MAX=2
+          DELAY_MAX=1.5
           ATTESA_FINALE_SECONDI=5
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
@@ -1125,8 +1125,8 @@ jobs:
 
           NODI_NECESSARI=6
           MAX_ONDATE=3
-          DELAY_MIN=3
-          DELAY_MAX=4
+          DELAY_MIN=4
+          DELAY_MAX=5
           ATTESA_FINALE_SECONDI=15
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
