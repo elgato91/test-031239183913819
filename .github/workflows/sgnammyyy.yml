@@ -12,6 +12,11 @@ jobs:
       GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
       TARGET_TOPIC: "Orvieto"
       FORZA_DIAGNOSTICI_STEP2: "1"
+      NODI_NECESSARI: 6
+      WARP_BUDGET_TOTALE_SECONDI: 90
+      WARP_DELAY_MIN: 2
+      WARP_DELAY_MAX: 3
+      WARP_PORTA_BASE: 40000
     steps:
 
       - name: Installazione Font di Sistema e Windows 11 Reali
@@ -44,33 +49,45 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Setup Container WARP STEP 1 (client ufficiale, permissivo, solo IPv6 univoco)
+      - name: Pull immagine WARP ufficiale
+        run: docker pull caomingjun/warp:latest
+
+      - name: Creazione Script Riutilizzabile - Registrazione WARP Dual-Stack
         run: |
+          cat << 'SCRIPT_EOF' > registra_warp.sh
+          #!/usr/bin/env bash
           set -o pipefail
+          set -u
+
+          NODI_NECESSARI="${NODI_NECESSARI:-6}"
+          BUDGET_TOTALE_SECONDI="${BUDGET_TOTALE_SECONDI:-90}"
+          DELAY_MIN="${DELAY_MIN:-2}"
+          DELAY_MAX="${DELAY_MAX:-3}"
+          PORTA_BASE="${PORTA_BASE:-40000}"
+          PREFIX_CONTAINER="${PREFIX_CONTAINER:-warp}"
+          MAPPA_OUTPUT="${MAPPA_OUTPUT:-/tmp/warp_node_map.json}"
+
           START_TS=$(date +%s)
 
-          NODI_NECESSARI=6
-          MAX_ONDATE=3
-          DELAY_MIN=2
-          DELAY_MAX=3
-          PORTA_BASE=40000
-          # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
-          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
-          # un IPv4 duplicato tra nodi NON viene scartato, perche' il traffico verso
-          # target dual-stack passera' comunque quasi sempre da IPv6 (nativo, nessuna
-          # modifica necessaria: e' il sistema/WireGuard a preferirlo via Happy Eyeballs).
-          RICHIEDI_IPV4_UNIVOCO=0
+          declare -A slot_container
+          declare -A slot_porta
+          declare -A slot_ipv4
+          declare -A slot_ipv6
+          declare -A slot_pronto
+          declare -A slot_status
 
-          declare -A ipv4_di_slot
-          declare -A ipv6_di_slot
-          declare -A ipv4_visti
-          declare -A ipv6_visti
-          SLOT_OK=()
+          CONTATORE_GLOBALE=0
+
+          tempo_residuo() {
+            local elapsed=$(( $(date +%s) - START_TS ))
+            echo $(( BUDGET_TOTALE_SECONDI - elapsed ))
+          }
 
           avvia_e_verifica_nodo() {
-            local slot=$1
+            local id=$1
             local port=$2
             local out_file=$3
+            local container_name=$4
             local ip4=""
             local ip6=""
             local t_pronto="0"
@@ -78,13 +95,13 @@ jobs:
             local t_start
             t_start=$(date +%s)
 
-            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
+            trap 'echo "${id}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}|${container_name}" > "$out_file"' EXIT
 
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
+            docker rm -f "$container_name" > /dev/null 2>&1 || true
 
             local run_out
             if ! run_out=$(docker run -d \
-              --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
+              --name "$container_name" \
               --cap-add NET_ADMIN \
               --cap-add MKNOD \
               --cap-add AUDIT_WRITE \
@@ -99,7 +116,7 @@ jobs:
 
             local pronto=0
             local trace=""
-            for _ in $(seq 1 50); do
+            for _ in $(seq 1 60); do
               trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
               if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
                 pronto=1
@@ -110,13 +127,13 @@ jobs:
             done
 
             if [ "$pronto" -eq 1 ]; then
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${PREFIX_CONTAINER}_${id}") &
+              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${PREFIX_CONTAINER}_${id}") &
               wait
 
-              ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
+              ip4=$(cat "/tmp/ip4_${PREFIX_CONTAINER}_${id}" 2>/dev/null || true)
+              ip6=$(cat "/tmp/ip6_${PREFIX_CONTAINER}_${id}" 2>/dev/null || true)
+              rm -f "/tmp/ip4_${PREFIX_CONTAINER}_${id}" "/tmp/ip6_${PREFIX_CONTAINER}_${id}"
 
               if [ -z "$ip4" ]; then
                 ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
@@ -125,172 +142,292 @@ jobs:
                 ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
               fi
             else
-              err_msg="Timeout WARP (warp=on non rilevato dopo 25s)"
+              err_msg="Timeout WARP (warp=on non rilevato dopo 30s)"
             fi
 
             return 0
           }
 
-          rimuovi_nodo_slot() {
-            local slot=$1
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
+          rimuovi_nodo_container() {
+            local container_name=$1
+            docker rm -f "$container_name" > /dev/null 2>&1 || true
           }
 
           leggi_esito() {
             local esito_file=$1
-            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
+            IFS='|' read -r PARSED_ID PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR PARSED_CONTAINER < "$esito_file"
           }
 
-          # Valuta gli esiti. In modalita' permissiva (RICHIEDI_IPV4_UNIVOCO=0) la
-          # dedup e la scarto avvengono SOLO su IPv6; un IPv4 duplicato tra nodi
-          # viene accettato e tenuto, non causa retry. In modalita' rigorosa
-          # entrambi devono essere univoci o lo slot viene rifatto.
-          elabora_esiti() {
-            SLOT_DA_RIPROVARE=()
-            local file_list=("$@")
-            for esito_file in "${file_list[@]}"; do
-              if [ ! -f "$esito_file" ]; then
-                echo "  FALLITO: nessun report generato ($esito_file)"
+          aggiorna_esiti_slot() {
+            declare -A visti_v4
+            declare -A visti_v6
+
+            for s in $(seq 1 "$NODI_NECESSARI"); do
+              local ip4="${slot_ipv4[$s]:-}"
+              local ip6="${slot_ipv6[$s]:-}"
+
+              if [ -z "$ip6" ] || [ "$ip6" = "NESSUNO" ]; then
+                slot_status[$s]="ERR"
                 continue
               fi
 
-              leggi_esito "$esito_file"
-
-              if [ -n "$PARSED_ERR" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 duplicato con slot ${ipv6_visti[$PARSED_IP6]})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ "$RICHIEDI_IPV4_UNIVOCO" = "1" ]; then
-                if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
+              if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
+                if [ -z "$ip4" ] || [ "$ip4" = "NESSUNO" ]; then
+                  slot_status[$s]="ERR"
                   continue
                 fi
-
-                if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-              elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva, il traffico passera' comunque da IPv6)"
               fi
 
-              ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
-              ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
-              ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
-              ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
-              SLOT_OK+=("$PARSED_SLOT")
-              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
+              local d_v4=0
+              local d_v6=0
+
+              if [ -n "${visti_v6[$ip6]:-}" ]; then
+                d_v6=1
+              fi
+
+              if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
+                if [ -n "${visti_v4[$ip4]:-}" ]; then
+                  d_v4=1
+                fi
+              fi
+
+              if [ "$d_v6" -eq 1 ] || [ "$d_v4" -eq 1 ]; then
+                slot_status[$s]="DUP"
+              else
+                slot_status[$s]="OK"
+                visti_v6[$ip6]=$s
+                if [ -n "$ip4" ] && [ "$ip4" != "NESSUNO" ]; then
+                  visti_v4[$ip4]=$s
+                fi
+              fi
             done
           }
 
-          echo "=== STEP 1 - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
+          echo "=== ONDATA 1: Avvio di $NODI_NECESSARI nodi WARP (prefix: $PREFIX_CONTAINER, ritardo: ${DELAY_MIN}-${DELAY_MAX}s) ==="
           ondata1_pids=()
           ondata1_files=()
 
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            port=$((PORTA_BASE + slot))
-            out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
+          for s in $(seq 1 "$NODI_NECESSARI"); do
+            CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
+            id="n$CONTATORE_GLOBALE"
+            port=$((PORTA_BASE + CONTATORE_GLOBALE))
+            container_name="${PREFIX_CONTAINER}_${id}"
+            out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
             ondata1_files+=("$out")
 
-            avvia_e_verifica_nodo "$slot" "$port" "$out" &
+            slot_container[$s]=$container_name
+            slot_porta[$s]=$port
+            slot_ipv4[$s]=""
+            slot_ipv6[$s]=""
+            slot_pronto[$s]="0"
+            slot_status[$s]="ERR"
+
+            avvia_e_verifica_nodo "$id" "$port" "$out" "$container_name" &
             ondata1_pids+=($!)
 
-            if [ "$slot" -lt "$NODI_NECESSARI" ]; then
-              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
-              echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
+            if [ "$s" -lt "$NODI_NECESSARI" ]; then
+              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$s"'+systime()); print min+rand()*(max-min)}')
+              echo "  [Slot $s] Container $container_name avviato su porta $port. Prossimo nodo tra ${DELAY}s..."
               sleep "$DELAY"
             else
-              echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata 1."
+              echo "  [Slot $s] Container $container_name avviato su porta $port. Ultimo nodo dell'ondata 1."
             fi
           done
 
-          echo "Attendo che tutti gli slot completino la verifica..."
+          echo ""
+          echo "Attendo che tutti i nodi completino la verifica (polling attivo)..."
           for pid in "${ondata1_pids[@]}"; do
             wait "$pid" 2>/dev/null || true
           done
 
+          for out_file in "${ondata1_files[@]}"; do
+            if [ -f "$out_file" ]; then
+              leggi_esito "$out_file"
+              for s in $(seq 1 "$NODI_NECESSARI"); do
+                if [ "${slot_porta[$s]}" = "$PARSED_PORT" ]; then
+                  slot_container[$s]=$PARSED_CONTAINER
+                  slot_ipv4[$s]=$PARSED_IP4
+                  slot_ipv6[$s]=$PARSED_IP6
+                  slot_pronto[$s]=$PARSED_TPRONTO
+                  break
+                fi
+              done
+            fi
+          done
+
+          aggiorna_esiti_slot
+
           echo ""
-          echo "=== STEP 1 - ESITI ONDATA 1 ==="
-          elabora_esiti "${ondata1_files[@]}"
-          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
+          echo "=== ESITI ONDATA 1 ==="
+          for s in $(seq 1 "$NODI_NECESSARI"); do
+            echo "  [Slot $s] Porta ${slot_porta[$s]}: Stato=${slot_status[$s]} (IPv4: ${slot_ipv4[$s]:-NESSUNO} | IPv6: ${slot_ipv6[$s]:-NESSUNO} | Pronto in ${slot_pronto[$s]}s)"
+          done
 
           ONDATA=1
-          SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
-            echo "Cooldown 4s per prevenire rate-limit di registrazione..."
-            sleep 4
+          MAX_ONDATE=3
+          while [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
+            RESIDUO=$(tempo_residuo)
+            if [ "$RESIDUO" -le 15 ]; then
+              echo ""
+              echo "Tempo residuo insufficiente per un altro retry (${RESIDUO}s). Procedo con i nodi attuali."
+              break
+            fi
 
-            ONDATA=$((ONDATA + 1))
-            echo ""
-            echo "=== STEP 1 - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
-
-            retry_pids=()
-            retry_files=()
-
-            n_mancanti=${#SLOT_MANCANTI[@]}
-            idx=0
-            for slot in "${SLOT_MANCANTI[@]}"; do
-              idx=$((idx + 1))
-              port=$((PORTA_BASE + slot))
-              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-              retry_files+=("$out")
-
-              avvia_e_verifica_nodo "$slot" "$port" "$out" &
-              retry_pids+=($!)
-
-              if [ "$idx" -lt "$n_mancanti" ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()+'"$ONDATA"'); print min+rand()*(max-min)}')
-                sleep "$DELAY"
+            slot_da_rimpiazzare=()
+            for s in $(seq 1 "$NODI_NECESSARI"); do
+              if [ "${slot_status[$s]}" != "OK" ]; then
+                slot_da_rimpiazzare+=("$s")
               fi
             done
 
+            rimpiazzi_necessari=${#slot_da_rimpiazzare[@]}
+            if [ "$rimpiazzi_necessari" -eq 0 ]; then
+              echo ""
+              echo "Tutti i nodi sono unici e funzionanti! Nessun rimpiazzo necessario."
+              break
+            fi
+
+            echo ""
+            echo "Attendo un cooldown di 10 secondi per prevenire il rate-limit di Cloudflare..."
+            sleep 10
+
+            ONDATA=$((ONDATA + 1))
+            echo ""
+            echo "=== ONDATA $ONDATA: provo a rimpiazzare $rimpiazzi_necessari nodi non ottimali (tempo residuo: $(tempo_residuo)s) ==="
+
+            retry_pids=()
+            retry_files=()
+            unset slot_di_file
+            declare -A slot_di_file
+
+            for idx in "${!slot_da_rimpiazzare[@]}"; do
+              s="${slot_da_rimpiazzare[$idx]}"
+              CONTATORE_GLOBALE=$((CONTATORE_GLOBALE + 1))
+              id="n$CONTATORE_GLOBALE"
+              port=$((PORTA_BASE + CONTATORE_GLOBALE))
+              container_name="${PREFIX_CONTAINER}_${id}"
+              out="/tmp/esito_${PREFIX_CONTAINER}_${id}.txt"
+
+              retry_files+=("$out")
+              slot_di_file["$out"]=$s
+
+              avvia_e_verifica_nodo "$id" "$port" "$out" "$container_name" &
+              retry_pids+=($!)
+
+              if [ "$idx" -lt $((rimpiazzi_necessari - 1)) ]; then
+                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$CONTATORE_GLOBALE"'+systime()); print min+rand()*(max-min)}')
+                echo "  [Slot $s] Avvio sostituto $container_name su porta $port. Prossimo tra ${DELAY}s..."
+                sleep "$DELAY"
+              else
+                echo "  [Slot $s] Avvio sostituto $container_name su porta $port. Ultimo della wave."
+              fi
+            done
+
+            echo ""
+            echo "Attendo che i nodi sostitutivi completino la verifica..."
             for pid in "${retry_pids[@]}"; do
               wait "$pid" 2>/dev/null || true
             done
 
-            echo "=== STEP 1 - ESITI ONDATA $ONDATA ==="
-            elabora_esiti "${retry_files[@]}"
-            SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-            echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
+            echo ""
+            echo "=== ESITI RETRY ONDATA $ONDATA ==="
+            for out_file in "${retry_files[@]}"; do
+              s="${slot_di_file[$out_file]}"
+              if [ ! -f "$out_file" ]; then
+                echo "  [Slot $s] Sostituto FALLITO (nessun report generato)"
+                continue
+              fi
+
+              leggi_esito "$out_file"
+
+              if [ -n "$PARSED_ERR" ] || [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ] || [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
+                echo "  [Slot $s] Sostituto $PARSED_CONTAINER non idoneo (${PARSED_ERR:-IP mancanti}). Tengo il container attuale."
+                rimuovi_nodo_container "$PARSED_CONTAINER"
+                continue
+              fi
+
+              duplicato=0
+              for s_check in $(seq 1 "$NODI_NECESSARI"); do
+                if [ "$s_check" != "$s" ] && [ "${slot_status[$s_check]}" = "OK" ]; then
+                  if [ "${slot_ipv6[$s_check]}" = "$PARSED_IP6" ]; then
+                    duplicato=1
+                    break
+                  fi
+                  if [ "$PREFIX_CONTAINER" != "warpstep1" ]; then
+                    if [ "${slot_ipv4[$s_check]}" = "$PARSED_IP4" ]; then
+                      duplicato=1
+                      break
+                    fi
+                  fi
+                fi
+              done
+
+              if [ "$duplicato" -eq 1 ]; then
+                echo "  [Slot $s] Sostituto $PARSED_CONTAINER ha un IP duplicato con un nodo OK. Tengo il container attuale."
+                rimuovi_nodo_container "$PARSED_CONTAINER"
+                continue
+              fi
+
+              echo "  [Slot $s] Rimpiazzo completato! Rimuovo il vecchio container ${slot_container[$s]} ed imposto il nuovo $PARSED_CONTAINER"
+              rimuovi_nodo_container "${slot_container[$s]}"
+
+              slot_container[$s]=$PARSED_CONTAINER
+              slot_porta[$s]=$PARSED_PORT
+              slot_ipv4[$s]=$PARSED_IP4
+              slot_ipv6[$s]=$PARSED_IP6
+              slot_pronto[$s]=$PARSED_TPRONTO
+
+              aggiorna_esiti_slot
+            done
+
+            echo ""
+            echo "Stato slot aggiornato dopo ondata $ONDATA:"
+            for s in $(seq 1 "$NODI_NECESSARI"); do
+              echo "  [Slot $s] Porta ${slot_porta[$s]}: Stato=${slot_status[$s]} (IPv4: ${slot_ipv4[$s]:-NESSUNO} | IPv6: ${slot_ipv6[$s]:-NESSUNO})"
+            done
           done
 
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
-          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot con i requisiti richiesti. Si prosegue comunque: gli slot mancanti restano non registrati e verranno saltati dallo scraper."
-          fi
-          echo "=== STEP 1 completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            if [ -n "${ipv4_di_slot[$slot]:-}" ]; then
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
-            else
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
-            fi
-          done
-        env:
-          CONTAINER_PREFIX: step1
-          MODALITA_LABEL: permissivo, solo IPv6 univoco
+          echo "======================================================"
+          echo "RISULTATO FINALE ($PREFIX_CONTAINER): Generati comunque tutti gli slot."
+          echo "Tempo impiegato: ${ELAPSED_FINALE}s (budget: ${BUDGET_TOTALE_SECONDI}s)"
+          echo "======================================================"
+
+          {
+            echo "{"
+            for s in $(seq 1 "$NODI_NECESSARI"); do
+              comma=","
+              if [ "$s" -eq "$NODI_NECESSARI" ]; then
+                comma=""
+              fi
+              printf '  "%d": {"container": "%s", "porta": %s, "ipv4": "%s", "ipv6": "%s"}%s\n' \
+                "$s" "${slot_container[$s]:-VUOTO}" "${slot_porta[$s]:-0}" \
+                "${slot_ipv4[$s]:-NESSUNO}" "${slot_ipv6[$s]:-NESSUNO}" "$comma"
+            done
+            echo "}"
+          } > "$MAPPA_OUTPUT"
+
+          echo ""
+          echo "Mappa nodo->porta scritta in: $MAPPA_OUTPUT"
+          cat "$MAPPA_OUTPUT"
+
+          echo ""
+          UNIVOCI_V6=$(for s in $(seq 1 "$NODI_NECESSARI"); do echo "${slot_ipv6[$s]:-VUOTO}"; done | sort -u | wc -l)
+          echo "=== IPv6 univoci finali ottenuti: $UNIVOCI_V6 / $NODI_NECESSARI ==="
+          SCRIPT_EOF
+          chmod +x registra_warp.sh
+
+      - name: Registrazione Nodi WARP Dual-Stack - STEP 1 (Solo IPv6 Unici)
+        run: |
+          NODI_NECESSARI="$NODI_NECESSARI" \
+          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
+          DELAY_MIN="$WARP_DELAY_MIN" \
+          DELAY_MAX="$WARP_DELAY_MAX" \
+          PORTA_BASE="$WARP_PORTA_BASE" \
+          PREFIX_CONTAINER="warpstep1" \
+          MAPPA_OUTPUT="/tmp/warp_node_map_step1.json" \
+          bash registra_warp.sh
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -320,8 +457,6 @@ jobs:
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
-
-          # Suddivisione matematica statica (Chunking) per performance ottimali
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
               with open(f"/tmp/step1_queue_{i}.json", "w") as f:
@@ -333,11 +468,6 @@ jobs:
       - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
         run: |
           cat << 'EOF' > extraction_utils.py
-          """
-          Modulo condiviso tra Step 1 e Step 2.
-          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
-          retry, validazione WAF o altra logica di scraping.
-          """
           import re
           from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -416,7 +546,7 @@ jobs:
                   return None
 
               page_parts = urlsplit(page_url)
-              same_path = (parts.netloc == page_parts.netloc and
+              same_path = (parts.netloc == page_parts.netloc attendee and
                            parts.path.rstrip("/") == page_parts.path.rstrip("/"))
 
               if same_path and parts.fragment and not parts.query:
@@ -483,16 +613,12 @@ jobs:
       - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
         run: |
           cat << 'EOF' > nugget_extractor.py
-          """
-          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
-          """
           import json
           import re
           import os
           import time
           import asyncio
           import difflib
-
           from google import genai
 
           MODEL_NAME = "gemini-3.1-flash-live-preview"
@@ -804,6 +930,9 @@ jobs:
 
           _jsonl_lock = asyncio.Lock()
 
+          # Righe già lette, per singolo file sorgente (uno per nodo scraper).
+          # Ogni nodo scrive SOLO sul proprio file, quindi qui non serve alcun
+          # lock tra processi: leggiamo in sola lettura file scritti da altri PID.
           righe_lette_per_file = {}
 
 
@@ -830,6 +959,10 @@ jobs:
 
 
           def leggi_righe_nuove():
+              """
+              Scansiona tutti i file scraped_content_node_*.jsonl (uno per nodo) e
+              restituisce solo le righe nuove non ancora viste, per ciascun file.
+              """
               righe_nuove_totali = []
               for filename in sorted(glob.glob(SCRAPED_CONTENT_GLOB)):
                   try:
@@ -934,15 +1067,36 @@ jobs:
           import json
           import re
           from bs4 import BeautifulSoup
-          from curl_cffi import requests
+          from curl_cffi import requests, CurlOpt
           from extraction_utils import html_to_clean_markdown
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
 
+          # ---------------------------------------------------------------------
+          # Risoluzione porta del nodo tramite mappa dinamica generata da
+          # registra_warp.sh. Non si assume PIU' una porta fissa (40000 + node_id):
+          # la registrazione WARP puo' aver richiesto piu' ondate di retry, quindi
+          # la porta effettiva del nodo logico "node_id" e' quella scritta nella
+          # mappa, non una formula statica.
+          # ---------------------------------------------------------------------
+          WARP_MAP_PATH = os.environ.get("WARP_MAP_PATH", "/tmp/warp_node_map_step1.json")
+          with open(WARP_MAP_PATH, "r", encoding="utf-8") as f:
+              warp_map = json.load(f)
+
+          nodo_info = warp_map.get(str(node_id))
+          if nodo_info is None:
+              print(f"[NODO {node_id}] Nessuna voce nella mappa WARP {WARP_MAP_PATH}. Uscita.", flush=True)
+              sys.exit(0)
+
+          ACTIVE_PORT = int(nodo_info["porta"])
+          EXPECTED_IPV4 = nodo_info.get("ipv4", "")
+          EXPECTED_IPV6 = nodo_info.get("ipv6", "")
+
+          # File dedicato per nodo: nessuna scrittura condivisa tra processi paralleli,
+          # zero rischio di interleaving o contesa sul filesystem.
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
 
 
@@ -951,21 +1105,38 @@ jobs:
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
+                      # api64.ipify.org risolve dual-stack. Proviamo prima con preferenza IPv6 nativa tramite CurlOpt.IPRESOLVE: 2
+                      test_session.curl_options = {CurlOpt.IPRESOLVE: 2}
                       resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
                       if resp.status_code == 200:
                           ip_address = resp.json().get("ip", "Sconosciuto")
                           return True, ip_address
-                  except: pass
+                  except:
+                      try:
+                          # Fallback ad IPv4 usando CurlOpt.IPRESOLVE: 1
+                          test_session.curl_options = {CurlOpt.IPRESOLVE: 1}
+                          resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
+                          if resp.status_code == 200:
+                              ip_address = resp.json().get("ip", "Sconosciuto")
+                              return True, ip_address
+                      except: pass
                   time.sleep(delay)
               return False, None
 
           def validate_html(html, url, status_code):
+              # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le frasi esatte
+              # di due pagine di blocco Cloudflare/Google che passavano il controllo precedente
+              # ("Robot Challenge Screen" / "Checking the site connection security" da
+              # katieparla.com e passportindex.org; "unusual traffic from your computer
+              # network" da Google) senza intaccare nessuna delle frasi originali.
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
               if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
 
               low_html = html.lower()
 
+              # Controllo aggiuntivo sul <title>: segnale ad alta confidenza, indipendente
+              # dal testo visibile, basso rischio di falsi positivi.
               title_match = re.search(r"<title[^>]*>(.*?)</title>", low_html, re.DOTALL)
               if title_match:
                   title_text = title_match.group(1).strip()
@@ -1006,9 +1177,11 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
+          # Esegui il controllo e registra l'IP di uscita
           is_active, outbound_ip = verify_proxy_active(ACTIVE_PORT)
           if not is_active: sys.exit(0)
-          print(f"[NODO {node_id}] Proxy attivo! IP di uscita utilizzato: {outbound_ip}", flush=True)
+          print(f"[NODO {node_id}] Proxy attivo su porta {ACTIVE_PORT}! IP di uscita utilizzato: {outbound_ip} "
+                f"(atteso IPv4: {EXPECTED_IPV4} | IPv6 nodo: {EXPECTED_IPV6})", flush=True)
 
           queue_file = f"/tmp/step1_queue_{node_id}.json"
           if not os.path.exists(queue_file): sys.exit(0)
@@ -1036,25 +1209,45 @@ jobs:
                   continue
 
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
+              
+              is_ok = False
+              err_msg = ""
+              # Tentativo prioritario ed esclusivo in IPv6 per siti dual-stack
               try:
+                  session.curl_options = {CurlOpt.IPRESOLVE: 2}
                   resp = session.get(url, timeout=12)
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-
                   if is_ok:
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          soup = BeautifulSoup(resp.text, 'html.parser')
-                          text = soup.get_text(separator=' ', strip=True)
-                      else:
-                          text = html_to_clean_markdown(resp.text, url)
-                          pubblica_contenuto_scrapato(url, text, "step1")
-
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
-                      failed_targets.append(url)
+                      print(f"[NODO {node_id}] -> Successo in IPv6!", flush=True)
               except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
+                  is_ok = False
+                  err_msg = f"Errore rete IPv6: {e}"
+
+              # Fallback trasparente in IPv4 se e solo se l'IPv6 fallisce
+              if not is_ok:
+                  print(f"[NODO {node_id}] -> IPv6 non supportato o fallito ({err_msg}). Provo fallback IPv4...", flush=True)
+                  try:
+                      session.curl_options = {CurlOpt.IPRESOLVE: 1}
+                      resp = session.get(url, timeout=12)
+                      is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
+                      if is_ok:
+                          print(f"[NODO {node_id}] -> Successo in IPv4!", flush=True)
+                  except Exception as e:
+                      is_ok = False
+                      err_msg = f"Errore rete IPv4: {e}"
+
+              if is_ok:
+                  if any(site in url for site in DIAGNOSTIC_SITES):
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      text = soup.get_text(separator=' ', strip=True)
+                  else:
+                      # Testo completo, senza troncamento, già pronto in Markdown per l'LLM.
+                      text = html_to_clean_markdown(resp.text, url)
+                      pubblica_contenuto_scrapato(url, text, "step1")
+
+                  results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
+              else:
+                  print(f"[NODO {node_id}] -> Bloccato anche in fallback IPv4: {err_msg}", flush=True)
                   failed_targets.append(url)
 
               time.sleep(random.uniform(1.0, 2.0))
@@ -1071,6 +1264,10 @@ jobs:
 
       - name: Esecuzione Scraping Parallelo - STEP 1
         run: |
+          if [ ! -f /tmp/warp_node_map_step1.json ]; then
+            echo "Mappa WARP Step 1 non trovata. Impossibile proseguire con lo Step 1."
+            exit 1
+          fi
           echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
           touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
           tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
@@ -1078,7 +1275,7 @@ jobs:
 
           PIDS=()
           for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
+            WARP_MAP_PATH="/tmp/warp_node_map_step1.json" python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
             PIDS+=($!)
             sleep 1.5
           done
@@ -1086,271 +1283,30 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Pulizia Container WARP STEP 1 (libera le porte per il nuovo setup)
-        run: |
-          echo "Arresto e rimozione dei 6 container WARP dello Step 1, per liberare le porte 40001-40006..."
+          # === DIAGNOSTICA CRITICA SINCRO: Stampa i log dei nodi se lo Step 1 termina vuoto o crasha ===
+          echo "=== VERIFICA LOGS INTERNI NODI STEP 1 ==="
           for i in {1..6}; do
-            docker rm -f "warp_step1_slot${i}" || true
+            echo "--- LOG FILENAME: node${i}_step1.log ---"
+            cat node${i}_step1.log || true
           done
-          echo "Container Step 1 rimossi."
 
-          # Cooldown deliberato: registrare 6 nuovi device WARP subito dopo aver
-          # gia' registrato 6 device (Step 1) sullo stesso IP host fa scattare
-          # un tasso di timeout molto piu' alto in ondata 1 (osservato empiricamente:
-          # 5/6 falliti al primo tentativo quando il gap era di pochi secondi).
-          # Un cooldown piu' ampio riduce il burst percepito da Cloudflare.
-          echo "Cooldown di 10s prima del setup WARP Step 2..."
-          sleep 10
-
-      - name: Setup Container WARP STEP 2 (Nuovi IP) (client ufficiale, rigoroso, IPv4+IPv6 univoci)
+      - name: Rigenerazione Pulita Nodi WARP per lo STEP 2 (Nuovi IPv4+IPv6 Unici)
+        if: always()
         run: |
-          set -o pipefail
-          START_TS=$(date +%s)
+          echo 'Eliminazione container WARP dello Step 1 per forzare nuove registrazioni con nuovi IP...'
+          docker ps -a --format '{{.Names}}' | grep '^warpstep1_' | xargs -r docker rm -f || true
 
-          NODI_NECESSARI=6
-          MAX_ONDATE=3
-          DELAY_MIN=2
-          DELAY_MAX=3
-          PORTA_BASE=40000
-          # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
-          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
-          # un IPv4 duplicato tra nodi NON viene scartato, perche' il traffico verso
-          # target dual-stack passera' comunque quasi sempre da IPv6 (nativo, nessuna
-          # modifica necessaria: e' il sistema/WireGuard a preferirlo via Happy Eyeballs).
-          RICHIEDI_IPV4_UNIVOCO=1
-
-          declare -A ipv4_di_slot
-          declare -A ipv6_di_slot
-          declare -A ipv4_visti
-          declare -A ipv6_visti
-          SLOT_OK=()
-
-          avvia_e_verifica_nodo() {
-            local slot=$1
-            local port=$2
-            local out_file=$3
-            local ip4=""
-            local ip6=""
-            local t_pronto="0"
-            local err_msg=""
-            local t_start
-            t_start=$(date +%s)
-
-            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${t_pronto}|${err_msg}" > "$out_file"' EXIT
-
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
-
-            local run_out
-            if ! run_out=$(docker run -d \
-              --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
-              --cap-add NET_ADMIN \
-              --cap-add MKNOD \
-              --cap-add AUDIT_WRITE \
-              --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-              --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-              -e WARP_SLEEP=1 \
-              -p "$port":1080 \
-              caomingjun/warp:latest 2>&1); then
-              err_msg="Docker run fallito: $(echo "$run_out" | tr -d '\r\n')"
-              return 0
-            fi
-
-            local pronto=0
-            local trace=""
-            for _ in $(seq 1 50); do
-              trace=$(curl -s --max-time 1 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-                pronto=1
-                t_pronto=$(( $(date +%s) - t_start ))
-                break
-              fi
-              sleep 0.5
-            done
-
-            if [ "$pronto" -eq 1 ]; then
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
-              (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
-              wait
-
-              ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-              rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
-
-              if [ -z "$ip4" ]; then
-                ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
-              fi
-              if [ -z "$ip6" ]; then
-                ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-              fi
-            else
-              err_msg="Timeout WARP (warp=on non rilevato dopo 25s)"
-            fi
-
-            return 0
-          }
-
-          rimuovi_nodo_slot() {
-            local slot=$1
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
-          }
-
-          leggi_esito() {
-            local esito_file=$1
-            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_TPRONTO PARSED_ERR < "$esito_file"
-          }
-
-          # Valuta gli esiti. In modalita' permissiva (RICHIEDI_IPV4_UNIVOCO=0) la
-          # dedup e la scarto avvengono SOLO su IPv6; un IPv4 duplicato tra nodi
-          # viene accettato e tenuto, non causa retry. In modalita' rigorosa
-          # entrambi devono essere univoci o lo slot viene rifatto.
-          elabora_esiti() {
-            SLOT_DA_RIPROVARE=()
-            local file_list=("$@")
-            for esito_file in "${file_list[@]}"; do
-              if [ ! -f "$esito_file" ]; then
-                echo "  FALLITO: nessun report generato ($esito_file)"
-                continue
-              fi
-
-              leggi_esito "$esito_file"
-
-              if [ -n "$PARSED_ERR" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 duplicato con slot ${ipv6_visti[$PARSED_IP6]})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ "$RICHIEDI_IPV4_UNIVOCO" = "1" ]; then
-                if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-
-                if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-              elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva, il traffico passera' comunque da IPv6)"
-              fi
-
-              ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
-              ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
-              ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
-              ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
-              SLOT_OK+=("$PARSED_SLOT")
-              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (pronto in ${PARSED_TPRONTO}s | IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
-            done
-          }
-
-          echo "=== STEP 2 (Nuovi IP) - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
-          ondata1_pids=()
-          ondata1_files=()
-
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            port=$((PORTA_BASE + slot))
-            out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-            ondata1_files+=("$out")
-
-            avvia_e_verifica_nodo "$slot" "$port" "$out" &
-            ondata1_pids+=($!)
-
-            if [ "$slot" -lt "$NODI_NECESSARI" ]; then
-              DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
-              echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
-              sleep "$DELAY"
-            else
-              echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata 1."
-            fi
-          done
-
-          echo "Attendo che tutti gli slot completino la verifica..."
-          for pid in "${ondata1_pids[@]}"; do
-            wait "$pid" 2>/dev/null || true
-          done
-
-          echo ""
-          echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA 1 ==="
-          elabora_esiti "${ondata1_files[@]}"
-          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
-
-          ONDATA=1
-          SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
-            echo "Cooldown 4s per prevenire rate-limit di registrazione..."
-            sleep 4
-
-            ONDATA=$((ONDATA + 1))
-            echo ""
-            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
-
-            retry_pids=()
-            retry_files=()
-
-            n_mancanti=${#SLOT_MANCANTI[@]}
-            idx=0
-            for slot in "${SLOT_MANCANTI[@]}"; do
-              idx=$((idx + 1))
-              port=$((PORTA_BASE + slot))
-              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-              retry_files+=("$out")
-
-              avvia_e_verifica_nodo "$slot" "$port" "$out" &
-              retry_pids+=($!)
-
-              if [ "$idx" -lt "$n_mancanti" ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()+'"$ONDATA"'); print min+rand()*(max-min)}')
-                sleep "$DELAY"
-              fi
-            done
-
-            for pid in "${retry_pids[@]}"; do
-              wait "$pid" 2>/dev/null || true
-            done
-
-            echo "=== STEP 2 (Nuovi IP) - ESITI ONDATA $ONDATA ==="
-            elabora_esiti "${retry_files[@]}"
-            SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-            echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
-          done
-
-          ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
-          echo ""
-          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot con i requisiti richiesti. Si prosegue comunque: gli slot mancanti restano non registrati e verranno saltati dallo scraper."
-          fi
-          echo "=== STEP 2 (Nuovi IP) completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            if [ -n "${ipv4_di_slot[$slot]:-}" ]; then
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
-            else
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
-            fi
-          done
-        env:
-          CONTAINER_PREFIX: step2
-          MODALITA_LABEL: rigoroso, IPv4+IPv6 univoci
+          NODI_NECESSARI="$NODI_NECESSARI" \
+          BUDGET_TOTALE_SECONDI="$WARP_BUDGET_TOTALE_SECONDI" \
+          DELAY_MIN="$WARP_DELAY_MIN" \
+          DELAY_MAX="$WARP_DELAY_MAX" \
+          PORTA_BASE="$WARP_PORTA_BASE" \
+          PREFIX_CONTAINER="warpstep2" \
+          MAPPA_OUTPUT="/tmp/warp_node_map_step2.json" \
+          bash registra_warp.sh
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
+        if: always()
         run: |
           cat << 'EOF' > m2_step2_setup.py
           import json
@@ -1376,6 +1332,7 @@ jobs:
           python -u m2_step2_setup.py
 
       - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
+        if: always()
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -1391,8 +1348,25 @@ jobs:
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
 
+          # ---------------------------------------------------------------------
+          # Stessa risoluzione dinamica porta/IP dello Step 1, ma sulla mappa
+          # rigenerata per lo Step 2 (nuovi container, nuovi IPv4/IPv6 unici).
+          # ---------------------------------------------------------------------
+          WARP_MAP_PATH = os.environ.get("WARP_MAP_PATH", "/tmp/warp_node_map_step2.json")
+          with open(WARP_MAP_PATH, "r", encoding="utf-8") as f:
+              warp_map = json.load(f)
+
+          nodo_info = warp_map.get(str(node_id))
+          if nodo_info is None:
+              print(f"[NODO {node_id}] Nessuna voce nella mappa WARP {WARP_MAP_PATH}. Uscita.", flush=True)
+              sys.exit(0)
+
+          INITIAL_PORT = int(nodo_info["porta"])
+          EXPECTED_IPV4 = nodo_info.get("ipv4", "")
+          EXPECTED_IPV6 = nodo_info.get("ipv6", "")
+
+          # File dedicato per nodo: stesso principio dello Step 1.
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
 
           def get_query_from_url(url, default="migliore carbonara roma"):
@@ -1431,6 +1405,7 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
+              # Profilo con noise attivo di default e path per font corretti (identico alla baseline).
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -1439,8 +1414,11 @@ jobs:
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping) "
+                    f"su porta {INITIAL_PORT} (atteso IPv4: {EXPECTED_IPV4} | IPv6 nodo: {EXPECTED_IPV6})...",
+                    flush=True)
               try:
+                  # socks5:// forza Chromium ad eseguire remotamente la risoluzione DNS sul proxy WARP
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
@@ -1452,6 +1430,7 @@ jobs:
                   )
                   page = await context.new_page()
 
+                  # Rilevamento dell'IP di uscita effettivo del browser
                   try:
                       await page.goto("https://api64.ipify.org?format=json", timeout=12000)
                       page_text = await page.locator("body").inner_text()
@@ -1461,6 +1440,7 @@ jobs:
                   except Exception as e:
                       print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
 
+                  # WARMUP Integrato - Creazione di cronologia valida
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
@@ -1477,6 +1457,7 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
 
+                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -1507,19 +1488,25 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
+                      # --- SILENZIO RADIO ---
+                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
 
                       await asyncio.sleep(6)
 
+                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
 
+                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
 
+                      # Controllo sul <title>: segnale ad alta confidenza, indipendente
+                      # dal testo visibile, basso rischio di falsi positivi.
                       title_blocked = False
                       title_reason = ""
                       if soup.title and soup.title.string:
@@ -1532,9 +1519,19 @@ jobs:
                                   title_reason = f"WAF nel titolo: {wt}"
                                   break
 
+                      # Testo completo, senza troncamento, in Markdown pulito per l'LLM.
+                      # Il check di validazione gira sul testo GIA' pulito, non sull'HTML
+                      # grezzo troncato: una pagina di blocco corta resta corta anche dopo
+                      # la pulizia, invece di essere gonfiata da tag/script residui.
                       text_full = html_to_clean_markdown(raw_html, url)
                       text_lower_full = text_full.lower()
 
+                      # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le
+                      # frasi esatte di pagine di blocco che passavano il controllo
+                      # precedente ("Robot Challenge Screen" / "Checking the site
+                      # connection security" da Cloudflare; "unusual traffic from your
+                      # computer network" da Google), senza rimuovere nessuna delle
+                      # frasi originali.
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -1573,11 +1570,10 @@ jobs:
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         if: always()
         run: |
-          if [ ! -f "m2_step2.py" ]; then
-            echo "::warning::m2_step2.py non trovato: un passo precedente (probabilmente il setup WARP Step 2) e' fallito. Salto lo scraping Step 2."
+          if [ ! -f /tmp/warp_node_map_step2.json ]; then
+            echo "Mappa WARP Step 2 non trovata. Skip dello Step 2."
             exit 0
           fi
-
           echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
@@ -1585,7 +1581,7 @@ jobs:
 
           PIDS=()
           for i in {1..6}; do
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
+            WARP_MAP_PATH="/tmp/warp_node_map_step2.json" python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
             PIDS+=($!)
             sleep 1.5
           done
@@ -1593,9 +1589,14 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
+          # === DIAGNOSTICA CRITICA SINCRO: Stampa i log dei nodi se lo Step 2 termina vuoto o crasha ===
+          echo "=== VERIFICA LOGS INTERNI NODI STEP 2 ==="
           for i in {1..6}; do
-            docker rm -f "warp_step2_slot${i}" || true
+            echo "--- LOG FILENAME: node${i}_step2.log ---"
+            cat node${i}_step2.log || true
           done
+
+          docker ps -a --format '{{.Names}}' | grep -E '^warpstep(1|2)_' | xargs -r docker rm -f || true
 
           touch output_node_1_step1.txt output_node_1_step2.txt \
                 output_node_2_step1.txt output_node_2_step2.txt \
@@ -1640,73 +1641,78 @@ jobs:
         if: always()
         run: |
           cat << 'EOF' > merge_nuggets.py
-          import json
-          import os
-          import glob
+import json
+import os
+import glob
 
-          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
+jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
 
-          merged_nuggets = []
-          per_file_stats = {}
+merged_nuggets = []
+per_file_stats = {}
 
-          for filename in jsonl_files:
-              count = 0
-              corrotte = 0
-              try:
-                  with open(filename, "r", encoding="utf-8") as f:
-                      for riga in f:
-                          riga = riga.strip()
-                          if not riga:
-                              continue
-                          try:
-                              nugget = json.loads(riga)
-                              merged_nuggets.append(nugget)
-                              count += 1
-                          except json.JSONDecodeError:
-                              corrotte += 1
-              except Exception as e:
-                  print(f"Errore lettura {filename}: {e}", flush=True)
+for filename in jsonl_files:
+    count = 0
+    corrotte = 0
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            for riga in f:
+                riga = riga.strip()
+                if not riga:
+                    continue
+                try:
+                    nugget = json.loads(riga)
+                    merged_nuggets.append(nugget)
+                    count += 1
+                except json.JSONDecodeError:
+                    corrotte += 1
+    except Exception as e:
+        print(f"Errore lettura {filename}: {e}", flush=True)
 
-              per_file_stats[filename] = count
-              if corrotte:
-                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
+    per_file_stats[filename] = count
+    if corrotte:
+        print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
 
-          seen = set()
-          nuggets_deduplicati = []
-          for n in merged_nuggets:
-              fact_norm = (n.get("fact") or "").strip().lower()
-              url_norm = (n.get("source_url") or "").strip().lower()
-              key = (fact_norm, url_norm)
-              if key in seen:
-                  continue
-              seen.add(key)
-              nuggets_deduplicati.append(n)
+seen = set()
+nuggets_deduplicati = []
+for n in merged_nuggets:
+    fact_norm = (n.get("fact") or "").strip().lower()
+    url_norm = (n.get("source_url") or "").strip().lower()
+    key = (fact_norm, url_norm)
+    if key in seen:
+        continue
+    seen.add(key)
+    nuggets_deduplicati.append(n)
 
-          confidence_counts = {"high": 0, "medium": 0, "low": 0}
-          for n in nuggets_deduplicati:
-              c = n.get("confidence", "low")
-              if c in confidence_counts:
-                  confidence_counts[c] += 1
+confidence_counts = {"high": 0, "medium": 0, "low": 0}
+for n in nuggets_deduplicati:
+    c = n.get("confidence", "low")
+    if c in confidence_counts:
+        confidence_counts[c] += 1
 
-          output_finale = {
-              "stats": {
-                  "file_jsonl_trovati": len(jsonl_files),
-                  "totale_nugget_grezzi": len(merged_nuggets),
-                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
-                  "per_file": per_file_stats,
-                  "per_confidence": confidence_counts
-              },
-              "nuggets": nuggets_deduplicati
-          }
+output_finale = {
+    "stats": {
+        "file_jsonl_trovati": len(jsonl_files),
+        "totale_nugget_grezzi": len(merged_nuggets),
+        "totale_nugget_deduplicati": len(nuggets_deduplicati),
+        "per_file": per_file_stats,
+        "per_confidence": confidence_counts
+    },
+    "nuggets": nuggets_deduplicati
+}
 
-          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
-              json.dump(output_finale, f, indent=2, ensure_ascii=False)
+with open("nuggets_finale.json", "w", encoding="utf-8") as f:
+    json.dump(output_finale, f, indent=2, ensure_ascii=False)
 
-          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
-                f"salvati in nuggets_finale.json", flush=True)
-          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
-          EOF
+print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
+      f"salvati in nuggets_finale.json", flush=True)
+print(f"Distribuzione confidence: {confidence_counts}", flush=True)
+EOF
           python -u merge_nuggets.py
+
+      - name: Pulizia Finale Container WARP
+        if: always()
+        run: |
+          docker ps -a --format '{{.Names}}' | grep -E '^warpstep(1|2)_' | xargs -r docker rm -f || true
 
       - name: Upload Artifact Macchina 2 (Testo Grezzo)
         if: always()
