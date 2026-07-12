@@ -44,6 +44,9 @@ jobs:
         run: |
           python -m cloakbrowser install
 
+      - name: Pull immagine WARP (client ufficiale)
+        run: docker pull caomingjun/warp:latest
+
       - name: Setup Container WARP STEP 1 (client ufficiale, permissivo, solo IPv6 univoco)
         run: |
           set -o pipefail
@@ -51,8 +54,8 @@ jobs:
 
           NODI_NECESSARI=6
           MAX_ONDATE=3
-          DELAY_MIN=0.5
-          DELAY_MAX=2
+          DELAY_MIN=2
+          DELAY_MAX=3
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
           # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6;
@@ -1385,6 +1388,7 @@ jobs:
           import os
           import json
           from urllib.parse import urlparse, parse_qs
+          from curl_cffi import requests
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
           from extraction_utils import html_to_clean_markdown
@@ -1425,6 +1429,27 @@ jobs:
               with open(queue_file, "r") as f: targets = json.load(f)
               if not targets:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
+                  return
+
+              # Verifica rapida e leggera che il proxy sia vivo PRIMA di avviare
+              # l'intero browser: se lo slot WARP non si e' mai registrato (nodo
+              # escluso in precedenza), evita di sprecare tempo dentro Playwright
+              # con un proxy fantasma.
+              proxy_vivo = False
+              try:
+                  test_session = requests.Session(impersonate="chrome120")
+                  test_session.proxies = {"http": f"socks5h://127.0.0.1:{INITIAL_PORT}", "https": f"socks5h://127.0.0.1:{INITIAL_PORT}"}
+                  resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
+                  if resp.status_code == 200:
+                      proxy_vivo = True
+              except Exception:
+                  pass
+
+              if not proxy_vivo:
+                  print(f"[NODO {node_id}] Proxy sulla porta {INITIAL_PORT} non raggiungibile: "
+                        f"slot WARP non registrato per questo nodo. Salto lo Step 2.", flush=True)
+                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
+                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2 SALTATO (proxy WARP non disponibile)\n{'#'*60}\n")
                   return
 
               home_dir = os.path.expanduser("~")
