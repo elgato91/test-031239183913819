@@ -1505,9 +1505,9 @@ jobs:
                   except Exception as e:
                       print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
 
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
+                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
+                  await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
 
               except Exception as e:
