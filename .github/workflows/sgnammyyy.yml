@@ -1116,7 +1116,7 @@ jobs:
           # 5/6 falliti al primo tentativo quando il gap era di pochi secondi).
           # Un cooldown piu' ampio riduce il burst percepito da Cloudflare.
           echo "Cooldown di 10s prima del setup WARP Step 2..."
-          sleep 10
+          sleep 30
 
       - name: Setup Container WARP STEP 2 (Nuovi IP) (client ufficiale, rigoroso, IPv4+IPv6 univoci)
         run: |
