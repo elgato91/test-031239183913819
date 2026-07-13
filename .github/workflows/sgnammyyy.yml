@@ -1408,7 +1408,7 @@ jobs:
           import json
           from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests
-          from cloakbrowser import launch_persistent_context_async
+          from cloakbrowser import launch_context_async
           from bs4 import BeautifulSoup
           from extraction_utils import html_to_clean_markdown
 
@@ -1482,7 +1482,7 @@ jobs:
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
-                  context = await launch_persistent_context_async(
+                  context = await launch_context_async(
                       profile_dir,
                       headless=False,
                       humanize=True,
