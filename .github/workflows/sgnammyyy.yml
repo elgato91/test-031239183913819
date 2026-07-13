@@ -1480,9 +1480,6 @@ jobs:
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=5000",
-                  "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080",
-                  "--fingerprint-platform=windows",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
@@ -1493,9 +1490,7 @@ jobs:
                       headless=False,
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                      viewport={"width": 1920, "height": 1080},
                       geoip=True,
-                      permissions=[],
                       args=base_args
                   )
                   page = await context.new_page()
