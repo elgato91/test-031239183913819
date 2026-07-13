@@ -1477,8 +1477,7 @@ jobs:
 
               base_args = [
                   "--no-sandbox",
-                  "--disable-dev-shm-usage",
-                  "--fingerprint-storage-quota=5000"
+                  "--disable-dev-shm-usage"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
