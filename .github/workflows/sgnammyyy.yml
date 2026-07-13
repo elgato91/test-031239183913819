@@ -1116,7 +1116,7 @@ jobs:
           # 5/6 falliti al primo tentativo quando il gap era di pochi secondi).
           # Un cooldown piu' ampio riduce il burst percepito da Cloudflare.
           echo "Cooldown di 10s prima del setup WARP Step 2..."
-          sleep 30
+          sleep 50
 
       - name: Setup Container WARP STEP 2 (Nuovi IP) (client ufficiale, rigoroso, IPv4+IPv6 univoci)
         run: |
@@ -1483,7 +1483,7 @@ jobs:
                   "--fingerprint-noise=false",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
-                  "--fingerprint-platform=windows"
+                  "--fingerprint-platform=windows",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
@@ -1496,6 +1496,7 @@ jobs:
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       viewport={"width": 1920, "height": 1080},
                       geoip=True,
+                      permissions=[],
                       args=base_args
                   )
                   page = await context.new_page()
