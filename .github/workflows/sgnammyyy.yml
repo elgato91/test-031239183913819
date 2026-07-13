@@ -1493,14 +1493,7 @@ jobs:
                   page = await context.new_page()
 
                   try:
-                      await page.goto("https://api64.ipify.org?format=json", timeout=12000)
-                      page_text = await page.locator("body").inner_text()
-                      ip_json = json.loads(page_text)
-                      outbound_ip = ip_json.get("ip", "Sconosciuto")
-                      print(f"[NODO {node_id}] [STEP 2] Sessione avviata. IP di uscita CloakBrowser: {outbound_ip}", flush=True)
-                  except Exception as e:
-                      print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
-
+                
                   await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
