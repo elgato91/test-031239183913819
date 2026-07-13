@@ -1483,7 +1483,6 @@ jobs:
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
                   context = await launch_context_async(
-                      profile_dir,
                       headless=False,
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
