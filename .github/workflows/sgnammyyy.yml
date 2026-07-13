@@ -1125,9 +1125,9 @@ jobs:
 
           NODI_NECESSARI=6
           MAX_ONDATE=3
-          DELAY_MIN=2
-          DELAY_MAX=3
-          ATTESA_FINALE_SECONDI=10
+          DELAY_MIN=4
+          DELAY_MAX=6
+          ATTESA_FINALE_SECONDI=15
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
           # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
@@ -1138,7 +1138,7 @@ jobs:
           # registrazione device sia completata (err=MissingRegistration).
           # Pochi tentativi spaziati, non polling aggressivo continuo.
           MAX_TENTATIVI_REGISTRAZIONE=4
-          ATTESA_TRA_TENTATIVI_SECONDI=6
+          ATTESA_TRA_TENTATIVI_SECONDI=10
 
           declare -A ipv4_di_slot
           declare -A ipv6_di_slot
