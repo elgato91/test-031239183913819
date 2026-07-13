@@ -1482,7 +1482,7 @@ jobs:
                   "--fingerprint-storage-quota=5000",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
-                  "--fingerprint-platform=windows"
+                  "--fingerprint-platform=windows",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
