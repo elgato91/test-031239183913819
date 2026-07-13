@@ -1494,9 +1494,9 @@ jobs:
 
                   try:
                 
-                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=15000)
+                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
+                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
 
               except Exception as e:
