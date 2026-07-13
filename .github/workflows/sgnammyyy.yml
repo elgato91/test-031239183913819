@@ -1131,7 +1131,7 @@ jobs:
           PORTA_BASE=40000
           # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
           # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
-          RICHIEDI_IPV4_UNIVOCO=1
+          RICHIEDI_IPV4_UNIVOCO=0
 
           # Polling leggero anti race-condition di registrazione WARP:
           # il client warp-svc a volte tenta Connect prima che la
