@@ -1408,7 +1408,7 @@ jobs:
           import json
           from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests
-          from cloakbrowser import launch_context_async
+          from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
           from extraction_utils import html_to_clean_markdown
 
@@ -1482,7 +1482,8 @@ jobs:
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
-                  context = await launch_context_async(
+                  context = await launch_persistent_context_async(
+                      profile_dir,
                       headless=False,
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
@@ -1490,6 +1491,20 @@ jobs:
                       args=base_args
                   )
                   page = await context.new_page()
+
+                  try:
+                      await page.goto("https://api64.ipify.org?format=json", timeout=12000)
+                      page_text = await page.locator("body").inner_text()
+                      ip_json = json.loads(page_text)
+                      outbound_ip = ip_json.get("ip", "Sconosciuto")
+                      print(f"[NODO {node_id}] [STEP 2] Sessione avviata. IP di uscita CloakBrowser: {outbound_ip}", flush=True)
+                  except Exception as e:
+                      print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
+
+                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=15000)
+                  await asyncio.sleep(1)
+                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
+                  await asyncio.sleep(2)
 
               except Exception as e:
                   print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
@@ -1537,7 +1552,11 @@ jobs:
 
                       await asyncio.sleep(6)
 
-                     
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(1)
+                      await page.keyboard.press("PageDown")
+                      await asyncio.sleep(2)
+
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
 
