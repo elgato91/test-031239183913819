@@ -1479,9 +1479,7 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=5000",
-                  "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080"
+                  "--fingerprint-storage-quota=5000"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
@@ -1491,7 +1489,6 @@ jobs:
                       headless=False,
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                      viewport={"width": 1920, "height": 950},
                       geoip=True,
                       args=base_args
                   )
