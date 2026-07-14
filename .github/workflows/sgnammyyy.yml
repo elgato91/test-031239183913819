@@ -1478,7 +1478,6 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--fingerprint-storage-quota=6010",
                   "--fingerprint-platform=linux"
               ]
 
