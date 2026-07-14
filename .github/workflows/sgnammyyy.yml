@@ -1481,6 +1481,8 @@ jobs:
                   f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=5000",
                   "--fingerprint-webrtc-ip=auto",
+                  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                  "--fingerprint-noise=false",
                   "--fingerprint-platform=linux"
               ]
 
@@ -1496,6 +1498,18 @@ jobs:
                       args=base_args
                   )
                   page = await context.new_page()
+
+                  # Iniettiamo lo script per distruggere le tracce di WebDriver e CDP
+                  await page.add_init_script("""
+                      const newProto = navigator.__proto__;
+                      delete newProto.webdriver;
+                      navigator.__proto__ = newProto;
+                      for (let prop in window) {
+                          if (prop.match(/cdc_[a-zA-Z0-9]/ig)) {
+                              delete window[prop];
+                          }
+                      }
+                  """)
 
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
