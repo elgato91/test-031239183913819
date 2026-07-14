@@ -310,7 +310,7 @@ jobs:
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://norwegianroutes.com/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -1495,9 +1495,9 @@ jobs:
                   )
                   page = await context.new_page()
 
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
+                  await page.goto("https://en.wikipedia.org/wiki/Main_Page", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(1)
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=10000)
+                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
 
               except Exception as e:
