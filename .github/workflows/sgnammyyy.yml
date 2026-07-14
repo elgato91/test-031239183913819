@@ -310,7 +310,7 @@ jobs:
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://norwegianroutes.com/",
+              "https://www.lonelyplanet.com/articles/first-time-guide-to-albania",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -1486,7 +1486,6 @@ jobs:
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
                   context = await launch_persistent_context_async(
-                      profile_dir,
                       headless=False,
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
