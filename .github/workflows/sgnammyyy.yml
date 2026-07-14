@@ -1480,6 +1480,7 @@ jobs:
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=5000",
+                  --fingerprint-webrtc-ip=auto,
                   "--fingerprint-platform=linux"
               ]
 
