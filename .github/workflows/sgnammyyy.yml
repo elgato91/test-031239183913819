@@ -1478,7 +1478,7 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--fingerprint-storage-quota=500",
+                  "--fingerprint-storage-quota=6010",
                   "--fingerprint-gpu-renderer=NVIDIA GeForce RTX 3060",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080"
