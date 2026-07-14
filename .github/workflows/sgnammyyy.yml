@@ -1,38 +1,29 @@
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
-on:
+on: 
   workflow_dispatch:
 
 jobs:
   machine2_cdp_insocket:
     runs-on: ubuntu-latest
-    env:
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
-      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
-      TARGET_TOPIC: "Orvieto"
-      FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
-      - name: Installazione Font di Sistema e Windows 11 Reali
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip wget \
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
-
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
           mkdir -p ~/.local/share/fonts/windows
-
-          wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
-          unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
-
-          find /tmp/win11-fonts-extracted -type f \( -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" \) -exec cp {} ~/.local/share/fonts/windows/ \;
-
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi markdownify google-genai
+          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
           playwright install-deps chromium
 
       - name: Avvio Xvfb (Virtual Display Headful)
@@ -44,263 +35,27 @@ jobs:
         run: |
           python -m cloakbrowser install
 
-      - name: Pull immagine WARP (client ufficiale)
-        run: docker pull caomingjun/warp:latest
-
-      - name: Setup Container WARP STEP 1 (client ufficiale, permissivo, solo IPv6 univoco)
+      - name: Setup Container WARP (IPv6)
         run: |
-          set -o pipefail
-          START_TS=$(date +%s)
+          docker pull ghcr.io/kingcc/warproxy:latest
 
-          NODI_NECESSARI=6
-          MAX_ONDATE=3
-          DELAY_MIN=0.5
-          DELAY_MAX=1.5
-          ATTESA_FINALE_SECONDI=5
-          PORTA_BASE=40000
-          # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
-          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
-          RICHIEDI_IPV4_UNIVOCO=0
-
-          # Polling leggero anti race-condition di registrazione WARP:
-          # il client warp-svc a volte tenta Connect prima che la
-          # registrazione device sia completata (err=MissingRegistration).
-          # Pochi tentativi spaziati, non polling aggressivo continuo.
-          MAX_TENTATIVI_REGISTRAZIONE=4
-          ATTESA_TRA_TENTATIVI_SECONDI=6
-
-          declare -A ipv4_di_slot
-          declare -A ipv6_di_slot
-          declare -A ipv4_visti
-          declare -A ipv6_visti
-          SLOT_OK=()
-
-          # Avvia il container e basta. Nessuna verifica, nessun curl qui:
-          # la verifica avviene TUTTA INSIEME dopo che ogni nodo dell'ondata
-          # e' partito e dopo un'unica attesa finale fissa, non un polling
-          # continuo per nodo che genera carico concorrente sull'host.
-          avvia_nodo() {
-            local slot=$1
-            local port=$2
-
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
-
-            docker run -d \
-              --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
-              --cap-add NET_ADMIN \
-              --cap-add MKNOD \
-              --cap-add AUDIT_WRITE \
-              --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-              --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-              -e WARP_SLEEP=1 \
-              -p "$port":1080 \
-              caomingjun/warp:latest > /dev/null 2>&1 || true
-          }
-
-          # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
-          # parallelo tra loro (un curl a testa, non un loop di polling
-          # pesante). Include un piccolo retry interno sulla sola rilevazione
-          # di warp=on, per assorbire la race condition di registrazione
-          # (MissingRegistration) del client warp-svc appena avviato.
-          verifica_nodo() {
-            local slot=$1
-            local port=$2
-            local out_file=$3
-            local ip4=""
-            local ip6=""
-            local err_msg=""
-
-            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${err_msg}" > "$out_file"' EXIT
-
-            local trace=""
-            local tentativo=1
-            while [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; do
-              trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-
-              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-                break
-              fi
-
-              echo "  [slot $slot] tentativo $tentativo/$MAX_TENTATIVI_REGISTRAZIONE: warp=on non ancora rilevato (probabile registrazione device in corso), ritento tra ${ATTESA_TRA_TENTATIVI_SECONDI}s..."
-              tentativo=$((tentativo + 1))
-              if [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; then
-                sleep "$ATTESA_TRA_TENTATIVI_SECONDI"
-              fi
-            done
-
-            if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-              err_msg="warp=on non rilevato dopo ${MAX_TENTATIVI_REGISTRAZIONE} tentativi"
-              echo "  --- Log docker del container warp_${CONTAINER_PREFIX}_slot${slot} (ultime 30 righe) ---"
-              docker logs --tail 30 "warp_${CONTAINER_PREFIX}_slot${slot}" 2>&1 | sed 's/^/    /'
-              echo "  --- Fine log ---"
-              return 0
-            fi
-
-            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
-            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
-            wait
-
-            ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-            ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-            rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
-
-            if [ -z "$ip4" ]; then
-              ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
-            fi
-            if [ -z "$ip6" ]; then
-              ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-            fi
-
-            return 0
-          }
-
-          rimuovi_nodo_slot() {
-            local slot=$1
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
-          }
-
-          leggi_esito() {
-            local esito_file=$1
-            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_ERR < "$esito_file"
-          }
-
-          elabora_esiti() {
-            SLOT_DA_RIPROVARE=()
-            local file_list=("$@")
-            for esito_file in "${file_list[@]}"; do
-              if [ ! -f "$esito_file" ]; then
-                echo "  FALLITO: nessun report generato ($esito_file)"
-                continue
-              fi
-
-              leggi_esito "$esito_file"
-
-              if [ -n "$PARSED_ERR" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 duplicato con slot ${ipv6_visti[$PARSED_IP6]})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ "$RICHIEDI_IPV4_UNIVOCO" = "1" ]; then
-                if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-
-                if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-              elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva)"
-              fi
-
-              ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
-              ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
-              ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
-              ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
-              SLOT_OK+=("$PARSED_SLOT")
-              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
-            done
-          }
-
-          esegui_ondata() {
-            local slots=("$@")
-            local n=${#slots[@]}
-            local idx=0
-            local files=()
-
-            for slot in "${slots[@]}"; do
-              idx=$((idx + 1))
-              port=$((PORTA_BASE + slot))
-              avvia_nodo "$slot" "$port"
-
-              if [ "$idx" -lt "$n" ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
-                echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
-                sleep "$DELAY"
-              else
-                echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata."
-              fi
-            done
-
-            echo "Attesa finale di ${ATTESA_FINALE_SECONDI}s prima della verifica..."
-            sleep "$ATTESA_FINALE_SECONDI"
-
-            local pids=()
-            for slot in "${slots[@]}"; do
-              port=$((PORTA_BASE + slot))
-              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-              files+=("$out")
-              verifica_nodo "$slot" "$port" "$out" &
-              pids+=($!)
-            done
-
-            for pid in "${pids[@]}"; do
-              wait "$pid" 2>/dev/null || true
-            done
-
-            elabora_esiti "${files[@]}"
-          }
-
-          echo "=== STEP 1 - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
-          TUTTI_SLOT=($(seq 1 "$NODI_NECESSARI"))
-          esegui_ondata "${TUTTI_SLOT[@]}"
-          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
-
-          ONDATA=1
-          SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
-            echo "Cooldown 4s per prevenire rate-limit di registrazione..."
-            sleep 4
-
-            ONDATA=$((ONDATA + 1))
-            echo ""
-            echo "=== STEP 1 - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
-            esegui_ondata "${SLOT_MANCANTI[@]}"
-            SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-            echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
+          for i in {1..6}; do
+            PORT=$((40000 + i))
+            echo "Avvio container warproxy-$i sulla porta $PORT..."
+            docker run --name warproxy-$i \
+              --network host \
+              -e SOCKS5_PORT=$PORT \
+              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
+              -e VERBOSE=true \
+              -d ghcr.io/kingcc/warproxy:latest
+            sleep 0.5
           done
-
-          ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
-          echo ""
-          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si prosegue comunque."
-          fi
-          echo "=== STEP 1 completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            if [ -n "${ipv4_di_slot[$slot]:-}" ]; then
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
-            else
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
-            fi
-          done
-        env:
-          CONTAINER_PREFIX: step1
-          MODALITA_LABEL: permissivo, solo IPv6 univoco
+          
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 6
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
-          echo "::group::Scrittura m2_step1_setup.py"
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
@@ -327,7 +82,7 @@ jobs:
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
-
+          
           # Suddivisione matematica statica (Chunking) per performance ottimali
           for i in range(1, 7):
               chunk = TARGETS[i-1::6]
@@ -335,622 +90,18 @@ jobs:
                   json.dump(chunk, f)
           print("Code distribuite Step 1 generate con successo.")
           EOF
-          echo "::endgroup::"
           python -u m2_step1_setup.py
 
-      - name: Creazione Modulo Condiviso - Pulizia Link e Conversione Markdown
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
         run: |
-          echo "::group::Scrittura extraction_utils.py"
-          cat << 'EOF' > extraction_utils.py
-          """
-          Modulo condiviso tra Step 1 e Step 2.
-          Contiene SOLO logica di estrazione/pulizia: nessuna modifica a proxy,
-          retry, validazione WAF o altra logica di scraping.
-          """
-          import re
-          from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
-
-          from bs4 import BeautifulSoup
-          from markdownify import markdownify as md_convert
-
-          STRUCTURAL_TAGS_TO_STRIP = ["script", "style", "nav", "footer", "header",
-                                      "form", "noscript", "iframe", "svg"]
-
-          TRACKING_PARAMS_PREFIXES = ("utm_",)
-          TRACKING_PARAMS_EXACT = {
-              "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "mc_cid", "mc_eid",
-              "igshid", "ref", "ref_src", "ref_url", "source", "spm", "yclid",
-              "_ga", "_gl", "cmpid", "campaign_id", "ad_id", "adgroup_id",
-              "wbraid", "gbraid", "twclid", "vero_id", "trk", "trkCampaign",
-              "share", "share_id", "si"
-          }
-
-          JUNK_LINK_DOMAINS = (
-              "twitter.com", "x.com", "facebook.com", "fb.com", "instagram.com",
-              "linkedin.com/share", "linkedin.com/shareArticle", "pinterest.com",
-              "pinterest.it", "whatsapp.com", "wa.me", "t.me", "telegram.me",
-              "reddit.com/submit", "tumblr.com/share", "getpocket.com",
-              "addtoany.com", "sharethis.com", "mailto:"
-          )
-
-
-          def _is_junk_domain(netloc, full_href):
-              netloc_low = netloc.lower()
-              href_low = full_href.lower()
-              for junk in JUNK_LINK_DOMAINS:
-                  if junk in netloc_low or href_low.startswith(junk):
-                      return True
-              return False
-
-
-          def _clean_query(query_string):
-              if not query_string:
-                  return ""
-              pairs = parse_qsl(query_string, keep_blank_values=True)
-              cleaned_pairs = []
-              for key, value in pairs:
-                  key_low = key.lower()
-                  if key_low in TRACKING_PARAMS_EXACT:
-                      continue
-                  if any(key_low.startswith(pfx) for pfx in TRACKING_PARAMS_PREFIXES):
-                      continue
-                  cleaned_pairs.append((key, value))
-              return urlencode(cleaned_pairs)
-
-
-          def clean_link_href(raw_href, page_url):
-              if not raw_href:
-                  return None
-
-              raw_href = raw_href.strip()
-              if not raw_href or raw_href.startswith("javascript:"):
-                  return None
-              if raw_href.startswith("mailto:") and len(raw_href) <= len("mailto:"):
-                  return None
-
-              try:
-                  absolute = urljoin(page_url, raw_href)
-              except Exception:
-                  return None
-
-              try:
-                  parts = urlsplit(absolute)
-              except Exception:
-                  return None
-
-              if parts.scheme not in ("http", "https", "mailto"):
-                  return None
-
-              if parts.scheme == "mailto":
-                  return None
-
-              page_parts = urlsplit(page_url)
-              same_path = (parts.netloc == page_parts.netloc and
-                           parts.path.rstrip("/") == page_parts.path.rstrip("/"))
-
-              if same_path and parts.fragment and not parts.query:
-                  return None
-
-              if _is_junk_domain(parts.netloc, absolute):
-                  return None
-
-              cleaned_query = _clean_query(parts.query)
-
-              rebuilt = urlunsplit((parts.scheme, parts.netloc, parts.path,
-                                     cleaned_query, ""))
-
-              page_rebuilt_parts = urlsplit(page_url)
-              page_cleaned_query = _clean_query(page_rebuilt_parts.query)
-              page_rebuilt = urlunsplit((page_rebuilt_parts.scheme,
-                                          page_rebuilt_parts.netloc,
-                                          page_rebuilt_parts.path.rstrip("/"),
-                                          page_cleaned_query, ""))
-              rebuilt_no_trailing = urlunsplit((parts.scheme, parts.netloc,
-                                                 parts.path.rstrip("/"),
-                                                 cleaned_query, ""))
-              if rebuilt_no_trailing == page_rebuilt:
-                  return None
-
-              return rebuilt
-
-
-          def _strip_anchor_tag(a_tag):
-              a_tag.replace_with(a_tag.get_text())
-
-
-          def html_to_clean_markdown(html, page_url):
-              soup = BeautifulSoup(html, "html.parser")
-
-              for tag_name in STRUCTURAL_TAGS_TO_STRIP:
-                  for tag in soup.find_all(tag_name):
-                      tag.decompose()
-
-              for a_tag in soup.find_all("a"):
-                  href = a_tag.get("href")
-                  cleaned = clean_link_href(href, page_url)
-                  if cleaned is None:
-                      _strip_anchor_tag(a_tag)
-                  else:
-                      a_tag["href"] = cleaned
-                      for attr in list(a_tag.attrs):
-                          if attr not in ("href", "title"):
-                              del a_tag[attr]
-
-              markdown_text = md_convert(
-                  str(soup),
-                  heading_style="ATX",
-                  bullets="-",
-                  strip=["img"],
-              )
-
-              markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text)
-              markdown_text = markdown_text.strip()
-
-              return markdown_text
-          EOF
-          echo "::endgroup::"
-
-      - name: Creazione Modulo Condiviso - Estrazione Nugget via Gemini Live (Token Bucket + Multi-Key)
-        run: |
-          echo "::group::Scrittura nugget_extractor.py"
-          cat << 'EOF' > nugget_extractor.py
-          """
-          Modulo condiviso tra Step 1 e Step 2 per l'estrazione di nugget strutturati.
-          """
-          import json
-          import re
-          import os
-          import time
-          import asyncio
-          import difflib
-
-          from google import genai
-
-          MODEL_NAME = "gemini-3.1-flash-live-preview"
-
-          CONFIG_LIVE = {
-              "response_modalities": ["AUDIO"],
-              "output_audio_transcription": {}
-          }
-
-          NUGGET_TIMEOUT_SECONDS = 40.0
-
-          TPM_LIMIT_DICHIARATO = 65_000
-          TPM_SAFETY_MARGIN = 0.75
-          TPM_BUDGET = int(TPM_LIMIT_DICHIARATO * TPM_SAFETY_MARGIN)
-
-          COOLDOWN_SECONDS = 65.0
-
-          QUOTA_ERROR_MARKERS = ("exceeded your current quota", "resource_exhausted", "rate limit")
-
-          NUGGET_PROMPT_TEMPLATE = """
-          Sei un estrattore di fatti (nugget) ad alta precisione per un sistema editoriale
-          di ricerca. Il tuo compito e' leggere il TESTO SORGENTE fornito ed estrarre
-          SOLO informazioni fattuali, dati concreti o affermazioni verificabili che
-          potrebbero essere utili per un articolo editoriale sul TARGET TOPIC indicato.
-
-          REGOLE:
-          1. Estrai SOLO fatti realmente presenti nel testo. Non inventare, non
-             dedurre, non completare informazioni mancanti.
-          2. Per ogni nugget, riporta in "quote_originale" la frase o porzione di
-             testo ESATTA (verbatim, non parafrasata) da cui hai estratto il fatto.
-             Questo campo verra' verificato programmaticamente contro il testo
-             sorgente: se non corrisponde, il nugget verra' scartato.
-          3. Classifica ogni nugget in una "category" tra: prezzo, orario, evento,
-             storia, geografia, recensione, dato_statistico, contatto, altro.
-          4. Se il testo non contiene alcun fatto utile o rilevante, restituisci un
-             array vuoto [].
-          5. Non includere opinioni editoriali, pubblicita', o contenuto promozionale
-             generico privo di dati concreti.
-
-          Restituisci ESCLUSIVAMENTE un array JSON con oggetti nel formato:
-          [
-            {{"fact": "...", "category": "...", "quote_originale": "..."}}
-          ]
-          Usa il formato markdown ```json ... ```. Non aggiungere altro testo di commento.
-
-          TARGET TOPIC:
-          {topic}
-
-          URL SORGENTE:
-          {source_url}
-
-          TESTO SORGENTE:
-          {testo}
-          """
-
-
-          def _stima_token(testo):
-              if not testo:
-                  return 0
-              return max(1, len(testo) // 4)
-
-
-          class TokenBucket:
-              def __init__(self, capacity_tokens, refill_period_seconds=60.0):
-                  self.capacity = capacity_tokens
-                  self.tokens = capacity_tokens
-                  self.refill_period = refill_period_seconds
-                  self.refill_rate = capacity_tokens / refill_period_seconds
-                  self.last_refill = time.monotonic()
-                  self._lock = asyncio.Lock()
-
-              def _refill(self):
-                  now = time.monotonic()
-                  elapsed = now - self.last_refill
-                  if elapsed > 0:
-                      self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-                      self.last_refill = now
-
-              async def acquire(self, needed_tokens, label=""):
-                  needed_tokens = min(needed_tokens, self.capacity)
-                  async with self._lock:
-                      while True:
-                          self._refill()
-                          if self.tokens >= needed_tokens:
-                              self.tokens -= needed_tokens
-                              return
-                          deficit = needed_tokens - self.tokens
-                          wait_seconds = deficit / self.refill_rate
-                          wait_seconds = min(wait_seconds, 20.0)
-                          print(f"{label}[TPM-BUCKET] Budget insufficiente "
-                                f"({self.tokens:.0f}/{needed_tokens} token), attendo {wait_seconds:.1f}s...",
-                                flush=True)
-                          await asyncio.sleep(wait_seconds)
-
-
-          class GeminiKeyPool:
-              def __init__(self, api_keys):
-                  api_keys = [k for k in api_keys if k]
-                  if not api_keys:
-                      raise ValueError("Nessuna API key Gemini fornita")
-
-                  self.entries = []
-                  for key in api_keys:
-                      self.entries.append({
-                          "key": key,
-                          "client": genai.Client(api_key=key),
-                          "bucket": TokenBucket(TPM_BUDGET),
-                          "cooldown_until": 0.0,
-                      })
-                  self._idx = 0
-                  self._lock = asyncio.Lock()
-
-              async def _pick_entry(self, label=""):
-                  async with self._lock:
-                      n = len(self.entries)
-                      while True:
-                          now = time.monotonic()
-                          candidati = [(i, e) for i, e in enumerate(self.entries) if e["cooldown_until"] <= now]
-                          if candidati:
-                              for _ in range(n):
-                                  self._idx = (self._idx + 1) % n
-                                  entry = self.entries[self._idx]
-                                  if entry["cooldown_until"] <= now:
-                                      return entry
-                          prossima_liberazione = min(e["cooldown_until"] for e in self.entries)
-                          attesa = max(0.5, prossima_liberazione - now)
-                          print(f"{label}[KEY-POOL] Tutte le chiavi in cooldown, attendo {attesa:.1f}s...",
-                                flush=True)
-                          await asyncio.sleep(min(attesa, 15.0))
-
-              def _mark_cooldown(self, entry, label=""):
-                  entry["cooldown_until"] = time.monotonic() + COOLDOWN_SECONDS
-                  print(f"{label}[KEY-POOL] Chiave in cooldown per {COOLDOWN_SECONDS:.0f}s "
-                        f"(quota TPM superata)", flush=True)
-
-              async def esegui_con_pool(self, payload, timeout_seconds, label=""):
-                  entry = await self._pick_entry(label)
-                  stima = _stima_token(payload)
-                  await entry["bucket"].acquire(stima, label=label)
-
-                  accumulated_text = ""
-                  try:
-                      async def run_session():
-                          nonlocal accumulated_text
-                          async with entry["client"].aio.live.connect(model=MODEL_NAME, config=CONFIG_LIVE) as session:
-                              await session.send_realtime_input(text=payload)
-                              async for response in session.receive():
-                                  if response.server_content and response.server_content.output_transcription:
-                                      if response.server_content.output_transcription.text:
-                                          accumulated_text += response.server_content.output_transcription.text
-                                  if response.server_content and response.server_content.turn_complete:
-                                      break
-
-                      await asyncio.wait_for(run_session(), timeout=timeout_seconds)
-                      return accumulated_text.strip(), None
-
-                  except (asyncio.TimeoutError, TimeoutError):
-                      return None, "timeout"
-                  except Exception as e:
-                      err_str = str(e).lower()
-                      if any(marker in err_str for marker in QUOTA_ERROR_MARKERS):
-                          self._mark_cooldown(entry, label=label)
-                          return None, "quota"
-                      return None, f"errore: {e}"
-
-          def _estrai_json_da_risposta(raw_text):
-              if not raw_text:
-                  return None
-              match = re.search(r'```json\s*(.*?)\s*```', raw_text, re.DOTALL)
-              json_str = match.group(1) if match else raw_text
-              try:
-                  parsed = json.loads(json_str)
-                  if isinstance(parsed, list):
-                      return parsed
-              except Exception:
-                  pass
-              return None
-
-
-          def _calcola_confidence(quote_originale, testo_sorgente):
-              if not quote_originale or not testo_sorgente:
-                  return "low"
-
-              quote_norm = re.sub(r'\s+', ' ', quote_originale).strip().lower()
-              testo_norm = re.sub(r'\s+', ' ', testo_sorgente).strip().lower()
-
-              if not quote_norm:
-                  return "low"
-
-              if quote_norm in testo_norm:
-                  return "high"
-
-              finestra = len(quote_norm)
-              if finestra < 8 or len(testo_norm) < finestra:
-                  best_ratio = difflib.SequenceMatcher(None, quote_norm, testo_norm).ratio()
-              else:
-                  best_ratio = 0.0
-                  step = max(1, finestra // 2)
-                  for i in range(0, len(testo_norm) - finestra + 1, step):
-                      frammento = testo_norm[i:i + finestra]
-                      ratio = difflib.SequenceMatcher(None, quote_norm, frammento).ratio()
-                      if ratio > best_ratio:
-                          best_ratio = ratio
-                      if best_ratio > 0.95:
-                          break
-
-              if best_ratio >= 0.85:
-                  return "high"
-              elif best_ratio >= 0.60:
-                  return "medium"
-              else:
-                  return "low"
-
-
-          def scrivi_nuggets_jsonl(nuggets, jsonl_path):
-              if not nuggets:
-                  return
-              with open(jsonl_path, "a", encoding="utf-8") as f:
-                  for n in nuggets:
-                      f.write(json.dumps(n, ensure_ascii=False) + "\n")
-
-
-          async def estrai_nuggets(key_pool, source_url, testo_markdown, topic,
-                                    node_id=None, timeout_seconds=NUGGET_TIMEOUT_SECONDS,
-                                    max_key_attempts=None):
-              if not testo_markdown or len(testo_markdown.strip()) < 50:
-                  return []
-
-              label = f"[NODO {node_id}] " if node_id is not None else ""
-              payload = NUGGET_PROMPT_TEMPLATE.format(
-                  topic=topic,
-                  source_url=source_url,
-                  testo=testo_markdown
-              )
-
-              if max_key_attempts is None:
-                  max_key_attempts = len(key_pool.entries)
-
-              ultimo_motivo = None
-              for tentativo in range(max_key_attempts):
-                  accumulated_text, errore = await key_pool.esegui_con_pool(payload, timeout_seconds, label=label)
-
-                  if errore is None:
-                      parsed = _estrai_json_da_risposta(accumulated_text)
-                      if parsed is None:
-                          print(f"{label}[NUGGET] Parsing JSON fallito su {source_url}. "
-                                f"Output grezzo: {accumulated_text[:80]}...", flush=True)
-                          return None
-
-                      nuggets = []
-                      for item in parsed:
-                          if not isinstance(item, dict):
-                              continue
-                          fact = str(item.get("fact", "")).strip()
-                          quote = str(item.get("quote_originale", "")).strip()
-                          category = str(item.get("category", "altro")).strip() or "altro"
-                          if not fact:
-                              continue
-
-                          confidence = _calcola_confidence(quote, testo_markdown)
-                          nuggets.append({
-                              "fact": fact,
-                              "source_url": source_url,
-                              "category": category,
-                              "confidence": confidence,
-                              "quote_originale": quote
-                          })
-
-                      print(f"{label}[NUGGET] {len(nuggets)} nugget estratti da {source_url}", flush=True)
-                      return nuggets
-
-                  elif errore == "quota":
-                      ultimo_motivo = "quota"
-                      print(f"{label}[NUGGET] Quota superata su {source_url}, "
-                            f"provo con un'altra chiave ({tentativo + 1}/{max_key_attempts})...", flush=True)
-                      continue
-
-                  elif errore == "timeout":
-                      print(f"{label}[NUGGET] TIMEOUT {timeout_seconds}s su {source_url}.", flush=True)
-                      return None
-
-                  else:
-                      print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
-                      return None
-
-              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
-                    f"(ultimo motivo: {ultimo_motivo})", flush=True)
-              return None
-          EOF
-          echo "::endgroup::"
-
-      - name: Creazione Processo Estrattore Nugget INDIPENDENTE
-        run: |
-          echo "::group::Scrittura nugget_estrattore_standalone.py"
-          cat << 'EOF' > nugget_estrattore_standalone.py
-          import asyncio
-          import glob
-          import json
-          import os
-          import time
-
-          from nugget_extractor import GeminiKeyPool, estrai_nuggets, scrivi_nuggets_jsonl
-
-          SCRAPED_CONTENT_GLOB = "scraped_content_node_*.jsonl"
-          NUGGETS_OUTPUT_PATH = "nuggets_estrattore.jsonl"
-          SCRAPING_DONE_FLAG_PATH = "scraping_completato.flag"
-          POLL_INTERVAL_SECONDS = 2.0
-          FINAL_GRACE_SECONDS = 3.0
-          NUGGET_CONCURRENCY = 5
-          TARGET_TOPIC = os.environ.get("TARGET_TOPIC", "")
-
-          _jsonl_lock = asyncio.Lock()
-
-          righe_lette_per_file = {}
-
-
-          def carica_gemini_api_keys():
-              keys = []
-              primary = os.environ.get("GEMINI_API_KEY")
-              if primary:
-                  keys.append(primary)
-              i = 2
-              while True:
-                  k = os.environ.get(f"GEMINI_API_KEY_{i}")
-                  if not k:
-                      break
-                  keys.append(k)
-                  i += 1
-              return keys
-
-
-          async def salva_nuggets(nuggets):
-              if not nuggets:
-                  return
-              async with _jsonl_lock:
-                  scrivi_nuggets_jsonl(nuggets, NUGGETS_OUTPUT_PATH)
-
-
-          def leggi_righe_nuove():
-              righe_nuove_totali = []
-              for filename in sorted(glob.glob(SCRAPED_CONTENT_GLOB)):
-                  try:
-                      with open(filename, "r", encoding="utf-8") as f:
-                          tutte_le_righe = f.readlines()
-                  except Exception:
-                      continue
-
-                  gia_lette = righe_lette_per_file.get(filename, 0)
-                  nuove = tutte_le_righe[gia_lette:]
-                  if nuove:
-                      righe_nuove_totali.extend(nuove)
-                  righe_lette_per_file[filename] = len(tutte_le_righe)
-
-              return righe_nuove_totali
-
-
-          async def main():
-              api_keys = carica_gemini_api_keys()
-              if not api_keys:
-                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato "
-                        "immediatamente.", flush=True)
-                  return
-
-              try:
-                  key_pool = GeminiKeyPool(api_keys)
-                  print(f"[ESTRATTORE] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
-              except Exception as e:
-                  print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. "
-                        f"Processo terminato.", flush=True)
-                  return
-
-              nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
-              tasks_in_volo = []
-              ultima_riga_vista = time.monotonic()
-
-              print(f"[ESTRATTORE] Avvio polling su '{SCRAPED_CONTENT_GLOB}' "
-                    f"(ogni {POLL_INTERVAL_SECONDS:.0f}s, topic='{TARGET_TOPIC}')...", flush=True)
-
-              async def processa_riga(source_url, testo_markdown):
-                  async with nugget_semaphore:
-                      esito = await estrai_nuggets(
-                          key_pool=key_pool,
-                          source_url=source_url,
-                          testo_markdown=testo_markdown,
-                          topic=TARGET_TOPIC,
-                          node_id=None
-                      )
-                  if esito:
-                      await salva_nuggets(esito)
-
-              while True:
-                  righe_nuove = leggi_righe_nuove()
-                  if righe_nuove:
-                      ultima_riga_vista = time.monotonic()
-
-                  for riga in righe_nuove:
-                      riga = riga.strip()
-                      if not riga:
-                          continue
-                      try:
-                          record = json.loads(riga)
-                      except json.JSONDecodeError:
-                          continue
-
-                      source_url = record.get("source_url")
-                      testo_markdown = record.get("testo_markdown")
-                      if source_url and testo_markdown:
-                          print(f"[ESTRATTORE] Nuovo contenuto ricevuto: {source_url}", flush=True)
-                          tasks_in_volo.append(asyncio.create_task(processa_riga(source_url, testo_markdown)))
-
-                  tasks_in_volo = [t for t in tasks_in_volo if not t.done()]
-                  scraping_e_finito = os.path.exists(SCRAPING_DONE_FLAG_PATH)
-
-                  if scraping_e_finito and not tasks_in_volo:
-                      inattivo_da = time.monotonic() - ultima_riga_vista
-                      if inattivo_da > FINAL_GRACE_SECONDS:
-                          print(f"[ESTRATTORE] Segnale di fine scraping ricevuto e nessun "
-                                f"task in volo: chiusura.", flush=True)
-                          break
-
-                  await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
-              if tasks_in_volo:
-                  print(f"[ESTRATTORE] Attesa completamento {len(tasks_in_volo)} estrazioni residue...", flush=True)
-                  await asyncio.gather(*tasks_in_volo, return_exceptions=True)
-
-              print(f"[ESTRATTORE] Terminato. Nugget salvati in {NUGGETS_OUTPUT_PATH}", flush=True)
-
-
-          if __name__ == "__main__":
-              asyncio.run(main())
-          EOF
-          echo "::endgroup::"
-
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, sincrono come da baseline)
-        run: |
-          echo "::group::Scrittura m2_step1.py"
           cat << 'EOF' > m2_step1.py
           import time
           import sys
           import random
           import os
           import json
-          import re
           from bs4 import BeautifulSoup
           from curl_cffi import requests
-          from extraction_utils import html_to_clean_markdown
 
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
 
@@ -958,82 +109,50 @@ jobs:
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
 
-          SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
-
-
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
               for _ in range(max_retries):
                   try:
-                      resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200:
-                          ip_address = resp.json().get("ip", "Sconosciuto")
-                          return True, ip_address
+                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
+                      if resp.status_code == 200: return True
                   except: pass
                   time.sleep(delay)
-              return False, None
+              return False
 
           def validate_html(html, url, status_code):
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
               if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
-
+              
               low_html = html.lower()
-
-              title_match = re.search(r"<title[^>]*>(.*?)</title>", low_html, re.DOTALL)
-              if title_match:
-                  title_text = title_match.group(1).strip()
-                  waf_titles = ["just a moment", "attention required", "access denied",
-                                "checking your browser", "robot challenge screen"]
-                  for wt in waf_titles:
-                      if wt in title_text:
-                          return False, f"WAF rilevato nel titolo della pagina: {wt}"
-
               blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
                   "just a moment", "security verification", "please enable js", "enable javascript",
                   "are you a robot", "please wait for verification", "we've detected unusual activity",
                   "if you are not redirected", "unusual traffic from your computer network",
-                  "checking your browser", "prove your humanity", "captcha verification",
+                  "checking your browser", "prove your humanity", "captcha verification", 
                   "please enter in the characters you see below", "access to this page is forbidden",
                   "error 1020", "you have been blocked", "pardon our interruption",
-                  "se non vieni reindirizzato", "se hai problemi ad accedere",
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
-                  "checking the site connection security"
+                  "se non vieni reindirizzato", "se hai problemi ad accedere", 
+                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
               ]
-
+              
               for ind in blocking_indicators:
                   if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
 
-          def pubblica_contenuto_scrapato(source_url, testo_markdown, step_label):
-              try:
-                  riga = json.dumps({
-                      "source_url": source_url,
-                      "testo_markdown": testo_markdown,
-                      "node_id": node_id,
-                      "step": step_label
-                  }, ensure_ascii=False)
-                  with open(SCRAPED_CONTENT_PATH, "a", encoding="utf-8") as f:
-                      f.write(riga + "\n")
-                      f.flush()
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
-
-          is_active, outbound_ip = verify_proxy_active(ACTIVE_PORT)
-          if not is_active: sys.exit(0)
-          print(f"[NODO {node_id}] Proxy attivo! IP di uscita utilizzato: {outbound_ip}", flush=True)
+          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
 
           queue_file = f"/tmp/step1_queue_{node_id}.json"
           if not os.path.exists(queue_file): sys.exit(0)
-
+          
           with open(queue_file, "r") as f:
               targets = json.load(f)
 
           results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
           failed_targets = []
-
+          
           session = requests.Session(impersonate="chrome120")
           session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
           session.headers.update({
@@ -1041,28 +160,17 @@ jobs:
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
           })
 
-          forza_diagnostici_step2 = os.environ.get("FORZA_DIAGNOSTICI_STEP2", "0") == "1"
-
           for url in targets:
-              if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
-                  print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
-                        f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
-                  failed_targets.append(url)
-                  continue
-
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
               try:
                   resp = session.get(url, timeout=12)
                   is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-
+                  
                   if is_ok:
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      text = soup.get_text(separator=' ', strip=True)[:5000]
                       if any(site in url for site in DIAGNOSTIC_SITES):
-                          soup = BeautifulSoup(resp.text, 'html.parser')
                           text = soup.get_text(separator=' ', strip=True)
-                      else:
-                          text = html_to_clean_markdown(resp.text, url)
-                          pubblica_contenuto_scrapato(url, text, "step1")
-
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
                       print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
                   else:
@@ -1071,19 +179,12 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
                   failed_targets.append(url)
-
+              
               time.sleep(random.uniform(1.0, 2.0))
 
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
           EOF
-          echo "::endgroup::"
-
-      - name: Avvio Processo Estrattore Nugget INDIPENDENTE (background)
-        run: |
-          nohup python -u nugget_estrattore_standalone.py > estrattore_nugget.log 2>&1 &
-          echo $! > estrattore_nugget.pid
-          echo "Processo estrattore avviato in background con PID $(cat estrattore_nugget.pid)"
 
       - name: Esecuzione Scraping Parallelo - STEP 1
         run: |
@@ -1091,7 +192,7 @@ jobs:
           touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
           tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
           TAIL_PID=$!
-
+          
           PIDS=()
           for i in {1..6}; do
             python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
@@ -1102,276 +203,14 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Pulizia Container WARP STEP 1 (libera le porte per il nuovo setup)
+      - name: Refresh IP Container per lo STEP 2
         run: |
-          echo "Arresto e rimozione dei 6 container WARP dello Step 1, per liberare le porte 40001-40006..."
-          for i in {1..6}; do
-            docker rm -f "warp_step1_slot${i}" || true
-          done
-          echo "Container Step 1 rimossi."
-
-          # Cooldown deliberato: registrare 6 nuovi device WARP subito dopo aver
-          # gia' registrato 6 device (Step 1) sullo stesso IP host fa scattare
-          # un tasso di timeout molto piu' alto in ondata 1 (osservato empiricamente:
-          # 5/6 falliti al primo tentativo quando il gap era di pochi secondi).
-          # Un cooldown piu' ampio riduce il burst percepito da Cloudflare.
-          echo "Cooldown di 10s prima del setup WARP Step 2..."
-          sleep 50
-
-      - name: Setup Container WARP STEP 2 (Nuovi IP) (client ufficiale, rigoroso, IPv4+IPv6 univoci)
-        run: |
-          set -o pipefail
-          START_TS=$(date +%s)
-
-          NODI_NECESSARI=6
-          MAX_ONDATE=3
-          DELAY_MIN=4
-          DELAY_MAX=6
-          ATTESA_FINALE_SECONDI=15
-          PORTA_BASE=40000
-          # RICHIEDI_IPV4_UNIVOCO=1 -> Step 2 (rigoroso): scarta anche su collisione IPv4.
-          # RICHIEDI_IPV4_UNIVOCO=0 -> Step 1 (permissivo): la dedup guarda solo IPv6.
-          RICHIEDI_IPV4_UNIVOCO=0
-
-          # Polling leggero anti race-condition di registrazione WARP:
-          # il client warp-svc a volte tenta Connect prima che la
-          # registrazione device sia completata (err=MissingRegistration).
-          # Pochi tentativi spaziati, non polling aggressivo continuo.
-          MAX_TENTATIVI_REGISTRAZIONE=4
-          ATTESA_TRA_TENTATIVI_SECONDI=10
-
-          declare -A ipv4_di_slot
-          declare -A ipv6_di_slot
-          declare -A ipv4_visti
-          declare -A ipv6_visti
-          SLOT_OK=()
-
-          # Avvia il container e basta. Nessuna verifica, nessun curl qui:
-          # la verifica avviene TUTTA INSIEME dopo che ogni nodo dell'ondata
-          # e' partito e dopo un'unica attesa finale fissa, non un polling
-          # continuo per nodo che genera carico concorrente sull'host.
-          avvia_nodo() {
-            local slot=$1
-            local port=$2
-
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
-
-            docker run -d \
-              --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
-              --cap-add NET_ADMIN \
-              --cap-add MKNOD \
-              --cap-add AUDIT_WRITE \
-              --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-              --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-              -e WARP_SLEEP=1 \
-              -p "$port":1080 \
-              caomingjun/warp:latest > /dev/null 2>&1 || true
-          }
-
-          # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
-          # parallelo tra loro (un curl a testa, non un loop di polling
-          # pesante). Include un piccolo retry interno sulla sola rilevazione
-          # di warp=on, per assorbire la race condition di registrazione
-          # (MissingRegistration) del client warp-svc appena avviato.
-          verifica_nodo() {
-            local slot=$1
-            local port=$2
-            local out_file=$3
-            local ip4=""
-            local ip6=""
-            local err_msg=""
-
-            trap 'echo "${slot}|${port}|${ip4}|${ip6}|${err_msg}" > "$out_file"' EXIT
-
-            local trace=""
-            local tentativo=1
-            while [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; do
-              trace=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-
-              if echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-                break
-              fi
-
-              echo "  [slot $slot] tentativo $tentativo/$MAX_TENTATIVI_REGISTRAZIONE: warp=on non ancora rilevato (probabile registrazione device in corso), ritento tra ${ATTESA_TRA_TENTATIVI_SECONDI}s..."
-              tentativo=$((tentativo + 1))
-              if [ "$tentativo" -le "$MAX_TENTATIVI_REGISTRAZIONE" ]; then
-                sleep "$ATTESA_TRA_TENTATIVI_SECONDI"
-              fi
-            done
-
-            if ! echo "$trace" | grep -q "warp=on" 2>/dev/null; then
-              err_msg="warp=on non rilevato dopo ${MAX_TENTATIVI_REGISTRAZIONE} tentativi"
-              echo "  --- Log docker del container warp_${CONTAINER_PREFIX}_slot${slot} (ultime 30 righe) ---"
-              docker logs --tail 30 "warp_${CONTAINER_PREFIX}_slot${slot}" 2>&1 | sed 's/^/    /'
-              echo "  --- Fine log ---"
-              return 0
-            fi
-
-            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv4.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip4_${CONTAINER_PREFIX}_${slot}") &
-            (curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://ipv6.icanhazip.com 2>/dev/null | tr -d '[:space:]' > "/tmp/ip6_${CONTAINER_PREFIX}_${slot}") &
-            wait
-
-            ip4=$(cat "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-            ip6=$(cat "/tmp/ip6_${CONTAINER_PREFIX}_${slot}" 2>/dev/null || true)
-            rm -f "/tmp/ip4_${CONTAINER_PREFIX}_${slot}" "/tmp/ip6_${CONTAINER_PREFIX}_${slot}"
-
-            if [ -z "$ip4" ]; then
-              ip4=$(echo "$trace" | grep "^ip=" | cut -d= -f2 || true)
-            fi
-            if [ -z "$ip6" ]; then
-              ip6=$(curl -s --max-time 3 -x "socks5h://127.0.0.1:$port" https://api6.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
-            fi
-
-            return 0
-          }
-
-          rimuovi_nodo_slot() {
-            local slot=$1
-            docker rm -f "warp_${CONTAINER_PREFIX}_slot${slot}" > /dev/null 2>&1 || true
-          }
-
-          leggi_esito() {
-            local esito_file=$1
-            IFS='|' read -r PARSED_SLOT PARSED_PORT PARSED_IP4 PARSED_IP6 PARSED_ERR < "$esito_file"
-          }
-
-          elabora_esiti() {
-            SLOT_DA_RIPROVARE=()
-            local file_list=("$@")
-            for esito_file in "${file_list[@]}"; do
-              if [ ! -f "$esito_file" ]; then
-                echo "  FALLITO: nessun report generato ($esito_file)"
-                continue
-              fi
-
-              leggi_esito "$esito_file"
-
-              if [ -n "$PARSED_ERR" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (${PARSED_ERR})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -z "$PARSED_IP6" ] || [ "$PARSED_IP6" = "NESSUNO" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 non ottenuto)"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ -n "${ipv6_visti[$PARSED_IP6]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv6 duplicato con slot ${ipv6_visti[$PARSED_IP6]})"
-                rimuovi_nodo_slot "$PARSED_SLOT"
-                SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                continue
-              fi
-
-              if [ "$RICHIEDI_IPV4_UNIVOCO" = "1" ]; then
-                if [ -z "$PARSED_IP4" ] || [ "$PARSED_IP4" = "NESSUNO" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 non ottenuto)"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-
-                if [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                  echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: FALLITO (IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]})"
-                  rimuovi_nodo_slot "$PARSED_SLOT"
-                  SLOT_DA_RIPROVARE+=("$PARSED_SLOT")
-                  continue
-                fi
-              elif [ -n "$PARSED_IP4" ] && [ "$PARSED_IP4" != "NESSUNO" ] && [ -n "${ipv4_visti[$PARSED_IP4]:-}" ]; then
-                echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: IPv4 duplicato con slot ${ipv4_visti[$PARSED_IP4]}, ma ACCETTATO (modalita' permissiva)"
-              fi
-
-              ipv4_visti[$PARSED_IP4]=$PARSED_SLOT
-              ipv6_visti[$PARSED_IP6]=$PARSED_SLOT
-              ipv4_di_slot[$PARSED_SLOT]=$PARSED_IP4
-              ipv6_di_slot[$PARSED_SLOT]=$PARSED_IP6
-              SLOT_OK+=("$PARSED_SLOT")
-              echo "  [slot $PARSED_SLOT] porta $PARSED_PORT: OK (IPv4: $PARSED_IP4 | IPv6: $PARSED_IP6)"
-            done
-          }
-
-          esegui_ondata() {
-            local slots=("$@")
-            local n=${#slots[@]}
-            local idx=0
-            local files=()
-
-            for slot in "${slots[@]}"; do
-              idx=$((idx + 1))
-              port=$((PORTA_BASE + slot))
-              avvia_nodo "$slot" "$port"
-
-              if [ "$idx" -lt "$n" ]; then
-                DELAY=$(awk -v min="$DELAY_MIN" -v max="$DELAY_MAX" 'BEGIN{srand('"$slot"'+systime()); print min+rand()*(max-min)}')
-                echo "  [slot $slot] container avviato su porta $port. Prossimo tra ${DELAY}s..."
-                sleep "$DELAY"
-              else
-                echo "  [slot $slot] container avviato su porta $port. Ultimo dell'ondata."
-              fi
-            done
-
-            echo "Attesa finale di ${ATTESA_FINALE_SECONDI}s prima della verifica..."
-            sleep "$ATTESA_FINALE_SECONDI"
-
-            local pids=()
-            for slot in "${slots[@]}"; do
-              port=$((PORTA_BASE + slot))
-              out="/tmp/esito_${CONTAINER_PREFIX}_slot${slot}.txt"
-              files+=("$out")
-              verifica_nodo "$slot" "$port" "$out" &
-              pids+=($!)
-            done
-
-            for pid in "${pids[@]}"; do
-              wait "$pid" 2>/dev/null || true
-            done
-
-            elabora_esiti "${files[@]}"
-          }
-
-          echo "=== STEP 2 (Nuovi IP) - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
-          TUTTI_SLOT=($(seq 1 "$NODI_NECESSARI"))
-          esegui_ondata "${TUTTI_SLOT[@]}"
-          echo "Slot validi dopo ondata 1: ${#SLOT_OK[@]}/$NODI_NECESSARI"
-
-          ONDATA=1
-          SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-          while [ "${#SLOT_MANCANTI[@]}" -gt 0 ] && [ "$ONDATA" -lt "$MAX_ONDATE" ]; do
-            echo "Cooldown 4s per prevenire rate-limit di registrazione..."
-            sleep 4
-
-            ONDATA=$((ONDATA + 1))
-            echo ""
-            echo "=== STEP 2 (Nuovi IP) - ONDATA $ONDATA/$MAX_ONDATE: retry sugli slot ${SLOT_MANCANTI[*]} ==="
-            esegui_ondata "${SLOT_MANCANTI[@]}"
-            SLOT_MANCANTI=("${SLOT_DA_RIPROVARE[@]}")
-            echo "Slot validi dopo ondata $ONDATA: ${#SLOT_OK[@]}/$NODI_NECESSARI"
-          done
-
-          ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
-          echo ""
-          if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si prosegue comunque."
-          fi
-          echo "=== STEP 2 (Nuovi IP) completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
-          for slot in $(seq 1 "$NODI_NECESSARI"); do
-            if [ -n "${ipv4_di_slot[$slot]:-}" ]; then
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> IPv4: ${ipv4_di_slot[$slot]} | IPv6: ${ipv6_di_slot[$slot]}"
-            else
-              echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
-            fi
-          done
-        env:
-          CONTAINER_PREFIX: step2
-          MODALITA_LABEL: rigoroso, IPv4+IPv6 univoci
+          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
+          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
+          sleep 6
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
-          echo "::group::Scrittura m2_step2_setup.py"
           cat << 'EOF' > m2_step2_setup.py
           import json
           import os
@@ -1383,22 +222,20 @@ jobs:
                   with open(filename, "r", encoding="utf-8") as f:
                       try: merged_failed.extend(json.load(f))
                       except Exception: pass
-
+          
           unique_failed = list(dict.fromkeys(merged_failed))
-
+          
           for i in range(1, 7):
               chunk = unique_failed[i-1::6]
               with open(f"/tmp/step2_queue_{i}.json", "w") as f:
                   json.dump(chunk, f)
-
+                  
           print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
           EOF
-          echo "::endgroup::"
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
+      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
         run: |
-          echo "::group::Scrittura m2_step2.py"
           cat << 'EOF' > m2_step2.py
           import asyncio
           import time
@@ -1407,16 +244,12 @@ jobs:
           import os
           import json
           from urllib.parse import urlparse, parse_qs
-          from curl_cffi import requests
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
-          from extraction_utils import html_to_clean_markdown
 
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
-
-          SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -1427,78 +260,46 @@ jobs:
               except: pass
               return default
 
-          def pubblica_contenuto_scrapato(source_url, testo_markdown, step_label):
-              try:
-                  riga = json.dumps({
-                      "source_url": source_url,
-                      "testo_markdown": testo_markdown,
-                      "node_id": node_id,
-                      "step": step_label
-                  }, ensure_ascii=False)
-                  with open(SCRAPED_CONTENT_PATH, "a", encoding="utf-8") as f:
-                      f.write(riga + "\n")
-                      f.flush()
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
-
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
-
+              
               with open(queue_file, "r") as f: targets = json.load(f)
               if not targets:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
                   return
 
-              # Verifica rapida e leggera che il proxy sia vivo PRIMA di avviare
-              # l'intero browser: se lo slot WARP non si e' mai registrato (nodo
-              # escluso in precedenza), evita di sprecare tempo dentro Playwright
-              # con un proxy fantasma.
-              proxy_vivo = False
-              try:
-                  test_session = requests.Session(impersonate="chrome120")
-                  test_session.proxies = {"http": f"socks5h://127.0.0.1:{INITIAL_PORT}", "https": f"socks5h://127.0.0.1:{INITIAL_PORT}"}
-                  resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
-                  if resp.status_code == 200:
-                      proxy_vivo = True
-              except Exception:
-                  pass
-
-              if not proxy_vivo:
-                  print(f"[NODO {node_id}] Proxy sulla porta {INITIAL_PORT} non raggiungibile: "
-                        f"slot WARP non registrato per questo nodo. Salto lo Step 2.", flush=True)
-                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2 SALTATO (proxy WARP non disponibile)\n{'#'*60}\n")
-                  return
-
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-
+              
+              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=5000",
-                  "--fingerprint-platform=linux"
+                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
+                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
                       humanize=True,
+                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      viewport={"width": 1920, "height": 950},
+                      viewport={"width": 1920, "height": 1080},
                       args=base_args
                   )
                   page = await context.new_page()
-
-                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(1)
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=10000)
+                  
+                  # WARMUP Integrato - Creazione di cronologia valida
+                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
+                  await asyncio.sleep(2)
+                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
 
               except Exception as e:
@@ -1511,16 +312,17 @@ jobs:
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
                       query_to_search = get_query_from_url(url)
-
+                      
+                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
                           try:
                               search_box = page.locator("textarea[name='q'], input[name='q']").first
-                              await search_box.fill(query_to_search)
+                              await search_box.fill(query_to_search) 
                               await page.keyboard.press("Enter")
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-
+                              
                       elif "startpage.com" in url:
                           await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
@@ -1529,7 +331,7 @@ jobs:
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-
+                          
                       elif "html.duckduckgo.com" in url:
                           await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.0, 3.5))
@@ -1538,61 +340,49 @@ jobs:
                               await search_box.fill(query_to_search)
                               await page.keyboard.press("Enter")
                           except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-
+                          
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-
+                      
+                      # --- SILENZIO RADIO ---
+                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
-
-                      await asyncio.sleep(6)
-
+                          
+                      await asyncio.sleep(6) 
+                      
+                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
-
+                      
+                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
-
-                      title_blocked = False
-                      title_reason = ""
-                      if soup.title and soup.title.string:
-                          title_low = soup.title.string.strip().lower()
-                          waf_titles = ["just a moment", "attention required", "access denied",
-                                        "checking your browser", "robot challenge screen"]
-                          for wt in waf_titles:
-                              if wt in title_low:
-                                  title_blocked = True
-                                  title_reason = f"WAF nel titolo: {wt}"
-                                  break
-
-                      text_full = html_to_clean_markdown(raw_html, url)
-                      text_lower_full = text_full.lower()
-
+                      text = soup.get_text(separator=' ', strip=True)[:5000]
+                      text_lower = text.lower()
+                      
+                      # Rilevamento passivo WAF/Captcha
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
                           "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity",
-                          "robot challenge screen", "checking the site connection security",
-                          "unusual traffic from your computer network"
+                          "we've detected unusual activity"
                       ]
-                      is_blocked = title_blocked or any(b in text_lower_full for b in blocking_indicators)
-
-                      if len(text_full) > 300 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text_full}\n"
+                      is_blocked = any(b in text_lower for b in blocking_indicators)
+                      
+                      if len(text) > 150 and not is_blocked:
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
                           print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
-                          pubblica_contenuto_scrapato(url, text_full, "step2")
                       else:
-                          motivo = title_reason if title_blocked else "Blocco WAF/Captcha o contenuto insufficiente"
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO ({motivo})\n"
-                          print(f"[NODO {node_id}] -> Fallito: {motivo}", flush=True)
+                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
+                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
 
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
-
+                  
                   await asyncio.sleep(random.uniform(4.0, 7.0))
 
               try: await context.close()
@@ -1604,21 +394,14 @@ jobs:
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
-          echo "::endgroup::"
 
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
-        if: always()
         run: |
-          if [ ! -f "m2_step2.py" ]; then
-            echo "::warning::m2_step2.py non trovato: un passo precedente (probabilmente il setup WARP Step 2) e' fallito. Salto lo scraping Step 2."
-            exit 0
-          fi
-
           echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
           touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
           tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
           TAIL_PID=$!
-
+          
           PIDS=()
           for i in {1..6}; do
             python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
@@ -1628,9 +411,10 @@ jobs:
 
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
-
+          
           for i in {1..6}; do
-            docker rm -f "warp_step2_slot${i}" || true
+            docker stop warproxy-$i || true
+            docker rm warproxy-$i || true
           done
 
           touch output_node_1_step1.txt output_node_1_step2.txt \
@@ -1647,115 +431,8 @@ jobs:
               output_node_5_step1.txt output_node_5_step2.txt \
               output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
 
-      - name: Attesa Coda Residua Estrattore Nugget (segnale esplicito di fine scraping)
-        if: always()
-        run: |
-          touch scraping_completato.flag
-          echo "Segnale di fine scraping inviato all'estrattore."
-
-          if [ -f estrattore_nugget.pid ]; then
-            PID=$(cat estrattore_nugget.pid)
-            echo "Attendo la chiusura naturale del processo estrattore (PID $PID), max 90s..."
-            for i in {1..90}; do
-              if ! kill -0 "$PID" 2>/dev/null; then
-                echo "Processo estrattore terminato naturalmente dopo ${i}s."
-                break
-              fi
-              sleep 1
-            done
-            if kill -0 "$PID" 2>/dev/null; then
-              echo "Timeout di sicurezza raggiunto (90s dopo il segnale): chiudo forzatamente il processo estrattore residuo."
-              kill "$PID" 2>/dev/null || true
-            fi
-          fi
-          touch nuggets_estrattore.jsonl
-          echo "--- log estrattore nugget ---"
-          cat estrattore_nugget.log || true
-
-      - name: Merge Nugget Finale (JSONL -> JSON strutturato deduplicato)
-        if: always()
-        run: |
-          echo "::group::Scrittura merge_nuggets.py"
-          cat << 'EOF' > merge_nuggets.py
-          import json
-          import os
-          import glob
-
-          jsonl_files = sorted(glob.glob("nuggets_estrattore*.jsonl"))
-
-          merged_nuggets = []
-          per_file_stats = {}
-
-          for filename in jsonl_files:
-              count = 0
-              corrotte = 0
-              try:
-                  with open(filename, "r", encoding="utf-8") as f:
-                      for riga in f:
-                          riga = riga.strip()
-                          if not riga:
-                              continue
-                          try:
-                              nugget = json.loads(riga)
-                              merged_nuggets.append(nugget)
-                              count += 1
-                          except json.JSONDecodeError:
-                              corrotte += 1
-              except Exception as e:
-                  print(f"Errore lettura {filename}: {e}", flush=True)
-
-              per_file_stats[filename] = count
-              if corrotte:
-                  print(f"{filename}: {corrotte} riga/e corrotta/e scartata/e", flush=True)
-
-          seen = set()
-          nuggets_deduplicati = []
-          for n in merged_nuggets:
-              fact_norm = (n.get("fact") or "").strip().lower()
-              url_norm = (n.get("source_url") or "").strip().lower()
-              key = (fact_norm, url_norm)
-              if key in seen:
-                  continue
-              seen.add(key)
-              nuggets_deduplicati.append(n)
-
-          confidence_counts = {"high": 0, "medium": 0, "low": 0}
-          for n in nuggets_deduplicati:
-              c = n.get("confidence", "low")
-              if c in confidence_counts:
-                  confidence_counts[c] += 1
-
-          output_finale = {
-              "stats": {
-                  "file_jsonl_trovati": len(jsonl_files),
-                  "totale_nugget_grezzi": len(merged_nuggets),
-                  "totale_nugget_deduplicati": len(nuggets_deduplicati),
-                  "per_file": per_file_stats,
-                  "per_confidence": confidence_counts
-              },
-              "nuggets": nuggets_deduplicati
-          }
-
-          with open("nuggets_finale.json", "w", encoding="utf-8") as f:
-              json.dump(output_finale, f, indent=2, ensure_ascii=False)
-
-          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
-                f"salvati in nuggets_finale.json", flush=True)
-          print(f"Distribuzione confidence: {confidence_counts}", flush=True)
-          EOF
-          echo "::endgroup::"
-          python -u merge_nuggets.py
-
-      - name: Upload Artifact Macchina 2 (Testo Grezzo)
-        if: always()
+      - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
         with:
           name: Risultati_Macchina2
           path: output_macchina2_cdp.txt
-
-      - name: Upload Artifact Nugget (JSON Strutturato)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Nuggets_Macchina2
-          path: nuggets_finale.json
