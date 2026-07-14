@@ -1479,9 +1479,6 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   "--fingerprint-storage-quota=6010",
-                  "--fingerprint-gpu-renderer=NVIDIA GeForce RTX 3060",
-                  "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
@@ -1492,7 +1489,6 @@ jobs:
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      viewport={"width": 1920, "height": 940},
                       args=base_args
                   )
                   page = await context.new_page()
