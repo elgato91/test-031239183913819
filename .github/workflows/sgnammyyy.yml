@@ -1478,11 +1478,12 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--fingerprint-platform=windows",
-                  "--fingerprint-noise=false",
                   "--fingerprint-storage-quota=500",
                   "--fingerprint=13945",
                   "--fingerprint-gpu-renderer=NVIDIA GeForce RTX 3060"
+                  "--fingerprint-noise=false",
+                  "--fingerprint-screen-width=1920",
+                  "--fingerprint-screen-height=1080"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
