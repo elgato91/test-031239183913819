@@ -1492,7 +1492,7 @@ jobs:
                   )
                   page = await context.new_page()
 
-                  await page.goto("https://www.wikipedia.com", wait_until="domcontentloaded", timeout=25000)
+                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
@@ -1539,9 +1539,19 @@ jobs:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
-                      except: pass
+                      except: 
+                          pass
 
-                      await asyncio.sleep(6)
+                    else:
+                          # FIX PER KATIE PARLA: Gestione intelligente del Timeout
+                          try:
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          except Exception as e:
+                              print(f"[NODO {node_id}] Timeout di rete (possibile Cloudflare). Attendo e provo a estrarre comunque l'HTML...", flush=True)
+                              # Non facciamo "raise", proseguiamo allo step successivo!
+
+                      # Aspettiamo a prescindere che eventuali WAF o Cloudflare finiscano di caricare
+                      await asyncio.sleep(7)
 
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
