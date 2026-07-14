@@ -1482,7 +1482,6 @@ jobs:
                   "--fingerprint-storage-quota=5000",
                   "--fingerprint-webrtc-ip=auto",
                   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                  "--fingerprint-noise=false",
                   "--fingerprint-platform=linux"
               ]
 
