@@ -65,13 +65,13 @@ jobs:
                 echo "warproxy-$i è pronto e registrato!"
                 break
               fi
-              sleep 5
+              sleep 3
             done
-            sleep 3
+            sleep 5
           done
 
           echo "Attesa stabilizzazione finale..."
-          sleep 5
+          sleep 10
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
@@ -1005,7 +1005,8 @@ jobs:
                   f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=5000",
                   "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080"
+                  "--fingerprint-screen-height=1080",
+                  "--fingerprint-platform=linux"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
