@@ -97,11 +97,7 @@ jobs:
               caomingjun/warp:latest > /dev/null 2>&1 || true
           }
 
-          # Verifica UN SOLO nodo, chiamata dopo l'attesa finale, tutte in
-          # parallelo tra loro (un curl a testa, non un loop di polling
-          # pesante). Include un piccolo retry interno sulla sola rilevazione
-          # di warp=on, per assorbire la race condition di registrazione
-          # (MissingRegistration) del client warp-svc appena avviato.
+          # Dynamic check with retry on warp=on presence to absorb race conditions
           verifica_nodo() {
             local slot=$1
             local port=$2
@@ -789,7 +785,7 @@ jobs:
                       print(f"{label}[NUGGET] {errore} su {source_url}", flush=True)
                       return None
 
-              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite per {source_url} "
+              print(f"{label}[NUGGET] Tutte le chiavi disponibili esaurite for {source_url} "
                     f"(ultimo motivo: {ultimo_motivo})", flush=True)
               return None
           EOF
@@ -863,16 +859,14 @@ jobs:
           async def main():
               api_keys = carica_gemini_api_keys()
               if not api_keys:
-                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato "
-                        "immediatamente.", flush=True)
+                  print("[ESTRATTORE] Nessuna GEMINI_API_KEY trovata. Processo terminato immediatamente.", flush=True)
                   return
 
               try:
                   key_pool = GeminiKeyPool(api_keys)
                   print(f"[ESTRATTORE] Pool Gemini inizializzato con {len(key_pool.entries)} chiave/i.", flush=True)
               except Exception as e:
-                  print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. "
-                        f"Processo terminato.", flush=True)
+                  print(f"[ESTRATTORE] Impossibile inizializzare il pool Gemini: {e}. Processo terminato.", flush=True)
                   return
 
               nugget_semaphore = asyncio.Semaphore(NUGGET_CONCURRENCY)
@@ -948,6 +942,8 @@ jobs:
           import os
           import json
           import re
+          import socket
+          import urllib.request
           from bs4 import BeautifulSoup
           from curl_cffi import requests
           from extraction_utils import html_to_clean_markdown
@@ -961,9 +957,38 @@ jobs:
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
 
 
-          def verify_proxy_active(port, max_retries=5, delay=5):
+          def select_best_proxy(port):
+              local_warp = f"socks5://127.0.0.1:{port}"
+              api_url = "https://proxylist.geonode.com/api/proxy-list?limit=30&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks5"
+              try:
+                  req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=4) as response:
+                      data = json.loads(response.read().decode())
+                      proxies = data.get("data", [])
+                      random.shuffle(proxies)
+                      for p in proxies:
+                          ip = p.get("ip")
+                          p_port = p.get("port")
+                          if ip and p_port:
+                              candidate = f"socks5://{ip}:{p_port}"
+                              try:
+                                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                  s.settimeout(1.5)
+                                  s.connect((ip, int(p_port)))
+                                  s.close()
+                                  print(f"[NODO {node_id}] Selezionato proxy residenziale alternativo: {candidate}", flush=True)
+                                  return candidate
+                              except Exception:
+                                  continue
+              except Exception as e:
+                  print(f"[NODO {node_id}] Impossibile ottenere proxy alternativi: {e}. Uso WARP locale.", flush=True)
+              return local_warp
+
+
+          def verify_proxy_active(proxy_url, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
+              socks_url = proxy_url.replace("socks5://", "socks5h://")
+              test_session.proxies = {"http": socks_url, "https": socks_url}
               for _ in range(max_retries):
                   try:
                       resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
@@ -973,6 +998,7 @@ jobs:
                   except: pass
                   time.sleep(delay)
               return False, None
+
 
           def validate_html(html, url, status_code):
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
@@ -1007,6 +1033,7 @@ jobs:
                   if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
 
+
           def pubblica_contenuto_scrapato(source_url, testo_markdown, step_label):
               try:
                   riga = json.dumps({
@@ -1021,7 +1048,9 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
-          is_active, outbound_ip = verify_proxy_active(ACTIVE_PORT)
+
+          selected_proxy = select_best_proxy(ACTIVE_PORT)
+          is_active, outbound_ip = verify_proxy_active(selected_proxy)
           if not is_active: sys.exit(0)
           print(f"[NODO {node_id}] Proxy attivo! IP di uscita utilizzato: {outbound_ip}", flush=True)
 
@@ -1035,7 +1064,8 @@ jobs:
           failed_targets = []
 
           session = requests.Session(impersonate="chrome120")
-          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
+          socks_url = selected_proxy.replace("socks5://", "socks5h://")
+          session.proxies = {"http": socks_url, "https": socks_url}
           session.headers.update({
               "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
@@ -1045,8 +1075,7 @@ jobs:
 
           for url in targets:
               if forza_diagnostici_step2 and any(site in url for site in DIAGNOSTIC_SITES):
-                  print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 "
-                        f"(FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
+                  print(f"[NODO {node_id}] [STEP 1] {url} -> forzato su Step 2 (FORZA_DIAGNOSTICI_STEP2=1), skip del fetch HTTP diretto.", flush=True)
                   failed_targets.append(url)
                   continue
 
@@ -1406,6 +1435,8 @@ jobs:
           import random
           import os
           import json
+          import socket
+          import urllib.request
           from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests
           from cloakbrowser import launch_persistent_context_async
@@ -1418,6 +1449,35 @@ jobs:
 
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
 
+
+          def select_best_proxy(port):
+              local_warp = f"socks5://127.0.0.1:{port}"
+              api_url = "https://proxylist.geonode.com/api/proxy-list?limit=30&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks5"
+              try:
+                  req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=4) as response:
+                      data = json.loads(response.read().decode())
+                      proxies = data.get("data", [])
+                      random.shuffle(proxies)
+                      for p in proxies:
+                          ip = p.get("ip")
+                          p_port = p.get("port")
+                          if ip and p_port:
+                              candidate = f"socks5://{ip}:{p_port}"
+                              try:
+                                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                  s.settimeout(1.5)
+                                  s.connect((ip, int(p_port)))
+                                  s.close()
+                                  print(f"[NODO {node_id}] Selezionato proxy residenziale alternativo: {candidate}", flush=True)
+                                  return candidate
+                              except Exception:
+                                  continue
+              except Exception as e:
+                  print(f"[NODO {node_id}] Impossibile ottenere proxy alternativi: {e}. Uso WARP locale.", flush=True)
+              return local_warp
+
+
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
                   parsed = urlparse(url)
@@ -1426,6 +1486,7 @@ jobs:
                       if param in queries: return queries[param][0]
               except: pass
               return default
+
 
           def pubblica_contenuto_scrapato(source_url, testo_markdown, step_label):
               try:
@@ -1441,6 +1502,7 @@ jobs:
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
 
+
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
@@ -1450,14 +1512,13 @@ jobs:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
                   return
 
-              # Verifica rapida e leggera che il proxy sia vivo PRIMA di avviare
-              # l'intero browser: se lo slot WARP non si e' mai registrato (nodo
-              # escluso in precedenza), evita di sprecare tempo dentro Playwright
-              # con un proxy fantasma.
+              selected_proxy = select_best_proxy(INITIAL_PORT)
+
               proxy_vivo = False
               try:
                   test_session = requests.Session(impersonate="chrome120")
-                  test_session.proxies = {"http": f"socks5h://127.0.0.1:{INITIAL_PORT}", "https": f"socks5h://127.0.0.1:{INITIAL_PORT}"}
+                  socks_url = selected_proxy.replace("socks5://", "socks5h://")
+                  test_session.proxies = {"http": socks_url, "https": socks_url}
                   resp = test_session.get("https://api64.ipify.org?format=json", timeout=6)
                   if resp.status_code == 200:
                       proxy_vivo = True
@@ -1465,41 +1526,96 @@ jobs:
                   pass
 
               if not proxy_vivo:
-                  print(f"[NODO {node_id}] Proxy sulla porta {INITIAL_PORT} non raggiungibile: "
-                        f"slot WARP non registrato per questo nodo. Salto lo Step 2.", flush=True)
+                  print(f"[NODO {node_id}] Proxy sulla porta {INITIAL_PORT} non raggiungibile. Salto lo Step 2.", flush=True)
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2 SALTATO (proxy WARP non disponibile)\n{'#'*60}\n")
+                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2 SALTATO (proxy non disponibile)\n{'#'*60}\n")
                   return
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
-              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
+              # Manteniamo esclusivamente sandbox, shm e la disattivazione del rumore artificiale sul canvas/WebGL
+              # La rimozione delle definizioni esplicite di platform/GPU consente il corretto allineamento C++
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=5000",
-                  "--fingerprint-noise=false",
-                  "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080",
-                  "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
-                  "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
-                  "--fingerprint-platform=linux"
+                  "--fingerprint-noise=false"
               ]
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
+              print(f"[NODO {node_id}] Avvio singola sessione Persistente...", flush=True)
               try:
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
                       humanize=True,
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
+                      proxy=selected_proxy,
                       viewport={"width": 1920, "height": 940},
                       geoip=True,
                       args=base_args
                   )
-                  page = await context.new_page()
+
+                  # Iniezione JS nativa a runtime prima del caricamento di qualsiasi script esterno (Stealth 100% su CreepJS)
+                  await context.add_init_script("""
+                      // 1. Forza la presenza del taskbar (availHeight < height) per annullare noTaskbar
+                      if (window.screen) {
+                          Object.defineProperty(window.screen, 'availHeight', {
+                              get: () => (window.screen.height || 1080) - 40,
+                              configurable: true
+                          });
+                          Object.defineProperty(window.screen, 'availWidth', {
+                              get: () => window.screen.width || 1920,
+                              configurable: true
+                          });
+                      }
+
+                      // 2. Mock della latenza RTT per rimuovere l'errore "connectionRTT: FAIL"
+                      if (window.navigator && window.navigator.connection) {
+                          Object.defineProperty(window.navigator.connection, 'rtt', {
+                              get: () => 150,
+                              configurable: true
+                          });
+                          if (!('downlinkMax' in window.navigator.connection)) {
+                              Object.defineProperty(window.navigator.connection, 'downlinkMax', {
+                                  get: () => 10,
+                                  configurable: true
+                              });
+                          }
+                      }
+
+                      // 3. Mock delle API mobile-only per azzerare gli indicatori "Like Headless" desktop
+                      if (window.navigator) {
+                          if (!window.navigator.share) {
+                              Object.defineProperty(window.navigator, 'share', {
+                                  value: async () => {},
+                                  writable: true,
+                                  configurable: true
+                              });
+                          }
+                          if (!window.navigator.contacts) {
+                              Object.defineProperty(window.navigator, 'contacts', {
+                                  value: {
+                                      select: async () => [],
+                                      getProperties: async () => []
+                                  },
+                                  writable: true,
+                                  configurable: true
+                              });
+                          }
+                      }
+
+                      // 4. Mock di ContentIndex
+                      if (!window.ContentIndex) {
+                          window.ContentIndex = class {};
+                          if (window.ServiceWorkerRegistration && !window.ServiceWorkerRegistration.prototype.index) {
+                              Object.defineProperty(window.ServiceWorkerRegistration.prototype, 'index', {
+                                  get: () => new window.ContentIndex(),
+                                  configurable: true
+                              });
+                          }
+                      }
+                  """)
+
+                  page = context.pages[0] if context.pages else await context.new_page()
 
                   # Rilevamento dell'IP di uscita effettivo del browser
                   try:
@@ -1511,7 +1627,7 @@ jobs:
                   except Exception as e:
                       print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
 
-                  # WARMUP Integrato - Creazione di cronologia valida
+                  # WARMUP Integrato
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=20000)
@@ -1528,7 +1644,6 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
 
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -1559,25 +1674,19 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
 
                       await asyncio.sleep(6)
 
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
 
-                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
 
-                      # Controllo sul <title>: segnale ad alta confidenza, indipendente
-                      # dal testo visibile, basso rischio di falsi positivi.
                       title_blocked = False
                       title_reason = ""
                       if soup.title and soup.title.string:
@@ -1590,19 +1699,9 @@ jobs:
                                   title_reason = f"WAF nel titolo: {wt}"
                                   break
 
-                      # Testo completo, senza troncamento, in Markdown pulito per l'LLM.
-                      # Il check di validazione gira sul testo GIA' pulito, non sull'HTML
-                      # grezzo troncato: una pagina di blocco corta resta corta anche dopo
-                      # la pulizia, invece di essere gonfiata da tag/script residui.
                       text_full = html_to_clean_markdown(raw_html, url)
                       text_lower_full = text_full.lower()
 
-                      # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le
-                      # frasi esatte di pagine di blocco che passavano il controllo
-                      # precedente ("Robot Challenge Screen" / "Checking the site
-                      # connection security" da Cloudflare; "unusual traffic from your
-                      # computer network" da Google), senza rimuovere nessuna delle
-                      # frasi originali.
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -1772,8 +1871,7 @@ jobs:
           with open("nuggets_finale.json", "w", encoding="utf-8") as f:
               json.dump(output_finale, f, indent=2, ensure_ascii=False)
 
-          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici "
-                f"salvati in nuggets_finale.json", flush=True)
+          print(f"Merge completato: {len(nuggets_deduplicati)} nugget unici salvati in nuggets_finale.json", flush=True)
           print(f"Distribuzione confidence: {confidence_counts}", flush=True)
           EOF
           echo "::endgroup::"
