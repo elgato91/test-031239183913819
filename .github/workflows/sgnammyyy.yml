@@ -1002,7 +1002,7 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
+                  "--fingerprint=42069",
                   "--fingerprint-storage-quota=5000",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
