@@ -1007,7 +1007,8 @@ jobs:
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
                   "--fingerprint-noise=false",
                   "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080"
+                  "--fingerprint-screen-height=1080",
+                  "--fingerprint-platform=linux"
                   
               ]
 
