@@ -14,20 +14,13 @@ jobs:
       FORZA_DIAGNOSTICI_STEP2: "1"
     steps:
 
-      - name: Installazione Font di Sistema e Windows 11 Reali
+      - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip wget \
+          sudo apt-get install -y \
             fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
-
-          mkdir -p ~/.local/share/fonts/windows
-
-          wget -qO /tmp/win11-fonts.zip https://github.com/liblaf/win-fonts/releases/download/Win11/Win11-English.zip
-          unzip -oq /tmp/win11-fonts.zip -d /tmp/win11-fonts-extracted
-
-          find /tmp/win11-fonts-extracted -type f \( -name "*.ttf" -o -name "*.TTF" -o -name "*.otf" -o -name "*.OTF" \) -exec cp {} ~/.local/share/fonts/windows/ \;
-
+          
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
@@ -1473,7 +1466,6 @@ jobs:
 
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
-              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
               base_args = [
                   "--no-sandbox",
