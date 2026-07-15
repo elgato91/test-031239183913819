@@ -1479,9 +1479,7 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   "--fingerprint-storage-quota=5000",
-                  "--fingerprint=seed",
-                  "--fingerprint-gpu-renderer=NVIDIA GeForce RTX 3060",
-                  "--fingerprint-platform=linux"
+                  "--fingerprint=seed"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
