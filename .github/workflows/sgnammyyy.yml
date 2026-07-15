@@ -1007,7 +1007,8 @@ jobs:
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--enable-blink-features=FakeShadowRoot",
-                  "--fingerprint-platform=windows"
+                  "--fingerprint-noise=false",
+                  "--fingerprint-platform=linux"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
