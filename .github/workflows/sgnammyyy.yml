@@ -67,7 +67,7 @@ jobs:
               fi
               sleep 3
             done
-            sleep 5
+            sleep 2
           done
 
           echo "Attesa stabilizzazione finale..."
