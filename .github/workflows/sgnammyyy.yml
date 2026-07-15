@@ -1158,6 +1158,7 @@ jobs:
 
             docker run -d \
               --name "warp_${CONTAINER_PREFIX}_slot${slot}" \
+              --dns 1.1.1.1 --dns 2606:4700:4700::1111 \
               --cap-add NET_ADMIN \
               --cap-add MKNOD \
               --cap-add AUDIT_WRITE \
