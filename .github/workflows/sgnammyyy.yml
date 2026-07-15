@@ -1478,6 +1478,7 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
+                  "--fingerprint=42069",
                   "--fingerprint-noise=false",
                   "--fingerprint-storage-quota=500",
                   "--fingerprint-screen-width=1920",
