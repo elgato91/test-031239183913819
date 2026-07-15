@@ -1004,7 +1004,6 @@ jobs:
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=5000",
-                  "--fingerprint-noise=false",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--fingerprint-platform=linux"
