@@ -78,27 +78,30 @@ jobs:
           cat << 'EOF' > m2_step1_setup.py
           import json
           TARGETS = [
+              "https://api64.ipify.org?format=json",
               "https://tls.browserleaks.com/json",
               "https://bot.sannysoft.com/",
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
               "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
+              "https://www.yelp.it/search?find_desc=roma&find_loc=Milano",
               "https://www.bloomberg.com/markets/stocks",
               "https://www.morningstar.com/stocks/xnas/aapl/quote",
               "https://finance.yahoo.com/quote/AAPL/key-statistics",
               "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
               "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
+              "https://www.booking.com/searchresults.html?ss=Rome",
+              "https://www.afar.com/hotels/the-best-new-hotels-of-2026",
               "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
               "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
               "https://www.bing.com/search?q=migliore+carbonara+roma",
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
+              "https://www.glassdoor.com/Overview/Working-at-Google-EI_IE9079.11,17.htm",
+              "https://alex-canter-84751.medium.com/eating-through-los-angeles-alex-canters-top-100-restaurants-for-2022-95ad5c47f5b6",
               "https://www.canadianinsider.com/money-is-moving"
           ]
 
@@ -1033,7 +1036,7 @@ jobs:
                       print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
 
                   # WARMUP Integrato - Creazione di cronologia valida
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
+                  await page.goto("https://en.wikipedia.org/wiki/Sagrada_Fam%C3%ADlia", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
