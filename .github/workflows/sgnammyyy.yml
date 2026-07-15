@@ -886,35 +886,90 @@ jobs:
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
 
-      - name: Rigenerazione Pulita Container per lo STEP 2 (Nuove Registrazioni)
+      # ========================================================================
+      # STEP 2: RIGENERAZIONE CONTAINER CON FALLBACK ENTERPRISE
+      #  - Ogni container viene provato più volte.
+      #  - Alla fine si scrive un file JSON con le porte realmente funzionanti.
+      #  - Lo script Python di Step 2 userà quel file per il fallback.
+      # ========================================================================
+      - name: Rigenerazione Container per STEP 2 (con retry e lista proxy attivi)
         run: |
-          echo 'Eliminazione vecchi container per forzare nuove registrazioni su WARP...'
+          echo 'Eliminazione vecchi container...'
           docker rm -f warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6 || true
+
+          MAX_RECREATE=3
+          WAIT_BETWEEN_CONTAINERS=8
+          VERIFY_TIMEOUT=90
+          WORKING_PROXIES_FILE="/tmp/working_proxies.json"
+
+          # Array per tracciare i container riusciti
+          declare -A SUCCESS_MAP
+          WORKING_PORTS=()
 
           for i in {1..6}; do
             PORT=$((40000 + i))
-            echo "Creazione container warproxy-$i sulla porta $PORT (Nuova registrazione)..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,1.1.1.1 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            
-            # Controllo attivo per verificare la nuova registrazione ed evitare il 429
-            echo "Verifica nuova registrazione per warproxy-$i..."
-            for attempt in {1..15}; do
-              if curl -s -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-                echo "warproxy-$i è pronto con il nuovo IP!"
+            CONTAINER="warproxy-$i"
+            echo "========================================="
+            echo "Preparazione $CONTAINER sulla porta $PORT"
+
+            success=0
+            for recreate in $(seq 1 $MAX_RECREATE); do
+              echo "[Tentativo $recreate/$MAX_RECREATE] Avvio $CONTAINER..."
+              docker rm -f $CONTAINER 2>/dev/null || true
+              docker run --name $CONTAINER \
+                --network host \
+                -e SOCKS5_PORT=$PORT \
+                -e DNS=2606:4700:4700::1111,1.1.1.1 \
+                -e VERBOSE=true \
+                -d ghcr.io/kingcc/warproxy:latest
+
+              # Attesa attiva
+              start_time=$(date +%s)
+              ready=0
+              while true; do
+                if curl -s --max-time 5 -x socks5h://127.0.0.1:$PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+                  echo "[OK] $CONTAINER pronto e registrato."
+                  ready=1
+                  break
+                fi
+                elapsed=$(($(date +%s) - start_time))
+                if [ $elapsed -ge $VERIFY_TIMEOUT ]; then
+                  echo "[TIMEOUT] $CONTAINER non risponde dopo ${VERIFY_TIMEOUT}s"
+                  break
+                fi
+                sleep 5
+              done
+
+              if [ $ready -eq 1 ]; then
+                success=1
                 break
+              else
+                echo "[RETRY] Ricreazione $CONTAINER..."
+                docker rm -f $CONTAINER 2>/dev/null || true
+                sleep 5
               fi
-              sleep 3
             done
-            sleep 5
+
+            if [ $success -eq 1 ]; then
+              echo "[INFO] $CONTAINER aggiunto alla lista dei proxy funzionanti."
+              SUCCESS_MAP[$i]=1
+              WORKING_PORTS+=($PORT)
+            else
+              echo "[WARN] $CONTAINER non disponibile dopo $MAX_RECREATE tentativi. I nodi useranno un altro proxy."
+            fi
+
+            sleep $WAIT_BETWEEN_CONTAINERS
           done
 
-          echo "Attesa stabilizzazione dei nuovi tunnel freschi..."
-          sleep 10
+          # Scrive la lista delle porte funzionanti in un JSON
+          if [ ${#WORKING_PORTS[@]} -eq 0 ]; then
+            echo "[ERRORE CRITICO] Nessun container WARP funzionante. Impossibile proseguire."
+            exit 1
+          fi
+
+          echo "Porte funzionanti: ${WORKING_PORTS[@]}"
+          python3 -c "import json; json.dump(${WORKING_PORTS[@]}, open('$WORKING_PROXIES_FILE','w'))"
+          echo "Lista proxy salvata in $WORKING_PROXIES_FILE"
 
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
@@ -941,7 +996,7 @@ jobs:
           EOF
           python -u m2_step2_setup.py
 
-      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
+      - name: Creazione Script Python - STEP 2 (con fallback proxy automatico)
         run: |
           cat << 'EOF' > m2_step2.py
           import asyncio
@@ -961,6 +1016,38 @@ jobs:
 
           # File dedicato per nodo: stesso principio dello Step 1.
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
+
+          # Carica la lista dei proxy funzionanti generata dallo step precedente
+          WORKING_PROXIES_FILE = "/tmp/working_proxies.json"
+          FALLBACK_PROXIES = []
+          try:
+              with open(WORKING_PROXIES_FILE, "r") as f:
+                  FALLBACK_PROXIES = json.load(f)
+          except Exception:
+              pass
+
+          if not FALLBACK_PROXIES:
+              print(f"[NODO {node_id}] Nessun proxy funzionante trovato. Uscita.")
+              sys.exit(1)
+
+          # Determina la porta da usare: quella assegnata, se presente, altrimenti una
+          # scelta casuale tra quelle disponibili.
+          def scegli_proxy():
+              if INITIAL_PORT in FALLBACK_PROXIES:
+                  return INITIAL_PORT
+              # Fallback: scegli una porta a caso tra quelle funzionanti
+              fallback = random.choice(FALLBACK_PROXIES)
+              print(f"[NODO {node_id}] Porta {INITIAL_PORT} non disponibile. "
+                    f"Uso il proxy di fallback sulla porta {fallback}.")
+              return fallback
+
+          # Funzione di utilità per verificare rapidamente la connettività del proxy
+          async def test_proxy_connectivity(proxy_port, page):
+              try:
+                  await page.goto("https://api64.ipify.org?format=json", timeout=10000)
+                  return True
+              except Exception:
+                  return False
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
@@ -998,7 +1085,6 @@ jobs:
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
 
-              # Profilo con noise attivo di default e path per font corretti (identico alla baseline).
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
@@ -1010,38 +1096,69 @@ jobs:
                   "--fingerprint-platform=linux"
               ]
 
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
-              try:
-                  context = await launch_persistent_context_async(
-                      profile_dir,
-                      headless=False,
-                      humanize=True,
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                      viewport={"width": 1920, "height": 940},
-                      geoip=True,
-                      args=base_args
-                  )
-                  page = await context.new_page()
+              # --- Logica di scelta del proxy e avvio browser con fallback ---
+              proxy_port = scegli_proxy()
+              proxy_string = f"socks5://127.0.0.1:{proxy_port}"
 
-                  # Rilevamento dell'IP di uscita effettivo del browser
+              print(f"[NODO {node_id}] Avvio sessione CloakBrowser con proxy sulla porta {proxy_port}...", flush=True)
+              context = None
+              page = None
+              # Proviamo ad avviare il browser con il proxy scelto; se fallisce,
+              # proviamo con un altro proxy dall'elenco (fino a esaurimento)
+              attempted_ports = set()
+              while True:
                   try:
-                      await page.goto("https://api64.ipify.org?format=json", timeout=12000)
-                      page_text = await page.locator("body").inner_text()
-                      ip_json = json.loads(page_text)
-                      outbound_ip = ip_json.get("ip", "Sconosciuto")
-                      print(f"[NODO {node_id}] [STEP 2] Sessione avviata. IP di uscita CloakBrowser: {outbound_ip}", flush=True)
+                      context = await launch_persistent_context_async(
+                          profile_dir,
+                          headless=False,
+                          humanize=True,
+                          proxy=proxy_string,
+                          viewport={"width": 1920, "height": 940},
+                          geoip=True,
+                          args=base_args
+                      )
+                      page = await context.new_page()
+                      # Verifica rapida connettività
+                      if await test_proxy_connectivity(proxy_port, page):
+                          # Ottieni IP di uscita per logging
+                          try:
+                              page_text = await page.locator("body").inner_text()
+                              ip_json = json.loads(page_text)
+                              outbound_ip = ip_json.get("ip", "Sconosciuto")
+                              print(f"[NODO {node_id}] [STEP 2] Sessione avviata. IP di uscita: {outbound_ip}")
+                          except:
+                              print(f"[NODO {node_id}] [STEP 2] Sessione avviata (IP non rilevato).")
+                          break  # successo
+                      else:
+                          print(f"[NODO {node_id}] Test connettività fallito per porta {proxy_port}.")
                   except Exception as e:
-                      print(f"[NODO {node_id}] [STEP 2] Impossibile determinare l'IP di uscita del browser: {e}", flush=True)
+                      print(f"[NODO {node_id}] Errore avvio browser con proxy {proxy_port}: {e}")
 
-                  # WARMUP Integrato - Creazione di cronologia valida
+                  # Fallback: proviamo un'altra porta
+                  attempted_ports.add(proxy_port)
+                  rimanenti = [p for p in FALLBACK_PROXIES if p not in attempted_ports]
+                  if not rimanenti:
+                      print(f"[NODO {node_id}] Nessun proxy funzionante rimasto. Impossibile procedere.")
+                      return
+                  proxy_port = random.choice(rimanenti)
+                  proxy_string = f"socks5://127.0.0.1:{proxy_port}"
+                  print(f"[NODO {node_id}] Nuovo tentativo con proxy sulla porta {proxy_port}...")
+                  # Pulisci contesto precedente se necessario
+                  if context:
+                      try: await context.close()
+                      except: pass
+                  context = None
+                  page = None
+                  await asyncio.sleep(2)
+
+              # WARMUP Integrato (solo se siamo riusciti ad avviare il browser)
+              try:
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
                   await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
-
               except Exception as e:
-                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
-                  return
+                  print(f"[NODO {node_id}] Warmup parzialmente fallito: {e}")
 
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
 
@@ -1050,7 +1167,7 @@ jobs:
                   try:
                       query_to_search = get_query_from_url(url)
 
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
+                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -1081,25 +1198,19 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
 
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
 
                       await asyncio.sleep(6)
 
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
 
-                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
 
-                      # Controllo sul <title>: segnale ad alta confidenza, indipendente
-                      # dal testo visibile, basso rischio di falsi positivi.
                       title_blocked = False
                       title_reason = ""
                       if soup.title and soup.title.string:
@@ -1112,19 +1223,9 @@ jobs:
                                   title_reason = f"WAF nel titolo: {wt}"
                                   break
 
-                      # Testo completo, senza troncamento, in Markdown pulito per l'LLM.
-                      # Il check di validazione gira sul testo GIA' pulito, non sull'HTML
-                      # grezzo troncato: una pagina di blocco corta resta corta anche dopo
-                      # la pulizia, invece di essere gonfiata da tag/script residui.
                       text_full = html_to_clean_markdown(raw_html, url)
                       text_lower_full = text_full.lower()
 
-                      # Blocklist aggiornata su base OSSERVATA (run reali): aggiunte le
-                      # frasi esatte di pagine di blocco che passavano il controllo
-                      # precedente ("Robot Challenge Screen" / "Checking the site
-                      # connection security" da Cloudflare; "unusual traffic from your
-                      # computer network" da Google), senza rimuovere nessuna delle
-                      # frasi originali.
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
