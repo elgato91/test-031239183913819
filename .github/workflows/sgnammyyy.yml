@@ -1006,7 +1006,6 @@ jobs:
                   "--fingerprint-storage-quota=5000",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
-                  "--enable-blink-features=FakeShadowRoot",
                   "--fingerprint-noise=false",
                   "--fingerprint-platform=linux"
               ]
