@@ -1479,7 +1479,7 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   "--fingerprint=42069",
-                  "--fingerprint-storage-quota=500",
+                  "--fingerprint-storage-quota=5092",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
