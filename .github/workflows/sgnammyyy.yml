@@ -1471,7 +1471,7 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=6105",
+                  "--fingerprint-storage-quota=500",
                   "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
                   "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
                   "--fingerprint-platform=linux"
