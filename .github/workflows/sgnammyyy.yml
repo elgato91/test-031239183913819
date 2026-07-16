@@ -1497,9 +1497,18 @@ jobs:
                   )
                   page = await context.new_page()
 
-                  # 3. Iniezione a livello di prototipo per colmare i leak su Linux Headless
+                  # Iniezione a livello di Prototype con mascheramento toString nativo
                   await page.add_init_script("""
-                      // Correzione dello spazio disponibile sullo schermo per simulare la presenza fisica della barra delle applicazioni (Taskbar)
+                      const makeNative = (fn, name) => {
+                          Object.defineProperty(fn, 'name', { value: name, configurable: true });
+                          Object.defineProperty(fn, 'toString', {
+                              value: function toString() { return `function ${name}() { [native code] }`; },
+                              writable: true,
+                              configurable: true,
+                              enumerable: false
+                          });
+                      };
+
                       if ('Screen' in window) {
                           Object.defineProperty(Screen.prototype, 'availHeight', {
                               get: function() { return 1040; },
@@ -1513,22 +1522,26 @@ jobs:
                           });
                       }
 
-                      // Ripristino delle API tipicamente assenti in ambienti privi di interfaccia desktop completa
                       if ('Navigator' in window) {
                           if (!Navigator.prototype.share) {
+                              const fakeShare = function share() { return Promise.resolve(); };
+                              makeNative(fakeShare, 'share');
                               Object.defineProperty(Navigator.prototype, 'share', {
-                                  value: function share() { return Promise.resolve(); },
+                                  value: fakeShare,
                                   writable: true,
                                   configurable: true,
                                   enumerable: true
                               });
                           }
                           if (!Navigator.prototype.contacts) {
+                              const fakeContacts = {
+                                  select: async () => [],
+                                  getProperties: async () => ["name", "email", "tel"]
+                              };
+                              makeNative(fakeContacts.select, 'select');
+                              makeNative(fakeContacts.getProperties, 'getProperties');
                               Object.defineProperty(Navigator.prototype, 'contacts', {
-                                  value: {
-                                      select: async () => [],
-                                      getProperties: async () => ["name", "email", "tel"]
-                                  },
+                                  value: fakeContacts,
                                   writable: true,
                                   configurable: true,
                                   enumerable: true
@@ -1536,7 +1549,6 @@ jobs:
                           }
                       }
 
-                      // Correzione downlinkMax per evitare il leak di NetworkInformation
                       if (window.NetworkInformation && !('downlinkMax' in NetworkInformation.prototype)) {
                           Object.defineProperty(NetworkInformation.prototype, 'downlinkMax', {
                               get: function() { return 10; },
@@ -1545,16 +1557,17 @@ jobs:
                           });
                       }
 
-                      // Correzione contentIndex nel ServiceWorkerRegistration
                       if (window.ServiceWorkerRegistration && !('contentIndex' in ServiceWorkerRegistration.prototype)) {
+                          const fakeContentIndex = {
+                              add: async () => {},
+                              delete: async () => {},
+                              getAll: async () => []
+                          };
+                          makeNative(fakeContentIndex.add, 'add');
+                          makeNative(fakeContentIndex.delete, 'delete');
+                          makeNative(fakeContentIndex.getAll, 'getAll');
                           Object.defineProperty(ServiceWorkerRegistration.prototype, 'contentIndex', {
-                              get: function() {
-                                  return {
-                                      add: async () => {},
-                                      delete: async () => {},
-                                      getAll: async () => []
-                                  };
-                              },
+                              get: function() { return fakeContentIndex; },
                               configurable: true,
                               enumerable: true
                           });
