@@ -25,6 +25,11 @@ jobs:
             fonts-freefont-ttf \
             fonts-noto-color-emoji
           
+          # Crea la cartella dei font locali dell'utente e copia i file installati
+          mkdir -p ~/.fonts
+          find /usr/share/fonts/truetype/ -name "*.ttf" -exec cp {} ~/.fonts/ \;
+          
+          # Rigenera la cache dei font sia a livello di sistema che locale
           fc-cache -f -v
 
       - name: Installazione Dipendenze Scraper
