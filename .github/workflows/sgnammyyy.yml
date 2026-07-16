@@ -1232,8 +1232,9 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=120000",
+                  "--fingerprint=32061",
+                  "--fingerprint-device-memory=16",
+                  "--fingerprint-storage-quota=2010",
                   "--fingerprint-platform=linux"
               ]
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
