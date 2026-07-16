@@ -1487,7 +1487,7 @@ jobs:
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      viewport={"width": 1920, "height": 940}, 
+                      no_viewport=True,
                       args=base_args
                   )
                   page = await context.new_page()
