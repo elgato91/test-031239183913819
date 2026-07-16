@@ -1479,12 +1479,15 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--fingerprint-storage-quota=120000",
+                  "--fingerprint-storage-quota=6021",
+                  f"--fingerprint={random.randint(100000, 999999)}",
+                  "--fingerprint-noise=false",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--window-size=1920,1040",
                   "--window-position=0,0",
                   "--start-maximized",
+                  "--disable-blink-features=AutomationControlled",
                   "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
                   "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
                   "--fingerprint-platform=linux"
@@ -1498,7 +1501,6 @@ jobs:
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      no_viewport=True,
                       viewport={"width": 1920, "height": 940},
                       args=base_args
                   )
