@@ -1504,81 +1504,128 @@ jobs:
                   )
                   page = await context.new_page()
 
-                  # Iniezione a livello di Prototype con mascheramento toString nativo
+                  # Iniezione del motore Stealth Enterprise (attivo sempre su tutti i domini)
                   await page.add_init_script("""
-                      const makeNative = (fn, name) => {
-                          Object.defineProperty(fn, 'name', { value: name, configurable: true });
-                          Object.defineProperty(fn, 'toString', {
-                              value: function toString() { return `function ${name}() { [native code] }`; },
-                              writable: true,
-                              configurable: true,
-                              enumerable: false
-                          });
+                  (function() {
+                      // Chiusure private protette nello scope dell'IIFE (inaccessibili ai controlli di Google)
+                      const oldToString = Function.prototype.toString;
+                      const overridden = new WeakMap();
+
+                      // Override robusto di toString che risponde correttamente a catene ricorsive .toString()
+                      const newToString = function toString() {
+                          if (this === newToString) {
+                              return 'function toString() { [native code] }';
+                          }
+                          if (overridden.has(this)) {
+                              return `function ${overridden.get(this)}() { [native code] }`;
+                          }
+                          return oldToString.call(this);
                       };
 
+                      // Elimina il leak del prototipo sulla nostra funzione toString
+                      if (newToString.prototype) {
+                          delete newToString.prototype;
+                      }
+
+                      // Configura i descrittori di toString per essere identici ai nativi
+                      Object.defineProperty(newToString, 'name', { value: 'toString', configurable: true, writable: false, enumerable: false });
+                      Object.defineProperty(newToString, 'length', { value: 0, configurable: true, writable: false, enumerable: false });
+
+                      // Applica il nuovo toString su Function.prototype
+                      Object.defineProperty(Function.prototype, 'toString', {
+                          value: newToString,
+                          writable: true,
+                          configurable: true,
+                          enumerable: false
+                      });
+
+                      // Helper per mascherare le funzioni emulate e renderle identiche alle native
+                      const patchToLookNative = (fn, name, length = 0) => {
+                          Object.defineProperty(fn, 'name', { value: name, configurable: true, writable: false, enumerable: false });
+                          Object.defineProperty(fn, 'length', { value: length, configurable: true, writable: false, enumerable: false });
+                          if (fn.prototype) {
+                              delete fn.prototype; // Elimina il prototype leak
+                          }
+                          overridden.set(fn, name); // Registra nella mappa privata
+                      };
+
+                      // === 1. Mock di Screen.prototype (Risoluzione e Taskbar) ===
                       if ('Screen' in window) {
                           Object.defineProperty(Screen.prototype, 'availHeight', {
-                              get: function() { return 1040; },
+                              get: function availHeight() { return 1040; },
                               configurable: true,
                               enumerable: true
                           });
                           Object.defineProperty(Screen.prototype, 'availWidth', {
-                              get: function() { return 1920; },
+                              get: function availWidth() { return 1920; },
+                              configurable: true,
+                              enumerable: true
+                          });
+                          
+                          const descH = Object.getOwnPropertyDescriptor(Screen.prototype, 'availHeight');
+                          const descW = Object.getOwnPropertyDescriptor(Screen.prototype, 'availWidth');
+                          patchToLookNative(descH.get, 'get availHeight', 0);
+                          patchToLookNative(descW.get, 'get availWidth', 0);
+                      }
+
+                      // === 2. Mock di Navigator.prototype.share ===
+                      if ('Navigator' in window && !Navigator.prototype.share) {
+                          const fakeShare = function share() { return Promise.resolve(); };
+                          patchToLookNative(fakeShare, 'share', 1);
+                          Object.defineProperty(Navigator.prototype, 'share', {
+                              value: fakeShare,
+                              writable: true,
                               configurable: true,
                               enumerable: true
                           });
                       }
 
-                      if ('Navigator' in window) {
-                          if (!Navigator.prototype.share) {
-                              const fakeShare = function share() { return Promise.resolve(); };
-                              makeNative(fakeShare, 'share');
-                              Object.defineProperty(Navigator.prototype, 'share', {
-                                  value: fakeShare,
-                                  writable: true,
-                                  configurable: true,
-                                  enumerable: true
-                              });
-                          }
-                          if (!Navigator.prototype.contacts) {
-                              const fakeContacts = {
-                                  select: async () => [],
-                                  getProperties: async () => ["name", "email", "tel"]
-                              };
-                              makeNative(fakeContacts.select, 'select');
-                              makeNative(fakeContacts.getProperties, 'getProperties');
-                              Object.defineProperty(Navigator.prototype, 'contacts', {
-                                  value: fakeContacts,
-                                  writable: true,
-                                  configurable: true,
-                                  enumerable: true
-                              });
-                          }
+                      // === 3. Mock di Navigator.prototype.contacts ===
+                      if ('Navigator' in window && !Navigator.prototype.contacts) {
+                          const select = function select() { return Promise.resolve([]); };
+                          const getProperties = function getProperties() { return Promise.resolve(["name", "email", "tel"]); };
+                          patchToLookNative(select, 'select', 0);
+                          patchToLookNative(getProperties, 'getProperties', 0);
+
+                          const fakeContacts = { select, getProperties };
+                          Object.defineProperty(Navigator.prototype, 'contacts', {
+                              value: fakeContacts,
+                              writable: true,
+                              configurable: true,
+                              enumerable: true
+                          });
                       }
 
+                      // === 4. Mock di NetworkInformation.prototype.downlinkMax ===
                       if (window.NetworkInformation && !('downlinkMax' in NetworkInformation.prototype)) {
                           Object.defineProperty(NetworkInformation.prototype, 'downlinkMax', {
-                              get: function() { return 10; },
+                              get: function downlinkMax() { return 10; },
                               configurable: true,
                               enumerable: true
                           });
+                          const desc = Object.getOwnPropertyDescriptor(NetworkInformation.prototype, 'downlinkMax');
+                          patchToLookNative(desc.get, 'get downlinkMax', 0);
                       }
 
+                      // === 5. Mock di ServiceWorkerRegistration.prototype.contentIndex ===
                       if (window.ServiceWorkerRegistration && !('contentIndex' in ServiceWorkerRegistration.prototype)) {
-                          const fakeContentIndex = {
-                              add: async () => {},
-                              delete: async () => {},
-                              getAll: async () => []
-                          };
-                          makeNative(fakeContentIndex.add, 'add');
-                          makeNative(fakeContentIndex.delete, 'delete');
-                          makeNative(fakeContentIndex.getAll, 'getAll');
+                          const add = function add() { return Promise.resolve(); };
+                          const deleteFn = function deleteFn() { return Promise.resolve(); };
+                          const getAll = function getAll() { return Promise.resolve([]); };
+                          patchToLookNative(add, 'add', 1);
+                          patchToLookNative(deleteFn, 'delete', 1);
+                          patchToLookNative(getAll, 'getAll', 0);
+
+                          const fakeContentIndex = { add, delete: deleteFn, getAll };
                           Object.defineProperty(ServiceWorkerRegistration.prototype, 'contentIndex', {
-                              get: function() { return fakeContentIndex; },
+                              get: function contentIndex() { return fakeContentIndex; },
                               configurable: true,
                               enumerable: true
                           });
+                          const desc = Object.getOwnPropertyDescriptor(ServiceWorkerRegistration.prototype, 'contentIndex');
+                          patchToLookNative(desc.get, 'get contentIndex', 0);
                       }
+                  })();
                   """)
 
                   # Rilevamento dell'IP di uscita effettivo del browser
