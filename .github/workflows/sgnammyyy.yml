@@ -1,3 +1,24 @@
+Skip to content
+elgato91
+test-031239183913819
+Repository navigation
+Code
+Issues
+Pull requests
+Actions
+Projects
+Wiki
+Security and quality
+Insights
+Settings
+The gmkaki organization has been flagged.
+Because of that, your organization is hidden from the public. If you believe this is a mistake, contact support to have your organization’s status reviewed.
+Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+Test RAG Challenge 2026 Università di Roma Corso di Computer Science #371
+All jobs
+Run details
+Workflow file for this run
+.github/workflows/sgnammyyy.yml at abb79ed
 name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
 
 on:
@@ -18,9 +39,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
+            fonts-ubuntu \
+            fonts-dejavu-core \
+            fonts-dejavu-extra \
+            fonts-liberation \
+            fonts-freefont-ttf \
+            fonts-noto-color-emoji
           
+          # Crea la cartella dei font locali dell'utente e copia i file installati
+          mkdir -p ~/.fonts
+          find /usr/share/fonts/truetype/ -name "*.ttf" -exec cp {} ~/.fonts/ \;
+          
+          # Rigenera la cache dei font sia a livello di sistema che locale
           fc-cache -f -v
       - name: Installazione Dipendenze Scraper
         run: |
@@ -1232,9 +1262,17 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
-                  "--fingerprint=32061",
-                  "--fingerprint-device-memory=16",
-                  "--fingerprint-storage-quota=2010",
+                  "--fingerprint-storage-quota=6021",
+                  f"--fingerprint={random.randint(100000, 999999)}",
+                  "--fingerprint-noise=false",
+                  "--fingerprint-screen-width=1920",
+                  "--fingerprint-screen-height=1080",
+                  "--window-size=1920,1040",
+                  "--window-position=0,0",
+                  "--start-maximized",
+                  "--disable-blink-features=AutomationControlled",
+                  "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
+                  "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
                   "--fingerprint-platform=linux"
               ]
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
@@ -1245,10 +1283,10 @@ jobs:
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
+                      viewport={"width": 1920, "height": 940},
                       args=base_args
                   )
                   page = await context.new_page()
-                  
                   # Rilevamento dell'IP di uscita effettivo del browser
                   try:
                       await page.goto("https://api64.ipify.org?format=json", timeout=12000)
