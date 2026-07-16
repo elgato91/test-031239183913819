@@ -217,6 +217,62 @@ jobs:
             done
             elabora_esiti "${files[@]}"
           }
+          # --- ROBUSTEZZA ENTERPRISE: nessun nodo puo' restare senza proxy ---
+          # Se uno slot non ha ottenuto un IP WARP valido dopo tutte le ondate,
+          # non deve MAI restare orfano: eredita la porta di uno slot riuscito,
+          # scelto in round-robin tra i sopravvissuti per distribuire il
+          # traffico extra in modo bilanciato (niente hotspot su un solo IP
+          # donatore, niente fragilita' da "sempre il primo disponibile").
+          # NOTA: piu' nodi possono quindi condividere la stessa porta/proxy
+          # WARP in caso di fallback; il container caomingjun/warp regge
+          # connessioni multiple concorrenti sullo stesso tunnel senza problemi,
+          # quindi la condivisione e' sicura dal punto di vista tecnico.
+          genera_mappa_slot_con_fallback() {
+            local nodi_necessari=$1
+            local porta_base=$2
+            local mappa_output=$3
+            local n_ok=${#SLOT_OK[@]}
+            if [ "$n_ok" -eq 0 ]; then
+              echo "::warning::${CONTAINER_PREFIX}: NESSUNO slot ha ottenuto un IP WARP valido. Impossibile applicare il fallback (nessun donatore disponibile): tutti i nodi resteranno senza proxy per questa fase."
+              echo "{}" > "$mappa_output"
+              return 0
+            fi
+            python3 - "$nodi_necessari" "$porta_base" "$mappa_output" "${SLOT_OK[@]}" << 'PYEOF'
+          import sys
+          import json
+          nodi_necessari = int(sys.argv[1])
+          porta_base = int(sys.argv[2])
+          output_path = sys.argv[3]
+          slot_ok = [int(s) for s in sys.argv[4:]]
+          slot_ok_set = set(slot_ok)
+          mappa = {}
+          donatori_idx = 0
+          for slot in range(1, nodi_necessari + 1):
+              if slot in slot_ok_set:
+                  mappa[str(slot)] = {
+                      "porta": porta_base + slot,
+                      "proprio": True,
+                      "slot_origine": slot
+                  }
+              else:
+                  # Round-robin puro sui sopravvissuti: distribuisce equamente
+                  # il carico extra, indipendente dall'ordine di iterazione.
+                  slot_donatore = slot_ok[donatori_idx % len(slot_ok)]
+                  donatori_idx += 1
+                  mappa[str(slot)] = {
+                      "porta": porta_base + slot_donatore,
+                      "proprio": False,
+                      "slot_origine": slot_donatore
+                  }
+          with open(output_path, "w") as f:
+              json.dump(mappa, f, indent=2)
+          for slot_str, info in sorted(mappa.items(), key=lambda kv: int(kv[0])):
+              if info["proprio"]:
+                  print(f"  [slot {slot_str}] porta propria {info['porta']} (nessun fallback necessario)")
+              else:
+                  print(f"  [slot {slot_str}] FALLBACK ATTIVO: prende in prestito la porta di slot {info['slot_origine']} (porta {info['porta']})")
+          PYEOF
+          }
           echo "=== STEP 1 - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
           TUTTI_SLOT=($(seq 1 "$NODI_NECESSARI"))
           esegui_ondata "${TUTTI_SLOT[@]}"
@@ -236,7 +292,7 @@ jobs:
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
           if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si prosegue comunque."
+            echo "::warning::STEP 1: dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si applica il fallback round-robin sui nodi mancanti."
           fi
           echo "=== STEP 1 completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
           for slot in $(seq 1 "$NODI_NECESSARI"); do
@@ -246,6 +302,11 @@ jobs:
               echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
             fi
           done
+          echo ""
+          echo "=== Generazione mappa slot->porta con fallback (Step 1) ==="
+          genera_mappa_slot_con_fallback "$NODI_NECESSARI" "$PORTA_BASE" "/tmp/slot_port_map_step1.json"
+          echo "--- Contenuto mappa generata ---"
+          cat /tmp/slot_port_map_step1.json
         env:
           CONTAINER_PREFIX: step1
           MODALITA_LABEL: permissivo, solo IPv6 univoco
@@ -775,7 +836,7 @@ jobs:
               asyncio.run(main())
           EOF
           echo "::endgroup::"
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, sincrono come da baseline)
+      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi, sincrono come da baseline, con fallback IP condiviso)
         run: |
           echo "::group::Scrittura m2_step1.py"
           cat << 'EOF' > m2_step1.py
@@ -788,11 +849,46 @@ jobs:
           from bs4 import BeautifulSoup
           from curl_cffi import requests
           from extraction_utils import html_to_clean_markdown
+
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
+
+          # --- ROBUSTEZZA: la porta NON si calcola piu' come 40000+node_id.
+          # Si legge dalla mappa slot->porta generata dal setup WARP, che gia'
+          # contiene il fallback: se lo slot di questo nodo non ha un proxy
+          # proprio, la mappa punta alla porta di un nodo "donatore" riuscito.
+          # Questo garantisce che un nodo non resti MAI senza proxy attivo,
+          # a meno che TUTTI gli slot siano falliti (caso limite gestito a parte).
+          SLOT_MAP_PATH = "/tmp/slot_port_map_step1.json"
+          ACTIVE_PORT = None
+          IS_BORROWED = False
+          BORROWED_FROM_SLOT = None
+
+          if os.path.exists(SLOT_MAP_PATH):
+              with open(SLOT_MAP_PATH, "r") as f:
+                  slot_map = json.load(f)
+              entry = slot_map.get(str(node_id))
+              if entry:
+                  ACTIVE_PORT = entry["porta"]
+                  IS_BORROWED = not entry["proprio"]
+                  BORROWED_FROM_SLOT = entry.get("slot_origine")
+
+          if ACTIVE_PORT is None:
+              # Nessuna mappa o slot assente dalla mappa: fallback finale sulla
+              # porta calcolata storicamente, per non bloccare tutto il job in
+              # scenari anomali (es. file mappa non generato per un errore a monte).
+              ACTIVE_PORT = 40000 + node_id
+              print(f"[NODO {node_id}] ATTENZIONE: mappa slot->porta non trovata o slot assente. "
+                    f"Uso la porta calcolata di default {ACTIVE_PORT} (nessuna garanzia di proxy attivo).", flush=True)
+          elif IS_BORROWED:
+              print(f"[NODO {node_id}] FALLBACK ATTIVO: il proxy proprio non era disponibile. "
+                    f"Uso la porta {ACTIVE_PORT} in prestito dallo slot {BORROWED_FROM_SLOT}. "
+                    f"Le URL assegnate a questo nodo verranno comunque processate.", flush=True)
+
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
+
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
@@ -846,14 +942,35 @@ jobs:
                       f.flush()
               except Exception as e:
                   print(f"[NODO {node_id}] Errore pubblicazione per l'estrattore: {e}", flush=True)
+
           is_active, outbound_ip = verify_proxy_active(ACTIVE_PORT)
-          if not is_active: sys.exit(0)
+          if not is_active:
+              # Anche il fallback puo', in teoria, puntare a un proxy che nel
+              # frattempo e' morto (raro ma possibile). In tal caso NON usciamo:
+              # scriviamo comunque i file di output/failed vuoti/pieni in modo che
+              # il merge a valle non si rompa, e segnaliamo il problema chiaramente.
+              print(f"[NODO {node_id}] ERRORE CRITICO: proxy sulla porta {ACTIVE_PORT} non raggiungibile "
+                    f"(anche dopo fallback). Le URL di questo nodo vengono spostate integralmente allo Step 2.", flush=True)
+              queue_file = f"/tmp/step1_queue_{node_id}.json"
+              targets_rimanenti = []
+              if os.path.exists(queue_file):
+                  with open(queue_file, "r") as f:
+                      targets_rimanenti = json.load(f)
+              with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f:
+                  f.write(f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 SALTATO (proxy non disponibile)\n{'#'*60}\n")
+              with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f:
+                  json.dump(targets_rimanenti, f)
+              sys.exit(0)
+
           print(f"[NODO {node_id}] Proxy attivo! IP di uscita utilizzato: {outbound_ip}", flush=True)
           queue_file = f"/tmp/step1_queue_{node_id}.json"
           if not os.path.exists(queue_file): sys.exit(0)
           with open(queue_file, "r") as f:
               targets = json.load(f)
+
           results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
+          if IS_BORROWED:
+              results += f"[NOTA: nodo in fallback, IP in prestito dallo slot {BORROWED_FROM_SLOT}]\n"
           failed_targets = []
           session = requests.Session(impersonate="chrome120")
           session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
@@ -1106,6 +1223,52 @@ jobs:
             done
             elabora_esiti "${files[@]}"
           }
+          # --- ROBUSTEZZA ENTERPRISE: nessun nodo puo' restare senza proxy ---
+          # Stessa logica di Step 1: fallback round-robin sui sopravvissuti.
+          genera_mappa_slot_con_fallback() {
+            local nodi_necessari=$1
+            local porta_base=$2
+            local mappa_output=$3
+            local n_ok=${#SLOT_OK[@]}
+            if [ "$n_ok" -eq 0 ]; then
+              echo "::warning::${CONTAINER_PREFIX}: NESSUNO slot ha ottenuto un IP WARP valido. Impossibile applicare il fallback (nessun donatore disponibile): tutti i nodi resteranno senza proxy per questa fase."
+              echo "{}" > "$mappa_output"
+              return 0
+            fi
+            python3 - "$nodi_necessari" "$porta_base" "$mappa_output" "${SLOT_OK[@]}" << 'PYEOF'
+          import sys
+          import json
+          nodi_necessari = int(sys.argv[1])
+          porta_base = int(sys.argv[2])
+          output_path = sys.argv[3]
+          slot_ok = [int(s) for s in sys.argv[4:]]
+          slot_ok_set = set(slot_ok)
+          mappa = {}
+          donatori_idx = 0
+          for slot in range(1, nodi_necessari + 1):
+              if slot in slot_ok_set:
+                  mappa[str(slot)] = {
+                      "porta": porta_base + slot,
+                      "proprio": True,
+                      "slot_origine": slot
+                  }
+              else:
+                  slot_donatore = slot_ok[donatori_idx % len(slot_ok)]
+                  donatori_idx += 1
+                  mappa[str(slot)] = {
+                      "porta": porta_base + slot_donatore,
+                      "proprio": False,
+                      "slot_origine": slot_donatore
+                  }
+          with open(output_path, "w") as f:
+              json.dump(mappa, f, indent=2)
+          for slot_str, info in sorted(mappa.items(), key=lambda kv: int(kv[0])):
+              if info["proprio"]:
+                  print(f"  [slot {slot_str}] porta propria {info['porta']} (nessun fallback necessario)")
+              else:
+                  print(f"  [slot {slot_str}] FALLBACK ATTIVO: prende in prestito la porta di slot {info['slot_origine']} (porta {info['porta']})")
+          PYEOF
+          }
           echo "=== STEP 2 (Nuovi IP) - ONDATA 1/$MAX_ONDATE: avvio $NODI_NECESSARI nodi sugli slot fissi 1-$NODI_NECESSARI (ritardo ${DELAY_MIN}-${DELAY_MAX}s, ${MODALITA_LABEL}) ==="
           TUTTI_SLOT=($(seq 1 "$NODI_NECESSARI"))
           esegui_ondata "${TUTTI_SLOT[@]}"
@@ -1125,7 +1288,7 @@ jobs:
           ELAPSED_FINALE=$(( $(date +%s) - START_TS ))
           echo ""
           if [ "${#SLOT_OK[@]}" -lt "$NODI_NECESSARI" ]; then
-            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si prosegue comunque."
+            echo "::warning::STEP 2 (Nuovi IP): dopo $MAX_ONDATE ondate (max consentite), ottenuti ${#SLOT_OK[@]}/$NODI_NECESSARI slot. Si applica il fallback round-robin sui nodi mancanti."
           fi
           echo "=== STEP 2 (Nuovi IP) completata (${#SLOT_OK[@]}/$NODI_NECESSARI slot), in ${ELAPSED_FINALE}s ==="
           for slot in $(seq 1 "$NODI_NECESSARI"); do
@@ -1135,6 +1298,11 @@ jobs:
               echo "  slot $slot (porta $((PORTA_BASE+slot))) -> NON DISPONIBILE"
             fi
           done
+          echo ""
+          echo "=== Generazione mappa slot->porta con fallback (Step 2) ==="
+          genera_mappa_slot_con_fallback "$NODI_NECESSARI" "$PORTA_BASE" "/tmp/slot_port_map_step2.json"
+          echo "--- Contenuto mappa generata ---"
+          cat /tmp/slot_port_map_step2.json
         env:
           CONTAINER_PREFIX: step2
           MODALITA_LABEL: rigoroso, IPv4+IPv6 univoci
@@ -1161,7 +1329,7 @@ jobs:
           EOF
           echo "::endgroup::"
           python -u m2_step2_setup.py
-      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline)
+      - name: Creazione Script Python - STEP 2 (Async CloakBrowser, identico alla baseline, con fallback IP condiviso)
         run: |
           echo "::group::Scrittura m2_step2.py"
           cat << 'EOF' > m2_step2.py
@@ -1176,10 +1344,38 @@ jobs:
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
           from extraction_utils import html_to_clean_markdown
+
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
+
+          # --- ROBUSTEZZA: stessa logica di m2_step1.py. La porta si legge dalla
+          # mappa slot->porta generata dal setup WARP Step 2, che gia' contiene il
+          # fallback round-robin sui sopravvissuti. Un nodo non resta mai orfano.
+          SLOT_MAP_PATH = "/tmp/slot_port_map_step2.json"
+          INITIAL_PORT = None
+          IS_BORROWED = False
+          BORROWED_FROM_SLOT = None
+
+          if os.path.exists(SLOT_MAP_PATH):
+              with open(SLOT_MAP_PATH, "r") as f:
+                  slot_map = json.load(f)
+              entry = slot_map.get(str(node_id))
+              if entry:
+                  INITIAL_PORT = entry["porta"]
+                  IS_BORROWED = not entry["proprio"]
+                  BORROWED_FROM_SLOT = entry.get("slot_origine")
+
+          if INITIAL_PORT is None:
+              INITIAL_PORT = 40000 + node_id
+              print(f"[NODO {node_id}] ATTENZIONE: mappa slot->porta non trovata o slot assente. "
+                    f"Uso la porta calcolata di default {INITIAL_PORT} (nessuna garanzia di proxy attivo).", flush=True)
+          elif IS_BORROWED:
+              print(f"[NODO {node_id}] FALLBACK ATTIVO: il proxy proprio non era disponibile. "
+                    f"Uso la porta {INITIAL_PORT} in prestito dallo slot {BORROWED_FROM_SLOT}. "
+                    f"Le URL assegnate a questo nodo verranno comunque processate.", flush=True)
+
           SCRAPED_CONTENT_PATH = f"scraped_content_node_{node_id}.jsonl"
+
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
                   parsed = urlparse(url)
@@ -1209,9 +1405,9 @@ jobs:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
                   return
               # Verifica rapida e leggera che il proxy sia vivo PRIMA di avviare
-              # l'intero browser: se lo slot WARP non si e' mai registrato (nodo
-              # escluso in precedenza), evita di sprecare tempo dentro Playwright
-              # con un proxy fantasma.
+              # l'intero browser: con la mappa slot->porta questo controllo ora
+              # verifica il proxy EFFETTIVO (proprio o in prestito), non piu' una
+              # porta calcolata alla cieca che potrebbe non esistere.
               proxy_vivo = False
               try:
                   test_session = requests.Session(impersonate="chrome120")
@@ -1222,10 +1418,16 @@ jobs:
               except Exception:
                   pass
               if not proxy_vivo:
-                  print(f"[NODO {node_id}] Proxy sulla porta {INITIAL_PORT} non raggiungibile: "
-                        f"slot WARP non registrato per questo nodo. Salto lo Step 2.", flush=True)
+                  # Anche il proxy in prestito, in rari casi, puo' essere morto nel
+                  # frattempo. Non abbandoniamo comunque le URL: le segnaliamo come
+                  # fallite in modo esplicito, cosi' il merge finale resta coerente
+                  # e nessun target sparisce silenziosamente.
+                  motivo = ("proxy in prestito (fallback) non raggiungibile"
+                            if IS_BORROWED else "proxy proprio non raggiungibile")
+                  print(f"[NODO {node_id}] ERRORE CRITICO: {motivo} sulla porta {INITIAL_PORT}. "
+                        f"Salto lo Step 2 per questo nodo; le sue URL restano non recuperate.", flush=True)
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2 SALTATO (proxy WARP non disponibile)\n{'#'*60}\n")
+                      f.write(f"\n{'#'*60}\nNODO {node_id} - STEP 2 SALTATO ({motivo})\n{'#'*60}\n")
                   return
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
@@ -1275,6 +1477,8 @@ jobs:
                   print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
                   return
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+              if IS_BORROWED:
+                  results += f"[NOTA: nodo in fallback, IP in prestito dallo slot {BORROWED_FROM_SLOT}]\n"
               for url in targets:
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
