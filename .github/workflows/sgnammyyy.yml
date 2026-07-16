@@ -1497,6 +1497,70 @@ jobs:
                   )
                   page = await context.new_page()
 
+                  # 3. Iniezione a livello di prototipo per colmare i leak su Linux Headless
+                  await page.add_init_script("""
+                      // Correzione dello spazio disponibile sullo schermo per simulare la presenza fisica della barra delle applicazioni (Taskbar)
+                      if ('Screen' in window) {
+                          Object.defineProperty(Screen.prototype, 'availHeight', {
+                              get: function() { return 1040; },
+                              configurable: true,
+                              enumerable: true
+                          });
+                          Object.defineProperty(Screen.prototype, 'availWidth', {
+                              get: function() { return 1920; },
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
+
+                      // Ripristino delle API tipicamente assenti in ambienti privi di interfaccia desktop completa
+                      if ('Navigator' in window) {
+                          if (!Navigator.prototype.share) {
+                              Object.defineProperty(Navigator.prototype, 'share', {
+                                  value: function share() { return Promise.resolve(); },
+                                  writable: true,
+                                  configurable: true,
+                                  enumerable: true
+                              });
+                          }
+                          if (!Navigator.prototype.contacts) {
+                              Object.defineProperty(Navigator.prototype, 'contacts', {
+                                  value: {
+                                      select: async () => [],
+                                      getProperties: async () => ["name", "email", "tel"]
+                                  },
+                                  writable: true,
+                                  configurable: true,
+                                  enumerable: true
+                              });
+                          }
+                      }
+
+                      // Correzione downlinkMax per evitare il leak di NetworkInformation
+                      if (window.NetworkInformation && !('downlinkMax' in NetworkInformation.prototype)) {
+                          Object.defineProperty(NetworkInformation.prototype, 'downlinkMax', {
+                              get: function() { return 10; },
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
+
+                      // Correzione contentIndex nel ServiceWorkerRegistration
+                      if (window.ServiceWorkerRegistration && !('contentIndex' in ServiceWorkerRegistration.prototype)) {
+                          Object.defineProperty(ServiceWorkerRegistration.prototype, 'contentIndex', {
+                              get: function() {
+                                  return {
+                                      add: async () => {},
+                                      delete: async () => {},
+                                      getAll: async () => []
+                                  };
+                              },
+                              configurable: true,
+                              enumerable: true
+                          });
+                      }
+                  """)
+
                   # Rilevamento dell'IP di uscita effettivo del browser
                   try:
                       await page.goto("https://api64.ipify.org?format=json", timeout=12000)
