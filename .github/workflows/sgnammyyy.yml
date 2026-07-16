@@ -1470,10 +1470,10 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
+                  "--fingerprint=382924",
                   "--fingerprint-storage-quota=6012",
-                  "--fingerprint-screen-width=1920",
-                  "--fingerprint-screen-height=1080",
-                  "--window-size=1920,1040",
+                  "--window-position=0,28",
+                  "--window-size=1920,1052"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
@@ -1484,7 +1484,7 @@ jobs:
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      viewport={"width": 1920, "height": 940},
+                      viewport={"width": 1920, "height": 940}, 
                       args=base_args
                   )
                   page = await context.new_page()
