@@ -1480,7 +1480,6 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   "--fingerprint-storage-quota=6021",
-                  "--fingerprint-noise=false",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--window-size=1920,1040",
