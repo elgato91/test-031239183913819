@@ -1474,6 +1474,8 @@ jobs:
                   "--fingerprint-storage-quota=6012",
                   "--window-position=0,28",
                   "--window-size=1920,1052",
+                  "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
+                  "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
                   "--fingerprint-platform=linux"
               ]
 
