@@ -1479,8 +1479,7 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
-                  "--fingerprint-storage-quota=5000",
-                  "--fingerprint-noise=false",
+                  "--fingerprint-storage-quota=5500",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
                   "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
@@ -1514,7 +1513,7 @@ jobs:
                   # WARMUP Integrato - Creazione di cronologia valida
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
                   await asyncio.sleep(1)
-                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=20000)
+                  await page.goto("https://www.yelp.com", wait_until="domcontentloaded", timeout=10000)
                   await asyncio.sleep(2)
 
               except Exception as e:
