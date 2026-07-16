@@ -1234,8 +1234,6 @@ jobs:
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-storage-quota=120000",
-                  "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
-                  "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
                   "--fingerprint-platform=linux"
               ]
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
