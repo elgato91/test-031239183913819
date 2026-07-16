@@ -1473,7 +1473,8 @@ jobs:
                   "--fingerprint=382924",
                   "--fingerprint-storage-quota=6012",
                   "--window-position=0,28",
-                  "--window-size=1920,1052"
+                  "--window-size=1920,1052",
+                  "--fingerprint-platform=linux"
               ]
 
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
