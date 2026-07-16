@@ -1470,6 +1470,7 @@ jobs:
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
+                  "--fingerprint=41561",
                   "--fingerprint-storage-quota=5014",
                   "--fingerprint-gpu-vendor=Intel Open Source Technology Center",
                   "--fingerprint-gpu-renderer=Mesa Intel(R) UHD Graphics 620 (KBL GT2)",
