@@ -1480,7 +1480,6 @@ jobs:
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   "--fingerprint-storage-quota=6021",
-                  f"--fingerprint={random.randint(100000, 999999)}",
                   "--fingerprint-noise=false",
                   "--fingerprint-screen-width=1920",
                   "--fingerprint-screen-height=1080",
@@ -1501,8 +1500,6 @@ jobs:
                       humanize=True,
                       proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
                       geoip=True,
-                      viewport={"width": 1920, "height": 940},
-                      stealth_args=False,
                       args=base_args
                   )
                   page = await context.new_page()
