@@ -90,13 +90,13 @@ jobs:
           working_count = 0
           working_lock = threading.Lock()
           max_working = 50
-          camoufox_semaphore = threading.Semaphore(5) # Portato a 5 per velocizzare l'asincronia
+          camoufox_semaphore = threading.Semaphore(5)
           working_proxies = []
 
           failed_urls = []
           failed_lock = threading.Lock()
           failed_queue = Queue()
-          cf_proxy_queue = Queue() # Coda asincrona per far ruotare i proxy su Camoufox se fallisce l'avvio
+          cf_proxy_queue = Queue()
 
           # FUNZIONE DI VALIDAZIONE ROBUSTA CONTRO I FALSI POSITIVI
           def validate_content(text, url, is_html=True):
@@ -285,7 +285,7 @@ jobs:
                               try:
                                   page = browser.new_page()
                                   
-                                  # 🚀 OTTIMIZZAZIONE STRATEGICA: Blocca elementi pesanti per non saturare la banda SOCKS5
+                                  # Blocca elementi pesanti per non saturare la banda SOCKS5
                                   page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
                                   
                                   page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -309,7 +309,7 @@ jobs:
                           break
                           
                   except Exception as e:
-                      # Se il proxy fallisce l'avvio (es: timeout ipecho per il GeoIP), loopa, prende un altro proxy e riprova
+                      # Se il proxy fallisce l'avvio, estrae un nuovo proxy dalla coda e riprova
                       print(f"  [❌ CAMOUFOX Worker {worker_id}] Fallito avvio su {proxy_addr} ({e}). Provo con un altro proxy...", flush=True)
 
           if __name__ == '__main__':
@@ -355,22 +355,22 @@ jobs:
                   for future in concurrent.futures.as_completed(future_to_url):
                       print(future.result(), flush=True)
 
-              # FASE 2: Camoufox PERSISTENTE SU 20 NODI RAPIDI
+              # FASE 2: Camoufox PERSISTENTE SU 10+ NODI RAPIDI
               if failed_urls:
                   print("\n==========================================", flush=True)
-                  print(f"🔥 FASE 2: Avvio di 20 browser persistenti Camoufox per risolvere {len(failed_urls)} URL bloccati...", flush=True)
+                  print(f"🔥 FASE 2: Avvio di 10 browser persistenti Camoufox per risolvere {len(failed_urls)} URL bloccati...", flush=True)
                   print("==========================================\n", flush=True)
                   
                   # Popoliamo la coda dei lavori da completare
                   for item in failed_urls:
                       failed_queue.put(item)
                       
-                  # Popoliamo la coda asincrona dei proxy veloci per i lavoratori Camoufox
-                  # Utilizziamo l'intera lista di general_proxies come backup in caso di fallimento
-                  for p in general_proxies:
+                  # Popoliamo la coda asincrona ESCLUSIVAMENTE con i 20 proxy ultra-rapidi (Elite)
+                  for p in camoufox_proxies:
                       cf_proxy_queue.put(p)
                       
-                  num_workers = min(20, len(general_proxies), len(failed_urls))
+                  # Avvio di almeno 10 worker simultanei (fino a un massimo stabilito dai proxy disponibili o dai job)
+                  num_workers = min(10, len(camoufox_proxies), len(failed_urls))
                   cf_threads = []
                   for w_id in range(1, num_workers + 1):
                       t = threading.Thread(target=camoufox_persistent_worker, args=(w_id, failed_queue, cf_proxy_queue))
