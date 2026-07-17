@@ -1,4 +1,4 @@
-name: Extract Markdown with Jina AI
+name: Extract Markdown with Jina AI (via Tor)
 
 on:
   workflow_dispatch:
@@ -14,23 +14,35 @@ jobs:
       - name: Checkout del repository
         uses: actions/checkout@v4
 
+      # 1. Installa e avvia il servizio Tor sulla macchina GitHub
+      - name: Installa e avvia Tor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo systemctl start tor
+          echo "Attendendo 15 secondi per la creazione del circuito Tor..."
+          sleep 15
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 2. Installiamo requests e PySocks per supportare i proxy SOCKS5 di Tor
+      - name: Installa dipendenze Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pysocks
+
       - name: Estrai Markdown con Jina AI
-        # Variabile fondamentale per vedere i log apparire riga per riga in tempo reale
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
-          import urllib.request
-          import urllib.error
           import os
           import re
           import time
-          import sys
+          import requests
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -73,6 +85,25 @@ jobs:
           ]
 
           os.makedirs('output', exist_ok=True)
+          
+          # Indirizziamo tutto il traffico sul demone Tor locale (porta standard 9050)
+          # NOTA: Usiamo "socks5h" per far risolvere anche i DNS (nomi a dominio) direttamente a Tor
+          proxies = {
+              'http': 'socks5h://127.0.0.1:9050',
+              'https': 'socks5h://127.0.0.1:9050'
+          }
+          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+
+          print("==========================================", flush=True)
+          print("Verifica dell'IP di connessione tramite Tor...", flush=True)
+          try:
+              ip_info = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=15).json()
+              print(f"✅ CONNESSO! Il tuo IP mascherato attuale è: {ip_info['ip']}", flush=True)
+          except Exception as e:
+              print(f"⚠️ Errore di connessione a Tor: {e}", flush=True)
+              print("Proseguo comunque senza IP tracking...", flush=True)
+          print("==========================================\n", flush=True)
+
           total_urls = len(URLS_TO_TEST)
 
           for index, url in enumerate(URLS_TO_TEST, start=1):
@@ -82,21 +113,23 @@ jobs:
               
               jina_url = f"https://r.jina.ai/{url}"
               
-              # flush=True forza la scrittura immediata in console senza attendere
               print(f"[{index}/{total_urls}] Richiesta in corso per: {url}", flush=True)
               
-              req = urllib.request.Request(jina_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-              
               try:
-                  with urllib.request.urlopen(req) as response:
-                      content = response.read().decode('utf-8')
-                      with open(filepath, 'w', encoding='utf-8') as f:
-                          f.write(content)
-                      print(f"  ---> FATTO! Salvato in: {filepath}\n", flush=True)
-              except urllib.error.URLError as e:
-                  print(f"  ---> ERRORE: Fallito con errore {e}\n", flush=True)
+                  # Impostiamo un timeout di 60 secondi perché la rete Tor può essere lenta
+                  response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=60)
+                  
+                  # Solleva un'eccezione se il sito risponde con un errore (es. 403, 500)
+                  response.raise_for_status()
+                  
+                  with open(filepath, 'w', encoding='utf-8') as f:
+                      f.write(response.text)
+                  print(f"  ---> FATTO! Salvato in: {filepath}\n", flush=True)
+                  
+              except requests.exceptions.RequestException as e:
+                  print(f"  ---> ERRORE: Fallito. Dettagli: {e}\n", flush=True)
               
-              # Piccola pausa per non saturare l'API
+              # Pausa di sicurezza per Jina
               time.sleep(2)
           EOF
 
@@ -105,4 +138,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
-          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI" && git push)
+          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI & Tor" && git push)
