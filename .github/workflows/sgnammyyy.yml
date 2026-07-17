@@ -322,23 +322,8 @@ jobs:
               "https://abrahamjuliot.github.io/creepjs/",
               "https://pixelscan.net/",
               "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.lonelyplanet.com/articles/first-time-guide-to-albania",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
+              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+              "https://www.lonelyplanet.com/articles/first-time-guide-to-albania"
           ]
           # Suddivisione matematica statica (Chunking) per performance ottimali
           for i in range(1, 7):
