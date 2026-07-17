@@ -1,18 +1,18 @@
-name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+name: Jina RAG URL Tester 20-Way Parallel
 
 on: 
   workflow_dispatch:
 
 jobs:
-  machine2_cdp_insocket:
+  jina_bulk_test:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Dipendenze Scraper Veloce
+      - name: Installazione Dipendenze Scraper
         run: |
           pip install beautifulsoup4 curl-cffi
 
-      - name: Setup Container WARP (20 Nodi IPv6)
+      - name: Setup Container WARP (20 Nodi IPv6 con IP rotanti)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -31,56 +31,28 @@ jobs:
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 12
 
-      - name: Creazione Cartella Temporanea Risultati
-        run: mkdir -p results_temp
+      - name: Creazione Cartella Risultati Jina
+        run: mkdir -p jina_results
 
-      - name: Creazione Scraper Multithread Ultra-Stealth (Chrome 120 + 20 Nodi)
+      - name: Creazione Script Python a 20 Vie Parallele
         run: |
-          cat << 'EOF' > stealth_scraper.py
+          cat << 'EOF' > jina_tester.py
+          import os
           import json
-          import re
           import sys
           import time
           import random
+          import hashlib
           import threading
           import subprocess
           from pathlib import Path
-          from urllib.parse import urlparse, urlunparse, parse_qs, parse_qsl, urlencode, unquote, quote
-          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-          from bs4 import BeautifulSoup
+          from urllib.parse import urlparse, quote
+          from concurrent.futures import ThreadPoolExecutor, as_completed
           from curl_cffi import requests
 
           def log(message: str):
               sys.stderr.write(message + "\n")
               sys.stderr.flush()
-
-          def clean_url(url: str) -> str:
-              try:
-                  # Rimuove le ancore (#fragment) prima di tutto per evitare duplicati
-                  url_no_anchor = url.split('#')[0]
-                  parsed = urlparse(url_no_anchor)
-                  query_params = parse_qsl(parsed.query)
-                  
-                  # Lista estesa e aggressiva di tracking parameters da eliminare
-                  blacklist_params = {
-                      "fbclid", "gclid", "srsltid", "msclkid", "yclid", 
-                      "mc_cid", "mc_eid", "_hsenc", "_hsmi", "hsctatracking", 
-                      "submissionguid", "rb_clickid"
-                  }
-                  
-                  filtered_params = [
-                      (k, v) for k, v in query_params
-                      if k.lower() not in blacklist_params
-                      and not k.lower().startswith("utm_")
-                  ]
-                  new_query = urlencode(filtered_params)
-                  return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, ""))
-              except Exception:
-                  return url
-
-          def human_sleep(mean: float, std_dev: float):
-              sleep_time = max(0.1, random.gauss(mean, std_dev))
-              time.sleep(sleep_time)
 
           class ProxyPool:
               def __init__(self, ports):
@@ -91,7 +63,6 @@ jobs:
 
               def get_proxy(self):
                   with self.lock:
-                      # Peschiamo solo dai proxy che NON sono in fase di riavvio background
                       available = [p for p in self.ports if p not in self.restarting]
                       if not available:
                           return None
@@ -102,7 +73,6 @@ jobs:
                       if port in self.restarting:
                           return
                       self.usage_count[port] += 1
-                      # Alzato a 35 per evitare lo spam di riavvii e massimizzare le performance
                       if self.usage_count[port] >= 35:
                           self.usage_count[port] = 0
                           self.restarting.add(port)
@@ -110,464 +80,138 @@ jobs:
 
               def _restart_proxy(self, port):
                   container_index = port - 40000
-                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 35 richieste. Cambio IP IPv6 in background...")
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha effettuato 35 chiamate. Cambio IP in background...")
                   subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
-                  time.sleep(6) # Attesa stabilizzazione tunnel WARP
+                  time.sleep(6)
                   with self.lock:
                       self.restarting.remove(port)
 
-          # Pool esteso a 20 porte mappate sui 20 container Docker
           PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
-          STARTPAGE_LOCK = threading.Lock()
 
-          ACCEPT_LANGUAGES = [
-              "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-              "it-IT,it;q=0.9",
-              "en-US,en;q=0.9,it;q=0.8"
+          # Lista delle 37 URL fallite estratte dai log precedenti
+          URLS_TO_TEST = [
+              # --- Fallite Oaxaca ---
+              "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
+              "https://eltonodelacochinilla.com/visitanos",
+              "https://klook.com/it/activity/150588-hierve-el-agua-mitla-mezcal-tour-in-mexico",
+              "https://hola-oaxaca.com/que-hacer/tour/hierve-el-agua",
+              "https://my.trip.com/travel-guide/attraction/oaxaca/templo-de-santo-domingo-de-guzmn-18697124",
+              "https://mindtrip.ai/inspiration/how-take-shared-taxi-colectivo-oaxaca/in-HZoeSkoK",
+              "https://oaxacae.com/2024/06/hierve-el-agua-oaxaca.html",
+              "https://oaxacaautentico.com/es/blog/como-llegar-y-moverse-en-oaxaca-guia-transporte",
+              "https://oaxaca.travel/index.php/es/mercados/mercado-20-de-noviembre-es",
+              "https://uncoveredhistory.com/mexico/monte-alban-the-encrypted-city",
+              "https://edenviaggi.it/racconti/monte-alban-viaggio-nellantica-capitale-zapoteca-di-oaxaca-in-messico",
+              "https://oaxaca.travel/index.php/en-us/markets-es/20-de-noviembre-market-en",
+              "https://santacultura.mx/arte-popular/muestran-proceso-ancestral-de-tapetes-de-lana-en-teotitlan-del-valle",
+              "https://hotelesdeoaxaca.com/atractivos-turisticos/mercado-20-de-noviembre.html",
+              "https://oaxacaairporttaxi.com/es",
+              # --- Fallite Orvieto ---
+              "https://acchiappamappa.com/pozzo-di-san-patrizio-orvieto-guida",
+              "https://alltrails.com/it-it/sentiero/italy/umbria/anello-della-rupe-di-orvieto",
+              "https://alltrails.com/trail/italy/umbria/anello-della-rupe-di-orvieto",
+              "https://comune.orvieto.tr.it/it/page/come-arrivare",
+              "https://comune.orvieto.tr.it/it/page/orvieto-carta-unica",
+              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+              "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+              "https://fsbusitalia.it/it/umbria/titoli-di-viaggio-tariffe-umbria/biglietti-tariffe-servizi-urbani-umbria/tariffe-orvieto.html",
+              "https://fsbusitalia.it/it/turismo/programma-il-tuo-viaggio/orvieto-urbs-vetus-dell-umbria.html",
+              "https://fsbusitalia.it/it/umbria/orari-linee-umbria/quibus-orvieto.html",
+              "https://it.wikiloc.com/percorsi-escursionismo/orvieto-anello-della-rupe-e-i-sotterranei-246324949",
+              "https://liveorvieto.com/blog/attrazioni_naturali/anello-della-rupe",
+              "https://olodramma.com/it/cosa-vedere-in-umbria-in-un-weekend-itinerario-di-3-giorni-tra-orvieto-spello-assisi-e-gubbio",
+              "https://neuralword.com/it/cucina/ristoranti-posti-dove-mangiare/mangiare-ad-orvieto-i-migliori-ristoranti",
+              "https://roadmindtrip.com/cosa-vedere-a-orvieto-guida-per-un-weekend",
+              "https://travelworld.it/visitare-orvieto-2-giorni-per-scoprire-la-perla-dellumbria",
+              "https://viaggiadipiu.it/2020/03/09/visitare-orvieto-informazioni-e-consigli-utili",
+              "https://flashpackingitaly.com/orvieto-card-review",
+              "https://umbriatourism.it/en/w/crocefisso-del-tufo-necropolis-orvieto",
+              "https://umbriatourism.it/it/w/duomo-di-santa-maria-assunta-in-cielo-it",
+              "https://umbriatourism.it/it/w/necropoli-di-crocifisso-del-tufo-orvieto",
+              "https://wikiloc.com/hiking-trails/gita-fuori-porta-due-viandanti-ad-orvieto-con-annesso-lanello-della-rupe-166636709"
           ]
 
-          # Ripristinato il profilo d'oro Chrome 120 (estremamente stealth e compatibile)
-          BROWSER_PROFILES = {
-              "chrome": {
-                  "impersonate": "chrome120",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-              },
-              "edge": {
-                  "impersonate": "chrome120",
-                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-              }
-          }
+          def test_url_on_jina(url: str, task_id: int, total_tasks: int):
+              # Genera un nome file sicuro basato sull'host e l'hash MD5 dell'URL
+              parsed = urlparse(url)
+              domain = parsed.netloc.replace("www.", "")
+              url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
+              output_filename = f"jina_results/task_{task_id:02d}_{domain}_{url_hash}.txt"
 
-          def get_minimal_headers(browser: str) -> dict:
-              profile = BROWSER_PROFILES[browser]
-              return {
-                  "user-agent": profile["ua"],
-                  "accept": profile["accept"],
-                  "accept-language": random.choice(ACCEPT_LANGUAGES),
-                  "accept-encoding": "gzip, deflate, br",
-              }
-
-          def create_session(port, browser):
-              impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
-              proxies = {
-                  "http": f"socks5h://127.0.0.1:{port}",
-                  "https": f"socks5h://127.0.0.1:{port}"
-              }
-              sess = requests.Session(impersonate=impersonate_target, proxies=proxies)
-              sess.headers.update(get_minimal_headers(browser))
-              return sess
-
-          def extract_react_json(html_content: str) -> dict | None:
-              start_str = '{"render":'
-              idx = html_content.find(start_str)
-              if idx == -1: return None
-              brace_count, json_end = 0, -1
-              for i in range(idx, len(html_content)):
-                  if html_content[i] == "{": brace_count += 1
-                  elif html_content[i] == "}": brace_count -= 1
-                  if brace_count == 0:
-                      json_end = i
-                      break
-              if json_end == -1: return None
-              try: return json.loads(html_content[idx : json_end + 1])
-              except Exception: return None
-
-          def extract_duckduckgo(html):
-              soup = BeautifulSoup(html, "html.parser")
-              links = []
-              for a in soup.find_all("a", class_="result__url", href=True):
-                  href = a["href"]
-                  match = re.search(r"uddg=([^&]+)", href)
-                  if match:
-                      real_url = unquote(match.group(1))
-                      if real_url.startswith("http") and "duckduckgo.com" not in real_url:
-                          links.append(real_url)
-              return links
-
-          def extract_startpage(html):
-              links = []
-              react_data = extract_react_json(html)
-              if react_data:
-                  try:
-                      mainline = react_data.get("render", {}).get("presenter", {}).get("regions", {}).get("mainline", [])
-                      for section in mainline:
-                          if section.get("display_type") == "web-google" and "results" in section:
-                              for item in section["results"]:
-                                  if "clickUrl" in item:
-                                      links.append(item["clickUrl"])
-                  except Exception: pass
-              
-              if links:
-                  return links
-
-              soup = BeautifulSoup(html, "html.parser")
-              for a in soup.find_all("a", class_=["w-gl__result-title", "w-gl__result-link"], href=True):
-                  href = a["href"]
-                  if href.startswith("http") and not any(d in href for d in ["startpage.com", "ixquick.com", "startmail.com"]):
-                      links.append(href)
-              return links
-
-          def extract_yahoo(html):
-              soup = BeautifulSoup(html, "html.parser")
-              links = []
-              for div in soup.find_all("div", class_=["compTitle", "algo", "y-algo"]):
-                  for a in div.find_all("a", href=True):
-                      href = a["href"]
-                      if "r.search.yahoo.com" in href and "RU=" in href:
-                          match = re.search(r"RU=([^/]+)", href)
-                          if match:
-                              url = unquote(match.group(1))
-                              if url.startswith("http"):
-                                  links.append(url)
-                      elif href.startswith("http") and not any(d in href for d in ["yahoo.com", "yimg.com", "yahoo.co.jp"]):
-                          links.append(href)
-              return links
-
-          def fetch_startpage(query: str, browser: str, initial_port: int) -> list[str] | None:
-              port = initial_port
-              session = create_session(port, browser)
-
-              def get_sc_token(sess):
-                  with STARTPAGE_LOCK:
-                      try:
-                          response_get = sess.get("https://www.startpage.com/", timeout=8.0)
-                          if response_get.status_code == 200:
-                              sc_match = (
-                                  re.search(r'name=["\']sc["\'][^>]*value=["\']([^"\']+)["\']', response_get.text, re.IGNORECASE)
-                                  or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']sc["\']', response_get.text, re.IGNORECASE)
-                              )
-                              return sc_match.group(1) if sc_match else ""
-                      except Exception: pass
-                  return ""
-
-              sc_token = get_sc_token(session)
-              if not sc_token:
-                  port = PROXY_POOL.get_proxy()
-                  if not port: return None
-                  session = create_session(port, browser)
-                  sc_token = get_sc_token(session)
-                  if not sc_token: return None
-
-              links = []
-              for page in range(7):
-                  offset = page * 10
-                  payload = {
-                      "query": query, "sc": sc_token, "cat": "web", "t": "device",
-                      "language": "italiano", "lui": "english", "qadf": "moderate",
-                      "startat": str(offset)
-                  }
-                  
-                  page_success = False
-                  for attempt in range(2):
-                      headers_post = get_minimal_headers(browser)
-                      headers_post.update({
-                          "origin": "https://www.startpage.com", "referer": "https://www.startpage.com/",
-                          "content-type": "application/x-www-form-urlencoded", "sec-fetch-dest": "empty",
-                          "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"
-                      })
-                      try:
-                          response_post = session.post("https://www.startpage.com/sp/search", headers=headers_post, data=payload, timeout=8.0)
-                          if response_post.status_code == 200 and "captcha" not in response_post.text.lower():
-                              page_links = extract_startpage(response_post.text)
-                              if page_links:
-                                  links.extend(page_links)
-                              page_success = True
-                              break
-                      except Exception:
-                          pass
-                      
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
-                      sc_token = get_sc_token(session)
-                      if not sc_token: break
-                      payload["sc"] = sc_token
-                      human_sleep(0.5, 0.2)
-
-                  if not page_success:
-                      break 
-                  human_sleep(0.2, 0.1)
-
-              return links if links else None
-
-          def fetch_duckduckgo(query: str, browser: str, initial_port: int) -> list[str] | None:
-              port = initial_port
-              session = create_session(port, browser)
-              links = []
-              
-              offsets = [0, 30, 60]
-              for page_idx, offset in enumerate(offsets):
-                  if page_idx == 0:
-                      url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-                  else:
-                      url = f"https://html.duckduckgo.com/html/?q={quote(query)}&s={offset}&dc={offset+1}&v=l"
-                  
-                  page_success = False
-                  for attempt in range(2):
-                      headers = get_minimal_headers(browser)
-                      headers.update({
-                          "referer": "https://duckduckgo.com/", "origin": "https://duckduckgo.com",
-                          "sec-fetch-dest": "document", "sec-fetch-mode": "navigate",
-                          "sec-fetch-site": "same-origin", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1"
-                      })
-                      try:
-                          response = session.get(url, headers=headers, timeout=8.0)
-                          if response.status_code == 202:
-                              human_sleep(1.5, 0.3)
-                              response = session.get(url, headers=headers, timeout=8.0)
-                          if response.status_code == 200 and "captcha" not in response.text.lower():
-                              page_links = extract_duckduckgo(response.text)
-                              if page_links:
-                                  links.extend(page_links)
-                              page_success = True
-                              break
-                      except Exception:
-                          pass
-                      
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
-                      human_sleep(0.5, 0.2)
-                  
-                  if not page_success:
-                      break
-                  human_sleep(0.3, 0.1)
-
-              return links if links else None
-
-          def fetch_yahoo(query: str, browser: str, initial_port: int) -> list[str] | None:
-              port = initial_port
-              session = create_session(port, browser)
-              links = []
-              
-              offsets = [1, 41]
-              for page_idx, offset in enumerate(offsets):
-                  url = f"https://search.yahoo.com/search?p={quote(query)}&n=50&b={offset}"
-                  
-                  page_success = False
-                  for attempt in range(2):
-                      headers = get_minimal_headers(browser)
-                      try:
-                          response = session.get(url, headers=headers, timeout=10.0)
-                          if response.status_code == 200:
-                              page_links = extract_yahoo(response.text)
-                              if page_links:
-                                  links.extend(page_links)
-                              page_success = True
-                              break
-                      except Exception:
-                          pass
-                      
-                      port = PROXY_POOL.get_proxy()
-                      session = create_session(port, browser)
-                      human_sleep(0.5, 0.2)
-                  
-                  if not page_success:
-                      break
-                  human_sleep(0.3, 0.1)
-                  
-              return links if links else None
-
-          def process_single_task(query: str, engine: str, task_index: int, total_tasks: int, global_attempt: int) -> list[str] | None:
-              # Staggered Start (ritardo randomico iniziale per sfasare l'avvio delle task)
-              if global_attempt == 1:
-                  time.sleep(random.uniform(0.1, 7.0))
-              
-              max_local_retries = 3
-              
-              for local_attempt in range(1, max_local_retries + 1):
+              max_retries = 3
+              for attempt in range(1, max_retries + 1):
                   port = PROXY_POOL.get_proxy()
                   if not port:
                       time.sleep(1.0)
                       continue
-                      
-                  browser = random.choice(["chrome", "edge"])
-                  links = None
-                  try:
-                      if engine == "duckduckgo": links = fetch_duckduckgo(query, browser, port)
-                      elif engine == "startpage": links = fetch_startpage(query, browser, port)
-                      elif engine == "yahoo": links = fetch_yahoo(query, browser, port)
-                  except Exception:
-                      pass
 
-                  PROXY_POOL.report_usage(port)
-
-                  if links is not None and len(links) > 0:
-                      cleaned_links = [clean_url(l) for l in links if l]
-                      log(f"[{task_index:03d}/{total_tasks}] [OK] {engine.upper()} -> {len(cleaned_links)} risultati per: '{query}'")
-                      return cleaned_links
-                  else:
-                      human_sleep(1.0, 0.3)
-
-              log(f"[{task_index:03d}/{total_tasks}] [RITARDO] {engine.upper()} per '{query}'. Pausa raffreddamento... (Giro {global_attempt})")
-              time.sleep(random.uniform(4.0, 6.0))
-              
-              return None
-
-          def main():
-              queries = [
-                  "cosa vedere a Orvieto in un giorno",
-                  "Orvieto sotterranea biglietti e orari",
-                  "Duomo di Orvieto facciata e capolavori",
-                  "Pozzo di San Patrizio storia e segreti",
-                  "itinerario Orvieto a piedi centro storico",
-                  "migliori ristoranti cucina tipica Orvieto",
-                  "cosa fare a Orvieto nel weekend",
-                  "Pozzo della Cava Orvieto recensioni",
-                  "Orvieto attrazioni principali da non perdere",
-                  "dove mangiare la gallina ubriaca a Orvieto",
-                  "Orvieto nascosta e luoghi insoliti",
-                  "storia del Pozzo di San Patrizio Orvieto",
-                  "MUSEO Claudio Faina Orvieto cosa vedere",
-                  "Orvieto con bambini cosa fare",
-                  "guida turistica Orvieto consigli utili",
-                  "Orvieto sotterranea visita guidata opinioni",
-                  "dove parcheggiare gratis a Orvieto centro",
-                  "Tempio del Belvedere Orvieto rovina etrusca",
-                  "Orvieto cantine storiche e degustazione vini",
-                  "Cappella di San Brizio Luca Signorelli Duomo",
-                  "Orvieto punti panoramici migliori",
-                  "cosa vedere vicino a Orvieto nei dintorni",
-                  "Orvieto artigianato locale ceramiche",
-                  "Torre del Moro Orvieto salita e panorama",
-                  "Orvieto d'inverno cosa vedere e fare",
-                  "best things to do in Orvieto Umbria",
-                  "Orvieto 1 day itinerary walk",
-                  "St Patrick's Well Orvieto tickets and history",
-                  "Orvieto Underground tour review",
-                  "Duomo di Orvieto masterpieces to see",
-                  "best local restaurants in Orvieto center",
-                  "where to eat in Orvieto authentic food",
-                  "traditional trattorias in Orvieto",
-                  "cheap eats and street food in Orvieto",
-                  "hidden gem restaurants in Orvieto",
-                  "best historic restaurants in Orvieto",
-                  "best pasta and pizza in Orvieto favorites",
-                  "authentic local restaurants Orvieto",
-                  "where do locals eat in Orvieto",
-                  "what to see in Orvieto",
-                  "best viewpoints in Orvieto",
-                  "where to park in Orvieto",
-                  "best things to do in Orvieto",
-                  "Orvieto travel guide",
-                  "local food specialties Orvieto",
-                  "best coffee and pastry in Orvieto",
-                  "Orvieto Cathedral Signorelli chapel history",
-                  "Etruscan museum Orvieto Claudio Faina",
-                  "Orvieto underground caves historical guide",
-                  "places to visit near Orvieto Umbria"
-              ]
-
-              engines = ["duckduckgo", "startpage", "yahoo"]
-              tasks = []
-              for q_idx, q in enumerate(queries):
-                  for eng in engines:
-                      tasks.append((q, eng))
-
-              total_tasks = len(tasks)
-              log(f"Inizio scraping di {total_tasks} combinazioni (50 query x 3 motori di ricerca)")
-
-              Path("results_temp").mkdir(exist_ok=True)
-              
-              MAX_GLOBAL_RETRIES = 5
-
-              with ThreadPoolExecutor(max_workers=10) as executor:
-                  futures = {
-                      executor.submit(process_single_task, task[0], task[1], idx + 1, total_tasks, 1): (task[0], task[1], idx + 1, 1)
-                      for idx, task in enumerate(tasks)
+                  proxies = {
+                      "http": f"socks5h://127.0.0.1:{port}",
+                      "https": f"socks5h://127.0.0.1:{port}"
                   }
 
-                  while futures:
-                      done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                  # Endpoint Jina Reader
+                  jina_endpoint = f"https://r.jina.ai/{url}"
+
+                  try:
+                      # Utilizziamo curl-cffi per imitare un browser standard ed evitare blocchi diretti
+                      sess = requests.Session(impersonate="chrome120", proxies=proxies)
+                      headers = {
+                          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                          "accept": "text/plain, text/html, */*",
+                      }
                       
-                      for future in done:
-                          q, eng, t_idx, global_attempt = futures.pop(future)
+                      response = sess.get(jina_endpoint, headers=headers, timeout=25.0)
+                      PROXY_POOL.report_usage(port)
+
+                      if response.status_code == 200:
+                          # Scrittura del markup / markdown estratto da Jina
+                          with open(output_filename, "w", encoding="utf-8") as f:
+                              f.write(f"--- SOURCE URL: {url} ---\n")
+                              f.write(f"--- JINA STATUS: {response.status_code} ---\n\n")
+                              f.write(response.text)
                           
-                          try:
-                              links = future.result()
-                              
-                              if links is not None:
-                                  temp_file = Path("results_temp") / f"task_{t_idx:03d}_{eng}.json"
-                                  with open(temp_file, "w", encoding="utf-8") as f:
-                                      json.dump({"query": q, "engine": eng, "links": links}, f, ensure_ascii=False, indent=2)
-                              else:
-                                  if global_attempt < MAX_GLOBAL_RETRIES:
-                                      new_future = executor.submit(process_single_task, q, eng, t_idx, total_tasks, global_attempt + 1)
-                                      futures[new_future] = (q, eng, t_idx, global_attempt + 1)
-                                  else:
-                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} ({eng.upper()}) per la query '{q}'.")
-                          except Exception as e:
-                              log(f"Errore grave nel thread task {t_idx:03d}: {e}")
+                          log(f"[{task_id:02d}/{total_tasks}] [OK] JINA -> {domain} ({len(response.text)} byte salvati)")
+                          return True
+                      elif response.status_code == 429:
+                          log(f"[{task_id:02d}/{total_tasks}] [WARNING] Jina ha restituito 429 (Rate Limit) su porta {port}. Ritento con altro nodo...")
+                      else:
+                          log(f"[{task_id:02d}/{total_tasks}] [WARNING] Errore HTTP {response.status_code} per {domain} (Tentativo {attempt}/{max_retries})")
+
+                  except Exception as e:
+                      PROXY_POOL.report_usage(port)
+                      log(f"[{task_id:02d}/{total_tasks}] [WARNING] Errore connessione porta {port} per {domain}: {e}")
+
+                  time.sleep(random.uniform(2.0, 4.0))
+
+              log(f"❌ [{task_id:02d}/{total_tasks}] [FAIL] Impossibile recuperare {url} tramite Jina dopo {max_retries} tentativi.")
+              return False
+
+          def main():
+              total = len(URLS_TO_TEST)
+              log(f"Avvio test di {total} URL su Jina Reader API...")
+              
+              # Configurazione a 20 vie parallele
+              with ThreadPoolExecutor(max_workers=20) as executor:
+                  futures = {
+                      executor.submit(test_url_on_jina, url, idx + 1, total): url 
+                      for idx, url in enumerate(URLS_TO_TEST)
+                  }
+                  for future in as_completed(futures):
+                      pass
+
+              log("Processo di recupero completato.")
 
           if __name__ == "__main__":
               main()
           EOF
 
-      - name: Esecuzione Scraping Veloce
-        run: python -u stealth_scraper.py
+      - name: Esecuzione Test Jina (20 Thread Paralleli)
+        run: python -u jina_tester.py
 
-      - name: Combinazione e Deduplica Risultati Finali
-        if: always()
-        shell: python
-        run: |
-          import json
-          import glob
-          import re
-          import os
-          from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
-
-          # Normalizzazione precisa (Preserva intatto il case-sensitive di path e query-string)
-          def normalize_url(url: str) -> str:
-              try:
-                  parsed = urlparse(url)
-                  scheme = parsed.scheme.lower() if parsed.scheme else "https"
-                  netloc = parsed.netloc.lower()
-                  if netloc.startswith("www."):
-                      netloc = netloc[4:]
-                  
-                  # Rimuove l'eventuale trailing slash dal path e ordina i parametri di query
-                  path = parsed.path.rstrip("/")
-                  params = sorted(parse_qsl(parsed.query))
-                  query = urlencode(params)
-                  return urlunparse((scheme, netloc, path, "", query, ""))
-              except Exception:
-                  return url
-
-          all_raw_links = []
-          for filepath in glob.glob("results_temp/task_*.json"):
-              try:
-                  with open(filepath, "r", encoding="utf-8") as f:
-                      data = json.load(f)
-                      links = data.get("links", [])
-                      if isinstance(links, list):
-                          all_raw_links.extend(links)
-              except Exception as e:
-                  print(f"Errore lettura {filepath}: {e}")
-
-          # Deduplicazione Globale su base Normalizzata (clean_url non serve ri-eseguirla!)
-          seen_normalized = set()
-          deduped_urls = []
-          for u in all_raw_links:
-              cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", u).strip()
-              if not cleaned.startswith("http") or len(cleaned) < 12:
-                  continue
-              norm = normalize_url(cleaned)
-              if norm not in seen_normalized:
-                  seen_normalized.add(norm)
-                  deduped_urls.append(cleaned) # Il link nel JSON è già pulito aggressivamente
-
-          deduped_urls.sort()
-
-          with open("output_macchina2_cdp.txt", "w", encoding="utf-8") as f:
-              for url in deduped_urls:
-                  f.write(url + "\n")
-
-          print(f"Sintesi completata: {len(all_raw_links)} link estratti complessivamente.")
-          print(f"Fase successiva pronta con {len(deduped_urls)} URL unici globali scritti in output_macchina2_cdp.txt.")
-
-      - name: Upload Artifact Macchina 2
+      - name: Archiviazione e Caricamento Risultati
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
+          name: Risultati_Estrazione_Jina
+          path: jina_results/
