@@ -1,4 +1,4 @@
-name: Extract Markdown (Proxied Hybrid Pipeline + ZIP)
+name: Extract Markdown (Decoupled Camoufox Pipeline + ZIP)
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ jobs:
           pip install requests pysocks curl-cffi markdownify camoufox[geoip]
           python -m camoufox fetch
 
-      - name: Pipeline 100% Proxata con Validazione Antibot
+      - name: Pipeline Asincrona 100% Proxata
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -34,7 +34,7 @@ jobs:
           import time
           import concurrent.futures
           import threading
-          from queue import Queue
+          from queue import Queue, Empty
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
           from camoufox.sync_api import Camoufox
@@ -82,14 +82,11 @@ jobs:
           os.makedirs('output', exist_ok=True)
           total_urls = len(URLS_TO_TEST)
 
-          # Inizializziamo le primitive per la scansione asincrona
-          proxy_queue = Queue()
-          stop_scanner = threading.Event()
-          working_count = 0
+          # Inizializziamo le primitive
+          working_proxies = [] # conterrà tuple (proxy, latenza)
           working_lock = threading.Lock()
+          stop_scanner = threading.Event()
           max_working = 50
-          # Gestione concorrenza Camoufox per evitare blocchi RAM sul server
-          camoufox_semaphore = threading.Semaphore(3)
 
           # FUNZIONE DI VALIDAZIONE ROBUSTA CONTRO I FALSI POSITIVI
           def validate_content(text, url, is_html=True):
@@ -102,7 +99,6 @@ jobs:
               low_text = text.lower()
               
               if is_html:
-                  # Controllo dei titoli WAF/Anti-bot (solo per sorgente HTML)
                   title_match = re.search(r"<title[^>]*>(.*?)</title>", low_text, re.DOTALL)
                   title_text = title_match.group(1).strip() if title_match else ""
                   waf_titles = ["just a moment", "attention required", "access denied", 
@@ -112,7 +108,6 @@ jobs:
                       if wt in title_text:
                           return False, f"WAF rilevato nel titolo HTML: '{wt}'"
                   
-                  # Indicatori di blocco dentro l'HTML
                   blocking_indicators = [
                       "challenge-platform", "access denied", "403 forbidden", "cloudflare",
                       "just a moment", "security verification", "please enable js", "enable javascript",
@@ -127,7 +122,6 @@ jobs:
                       "one moment, please..."
                   ]
               else:
-                  # Indicatori di blocco specifici per il Markdown generato da Jina
                   blocking_indicators = [
                       "just a moment", "are you a robot", "prove your humanity",
                       "captcha verification", "please enter in the characters you see below",
@@ -147,7 +141,7 @@ jobs:
                       
               return True, ""
 
-          # Worker del produttore (Scanner)
+          # Scanner dei proxy candidati con misurazione della latenza
           def scan_worker(proxy_addr):
               global working_count
               if stop_scanner.is_set():
@@ -159,13 +153,16 @@ jobs:
               }
               try:
                   test_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                  start_time = time.time()
                   r = requests.get("https://r.jina.ai/https://example.com", headers=test_headers, proxies=proxies, timeout=3.0)
+                  latency = time.time() - start_time
                   if r.status_code == 200 and "example" in r.text.lower():
                       with working_lock:
-                          if working_count < max_working and not stop_scanner.is_set():
-                              working_count += 1
-                              proxy_queue.put(proxy_addr)
-                              print(f"  [+] Proxy valido inviato alla coda: {proxy_addr} ({working_count}/{max_working})", flush=True)
+                          if len(working_proxies) < max_working and not stop_scanner.is_set():
+                              working_proxies.append((proxy_addr, latency))
+                              print(f"  [+] Proxy valido: {proxy_addr} | Latenza: {latency:.2f}s ({len(working_proxies)}/{max_working})", flush=True)
+                              if len(working_proxies) >= max_working:
+                                  stop_scanner.set()
               except Exception:
                   pass
 
@@ -181,156 +178,170 @@ jobs:
               print(f"⚠️ Errore recupero proxy: {e}", flush=True)
               raw_proxies = []
 
-          # AVVIO DELLO SCANNER IN BACKGROUND
-          print("🚀 Avvio della scansione proxy in background...", flush=True)
-          scanner_executor = concurrent.futures.ThreadPoolExecutor(max_workers=200)
-          for p in raw_proxies[:1000]:
-              scanner_executor.submit(scan_worker, p)
+          # AVVIO DELLO SCANNER (Misurazione latenza)
+          print("🚀 Scansione e classificazione proxy per latenza...", flush=True)
+          with concurrent.futures.ThreadPoolExecutor(max_workers=200) as scanner_executor:
+              futures = {scanner_executor.submit(scan_worker, p): p for p in raw_proxies[:1000]}
+              concurrent.futures.wait(futures)
+
+          # Classifica e ordina per latenza crescente (i più veloci per primi)
+          working_proxies.sort(key=lambda x: x[1])
+          sorted_proxy_addrs = [p[0] for p in working_proxies]
+          
+          # Seleziona i 20 nodi più veloci per Camoufox
+          camoufox_proxies = sorted_proxy_addrs[:20]
+          general_proxies = sorted_proxy_addrs
+          
+          print("==========================================", flush=True)
+          print(f"📌 Proxy totali validati: {len(general_proxies)}", flush=True)
+          print(f"🔥 Proxy ultra-rapidi assegnati a Camoufox: {camoufox_proxies}", flush=True)
           print("==========================================\n", flush=True)
 
-          # FUNZIONE WORKER DEI CONSUMATORI
-          def fetch_url(item):
+          if not general_proxies:
+              print("⚠️ Nessun proxy valido trovato. Arresto esecuzione per proteggere il tuo IP.", flush=True)
+              exit(1)
+
+          # FASE 1: curl-cffi E Jina (TUTTO PROXATO)
+          failed_urls = []
+          failed_lock = threading.Lock()
+
+          def fetch_url_lightweight(item):
               index, url = item
               clean_name = re.sub(r'^https?://', '', url)
               safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
               filepath = os.path.join('output', f"{safe_filename}.md")
               jina_url = f"https://r.jina.ai/{url}"
               
-              max_attempts = 3
-              failed_proxies = set()
+              max_light_attempts = 2
               
-              for attempt in range(1, max_attempts + 1):
-                  # Estraiamo un proxy fresco dalla coda. Se la coda va in timeout, 
-                  # non effettuiamo connessioni dirette (per proteggere l'IP del server), ma dichiariamo l'errore.
-                  try:
-                      proxy_addr = proxy_queue.get(block=True, timeout=12)
-                      proxies = {
-                          'http': f'socks5h://{proxy_addr}',
-                          'https': f'socks5h://{proxy_addr}'
-                      }
-                  except Exception:
-                      if attempt == max_attempts:
-                          return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito: coda proxy vuota o in timeout."
-                      time.sleep(1)
-                      continue
-
-                  time.sleep(random.uniform(0.2, 1.0))
-                  print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
-
-                  # ==========================================
-                  # 🚀 LIVELLO 1: TENTATIVO ULTRA STEALTH CON curl-cffi (Sotto Proxy)
-                  # ==========================================
+              for attempt in range(1, max_light_attempts + 1):
+                  proxy_addr = random.choice(general_proxies)
+                  proxies = {
+                      'http': f'socks5h://{proxy_addr}',
+                      'https': f'socks5h://{proxy_addr}'
+                  }
+                  
+                  time.sleep(random.uniform(0.1, 0.5))
+                  
+                  # 1. Tentativo curl-cffi stealth
                   try:
                       impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
                       headers_cffi = {
                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                           "Accept-Language": "en-US,en;q=0.9",
-                          "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                          "Sec-Ch-Ua-Mobile": "?0",
-                          "Sec-Ch-Ua-Platform": '"Windows"',
-                          "Sec-Fetch-Dest": "document",
-                          "Sec-Fetch-Mode": "navigate",
-                          "Sec-Fetch-Site": "none",
-                          "Sec-Fetch-User": "?1",
                           "Upgrade-Insecure-Requests": "1"
                       }
-                      
                       response = requests_cffi.get(
                           url,
                           headers=headers_cffi,
                           proxies=proxies,
                           impersonate=impersonate_target,
-                          timeout=5
+                          timeout=4
                       )
-                      
-                      if response.status_code != 200:
-                          raise Exception(f"HTTP status non ottimale: {response.status_code}")
-                      
-                      is_valid, reason = validate_content(response.text, url, is_html=True)
-                      if not is_valid:
-                          raise Exception(f"Validazione HTML fallita: {reason}")
-
-                      markdown_content = md(response.text, heading_style="ATX")
-                      with open(filepath, 'w', encoding='utf-8') as f:
-                          f.write(markdown_content)
-                      
-                      proxy_queue.put(proxy_addr)
-                      return f"[✅ STEALTH {index}/{total_urls}] {url} -> Scaricato direttamente tramite curl-cffi!"
-
-                  except Exception as stealth_err:
+                      if response.status_code == 200:
+                          is_valid, reason = validate_content(response.text, url, is_html=True)
+                          if is_valid:
+                              markdown_content = md(response.text, heading_style="ATX")
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              return f"[✅ STEALTH {index}/{total_urls}] {url} -> Salvato via curl-cffi (Proxy: {proxy_addr})"
+                  except Exception:
                       pass
 
-                  # ==========================================
-                  # 🚀 LIVELLO 2: FALLBACK A JINA AI (Sotto Proxy)
-                  # ==========================================
+                  # 2. Fallback Jina AI
                   try:
                       jina_headers = {
-                          'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
+                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                           'X-Return-Format': 'markdown'
                       }
                       jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=8)
-                      
-                      if jina_response.status_code in [404, 422]:
-                          proxy_queue.put(proxy_addr)
-                          return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
-                      jina_response.raise_for_status()
-                      
-                      is_valid, reason = validate_content(jina_response.text, url, is_html=False)
-                      if not is_valid:
-                          raise Exception(f"Validazione Markdown Jina fallita: {reason}")
+                      if jina_response.status_code == 200:
+                          is_valid, reason = validate_content(jina_response.text, url, is_html=False)
+                          if is_valid:
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(jina_response.text)
+                              return f"[✅ JINA {index}/{total_urls}] {url} -> Salvato via Jina (Proxy: {proxy_addr})"
+                      except Exception:
+                          pass
 
-                      with open(filepath, 'w', encoding='utf-8') as f:
-                          f.write(jina_response.text)
-                          
-                      proxy_queue.put(proxy_addr)
-                      return f"[✅ JINA {index}/{total_urls}] {url} -> Salvato tramite Jina AI (Fallback)!"
-                      
-                  except Exception as jina_err:
-                      pass
+              # Se falliscono entrambi i tentativi proxati di Fase 1, sposta in coda Camoufox
+              with failed_lock:
+                  failed_urls.append((index, url, filepath))
+              return f"[⚠️ AUTOBOT DETECTED {index}/{total_urls}] {url} -> Accodato per Camoufox."
 
-                  # ==========================================
-                  # 🚀 LIVELLO 3: ULTIMA RISORSA CON BROWSER ANTI-DETECT CAMOUFOX (Sotto Proxy)
-                  # ==========================================
-                  try:
-                      proxy_config = {"server": f"socks5://{proxy_addr}"}
-                      with camoufox_semaphore:
-                          with Camoufox(proxy=proxy_config, headless=True, geoip=True) as browser:
-                              page = browser.new_page()
-                              page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                              html_content = page.content()
-
-                      is_valid, reason = validate_content(html_content, url, is_html=True)
-                      if not is_valid:
-                          raise Exception(f"Validazione Camoufox fallita: {reason}")
-
-                      markdown_content = md(html_content, heading_style="ATX")
-                      with open(filepath, 'w', encoding='utf-8') as f:
-                          f.write(markdown_content)
-                      
-                      proxy_queue.put(proxy_addr)
-                      return f"[✅ CAMOUFOX {index}/{total_urls}] {url} -> Salvato tramite browser Camoufox!"
-                      
-                  except Exception as cf_err:
-                      # Se falliscono tutti e 3 i passaggi, marchiamo il proxy come non valido per questo URL
-                      failed_proxies.add(proxy_addr)
-                      if attempt == max_attempts:
-                          return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito su tutte le risorse proxate."
-                      time.sleep(0.5)
-
-          # Avviamo TUTTE le richieste contemporaneamente (37 thread)
-          workers = total_urls
-          print(f"🚀 Avvio estrazione simultanea per {total_urls} URL in modalità pipeline asincrona...", flush=True)
-          
-          with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+          print("🚀 FASE 1: Avvio estrazione simultanea (curl-cffi + Jina proxati)...", flush=True)
+          with concurrent.futures.ThreadPoolExecutor(max_workers=total_urls) as executor:
               items = list(enumerate(URLS_TO_TEST, start=1))
-              future_to_url = {executor.submit(fetch_url, item): item for item in items}
-              
+              future_to_url = {executor.submit(fetch_url_lightweight, item): item for item in items}
               for future in concurrent.futures.as_completed(future_to_url):
-                  print(future.result() + "\n", flush=True)
+                  print(future.result(), flush=True)
 
-          # Arrestiamo lo scanner di background a lavoro completato
-          stop_scanner.set()
-          scanner_executor.shutdown(wait=False)
+          # FASE 2: Camoufox PERSISTENTE SU 20 NODI RAPIDI
+          if failed_urls:
+              print("\n==========================================", flush=True)
+              print(f"🔥 FASE 2: Avvio di 20 browser persistenti Camoufox per risolvere {len(failed_urls)} URL bloccati...", flush=True)
+              print("==========================================\n", flush=True)
+              
+              failed_queue = Queue()
+              for item in failed_urls:
+                  failed_queue.put(item)
+                  
+              def camoufox_persistent_worker(worker_id, proxy_addr, q):
+                  print(f"  [🦊 Worker CF {worker_id}] Avvio browser persistente su proxy veloce: {proxy_addr}...", flush=True)
+                  proxy_config = {"server": f"socks5://{proxy_addr}"}
+                  try:
+                      # browser viene aperto una sola volta per lavoratore
+                      with Camoufox(
+                          proxy=proxy_config,
+                          headless=True,
+                          geoip=True, # GeoIP attivo e allineato al proxy per il bypass
+                          humanize=True, # Human signature attiva
+                          i_know_what_im_doing=True # Silenzia i warning di automazione
+                      ) as browser:
+                          while True:
+                              try:
+                                  # Preleva i task dalla coda asincrona condivisa. Timeout di 3s per chiudere a coda vuota
+                                  item = q.get(block=True, timeout=3)
+                              except Empty:
+                                  break
+                              
+                              index, url, filepath = item
+                              print(f"  [🦊 Worker CF {worker_id}] Scraping di: {url}", flush=True)
+                              try:
+                                  page = browser.new_page()
+                                  page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                  html_content = page.content()
+                                  
+                                  is_valid, reason = validate_content(html_content, url, is_html=True)
+                                  if not is_valid:
+                                      raise Exception(f"Validazione fallita: {reason}")
+                                      
+                                  markdown_content = md(html_content, heading_style="ATX")
+                                  with open(filepath, 'w', encoding='utf-8') as f:
+                                      f.write(markdown_content)
+                                  print(f"[✅ CAMOUFOX SUCCESS {index}] {url} -> Estratto con successo!", flush=True)
+                                  page.close()
+                              except Exception as e:
+                                  print(f"[❌ CAMOUFOX FAIL {index}] {url} fallito: {e}", flush=True)
+                              finally:
+                                  q.task_done()
+                  except Exception as e:
+                      print(f"[❌ CAMOUFOX CRASH Worker {worker_id}] Impossibile avviare il browser: {e}", flush=True)
+
+              # Determina quanti thread lanciare (max 20, o pari ai proxy rapidi rimasti)
+              num_workers = min(20, len(camoufox_proxies), len(failed_urls))
+              cf_threads = []
+              for w_id in range(1, num_workers + 1):
+                  p_addr = camoufox_proxies[w_id - 1]
+                  t = threading.Thread(target=camoufox_persistent_worker, args=(w_id, p_addr, failed_queue))
+                  t.start()
+                  cf_threads.append(t)
+                  
+              for t in cf_threads:
+                  t.join()
+          else:
+              print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1! Camoufox non necessario.", flush=True)
+
           EOF
 
       # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
