@@ -84,9 +84,9 @@ jobs:
               print("Nessun file configurato trovato. Utilizzo della lista predefinita.")
               TARGETS = [
                   "https://tls.browserleaks.com/json",
-                  "https://bot.sannysoft.com/",
-                  "https://abrahamjuliot.github.io/creepjs/",
-                  "https://www.comune.orvieto.tr.it/it/topics/parcheggi"
+                  "https://www.comune.orvieto.tr.it/it/topics/parcheggi",
+                  "https://www.comune.orvieto.tr.it/it/news/146698/a-san-valentino-un-cammino-degli-innamorati-per-scoprire-i-segreti-della-citta-nascosta",
+                  "https://comune.orvieto.tr.it/it/vivere/torre-del-moro",
               ]
           
           # Suddivisione matematica statica (Chunking) per performance ottimali
