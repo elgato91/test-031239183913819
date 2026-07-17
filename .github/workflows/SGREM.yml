@@ -1,4 +1,4 @@
-name: Extract Markdown (Fast Queue + Downloadable ZIP)
+name: Extract Markdown (Max Parallel + ZIP Artifact)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,6 @@ jobs:
           import random
           import time
           import concurrent.futures
-          from queue import Queue
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -127,11 +126,7 @@ jobs:
           if not working_proxies:
               print("⚠️ Nessun proxy valido trovato. Procedo con la connessione diretta.", flush=True)
 
-          # FASE 2: CODA DI ESECUZIONE CON LEASING E RATE-LIMIT (20 RPM per IP)
-          proxy_queue = Queue()
-          for p in working_proxies:
-              proxy_queue.put((p, 0))
-
+          # FASE 2: ESECUZIONE SIMULTANEA CON ASSEGNAZIONE CASUALE ED EVITAMENTO DEL CONFLITTO
           def fetch_url(item):
               index, url = item
               clean_name = re.sub(r'^https?://', '', url)
@@ -140,24 +135,25 @@ jobs:
               jina_url = f"https://r.jina.ai/{url}"
               
               max_attempts = 3
+              failed_proxies = set()
               
               for attempt in range(1, max_attempts + 1):
                   if not working_proxies:
                       proxies = None
                       proxy_addr = "Direct IP"
                   else:
-                      proxy_addr, last_used = proxy_queue.get()
+                      # Pesca un proxy casuale escludendo quelli già falliti per questo specifico URL
+                      candidates = [p for p in working_proxies if p not in failed_proxies]
+                      proxy_addr = random.choice(candidates) if candidates else random.choice(working_proxies)
                       
-                      # Cooldown (20 RPM = 1 richiesta ogni 3.0 secondi per singolo IP)
-                      now = time.time()
-                      elapsed = now - last_used
-                      if elapsed < 3.0:
-                          time.sleep(3.0 - elapsed)
-                          
                       proxies = {
                           'http': f'socks5h://{proxy_addr}',
                           'https': f'socks5h://{proxy_addr}'
                       }
+
+                  # 1. Scaglionamento morbido (0.5 - 2.5 secondi) prima della chiamata effettiva.
+                  # Questo assicura che se due thread hanno lo stesso proxy, non colpiscano Jina nello stesso istante.
+                  time.sleep(random.uniform(0.5, 2.5))
 
                   headers = {
                       'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
@@ -169,11 +165,8 @@ jobs:
                   try:
                       response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=15)
                       
-                      # OTTIMIZZAZIONE: se l'errore è 422 o 404, è un problema di Jina col sito finale. Inutile riprovare.
+                      # Errore irreversibile del server di Jina sul sito di destinazione. Inutile riprovare.
                       if response.status_code in [404, 422]:
-                          if working_proxies:
-                              proxy_queue.put((proxy_addr, time.time()))
-                              proxy_queue.task_done()
                           return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {response.status_code}) -> {url}"
                       
                       response.raise_for_status()
@@ -183,25 +176,22 @@ jobs:
 
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(response.text)
-                      
-                      if working_proxies:
-                          proxy_queue.put((proxy_addr, time.time()))
-                          proxy_queue.task_done()
                           
                       return f"[✅ FATTO {index}/{total_urls}] {url} -> Salvato!"
                       
                   except Exception as e:
-                      if working_proxies:
-                          proxy_queue.put((proxy_addr, time.time() + 3.0))
-                          proxy_queue.task_done()
-                          
+                      # Se fallisce, memorizziamo il proxy fallito per non usarlo al prossimo tentativo di questo URL
+                      failed_proxies.add(proxy_addr)
+                      
                       if attempt == max_attempts:
                           return f"[❌ ERRORE {index}/{total_urls}] {url} Fallito definitivamente. Errore: {e}"
                       
+                      # Breve cooldown prima di ritentare su un proxy differente
                       time.sleep(1)
 
-          workers = len(working_proxies) if working_proxies else 3
-          print(f"🚀 Avvio della coda di estrazione con {workers} lavoratori simultanei...", flush=True)
+          # Avviamo TUTTE le richieste contemporaneamente (37 thread)
+          workers = total_urls
+          print(f"🚀 Avvio estrazione simultanea per {total_urls} URL con {workers} lavoratori in parallelo...", flush=True)
           
           with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
               items = list(enumerate(URLS_TO_TEST, start=1))
@@ -218,4 +208,4 @@ jobs:
         with:
           name: jina-markdown-outputs
           path: output/
-          retention-days: 7 # Lo ZIP rimarrà disponibile al download per 7 giorni
+          retention-days: 7
