@@ -1,4 +1,4 @@
-name: Extract Markdown (Fully Proxied Hybrid Pipeline + ZIP)
+name: Extract Markdown (100% Proxied Pipeline + ZIP)
 
 on:
   workflow_dispatch:
@@ -22,12 +22,9 @@ jobs:
           pip install requests pysocks curl-cffi markdownify camoufox[geoip]
           python -m camoufox fetch
 
-      - name: Pipeline 100% Proxata con Validazione Antibot
-        env:
-          PYTHONUNBUFFERED: "1"
+      - name: Scrivi lo script Python
         run: |
-          python - << 'EOF'
-          # Allineamento rigoroso a colonna 1 per tutte le definizioni globali
+          cat << 'EOF' > extract.py
           import os
           import re
           import requests
@@ -86,7 +83,6 @@ jobs:
           os.makedirs('output', exist_ok=True)
           total_urls = len(URLS_TO_TEST)
 
-          # Inizializziamo le primitive
           proxy_queue = Queue()
           stop_scanner = threading.Event()
           working_count = 0
@@ -99,7 +95,6 @@ jobs:
           failed_lock = threading.Lock()
           failed_queue = Queue()
 
-          # FUNZIONE DI VALIDAZIONE ROBUSTA CONTRO I FALSI POSITIVI
           def validate_content(text, url, is_html=True):
               if any(site in url for site in ["example.com", "api.ipify.org"]):
                   return True, ""
@@ -110,7 +105,6 @@ jobs:
               low_text = text.lower()
               
               if is_html:
-                  # Controllo dei titoli WAF/Anti-bot (solo per sorgente HTML)
                   title_match = re.search(r"<title[^>]*>(.*?)</title>", low_text, re.DOTALL)
                   title_text = title_match.group(1).strip() if title_match else ""
                   waf_titles = ["just a moment", "attention required", "access denied", 
@@ -120,7 +114,6 @@ jobs:
                       if wt in title_text:
                           return False, f"WAF rilevato nel titolo HTML: '{wt}'"
                   
-                  # Indicatori di blocco dentro l'HTML
                   blocking_indicators = [
                       "challenge-platform", "access denied", "403 forbidden", "cloudflare",
                       "just a moment", "security verification", "please enable js", "enable javascript",
@@ -135,7 +128,6 @@ jobs:
                       "one moment, please..."
                   ]
               else:
-                  # Indicatori di blocco specifici per il Markdown generato da Jina
                   blocking_indicators = [
                       "just a moment", "are you a robot", "prove your humanity",
                       "captcha verification", "please enter in the characters you see below",
@@ -155,7 +147,6 @@ jobs:
                       
               return True, ""
 
-          # Worker dello scanner
           def scan_worker(proxy_addr):
               global working_count
               if stop_scanner.is_set():
@@ -181,7 +172,6 @@ jobs:
               except Exception:
                   pass
 
-          # Fase 1: curl-cffi E Jina (TUTTO PROXATO)
           def fetch_url_lightweight(item, general_proxies):
               index, url = item
               clean_name = re.sub(r'^https?://', '', url)
@@ -250,7 +240,6 @@ jobs:
                   failed_urls.append((index, url, filepath))
               return f"[⚠️ AUTOBOT DETECTED {index}/{total_urls}] {url} -> Accodato per Camoufox."
 
-          # Fase 2: Lavoratore persistente Camoufox
           def camoufox_persistent_worker(worker_id, proxy_addr, q):
               print(f"  [🦊 Worker CF {worker_id}] Avvio browser persistente su proxy: {proxy_addr}...", flush=True)
               proxy_config = {"server": f"socks5://{proxy_addr}"}
@@ -356,6 +345,9 @@ jobs:
               else:
                   print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1! Camoufox non necessario.", flush=True)
           EOF
+
+      - name: Esegui lo script Python
+        run: python extract.py
 
       # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
       - name: Carica i file estratti come Artefatto ZIP
