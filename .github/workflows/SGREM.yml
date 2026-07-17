@@ -1,18 +1,18 @@
-name: Jina RAG URL Tester 20-Way Parallel
+name: Test Jina Parallel Extraction 2026
 
 on: 
   workflow_dispatch:
 
 jobs:
-  jina_bulk_test:
+  machine2_cdp_insocket:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Dipendenze Scraper
+      - name: Installazione Dipendenze Scraper Veloce
         run: |
           pip install beautifulsoup4 curl-cffi
 
-      - name: Setup Container WARP (20 Nodi IPv6 con IP rotanti)
+      - name: Setup Container WARP (20 Nodi IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
 
@@ -31,14 +31,14 @@ jobs:
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 12
 
-      - name: Creazione Cartella Risultati Jina
+      - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p jina_results
 
-      - name: Creazione Script Python a 20 Vie Parallele
+      - name: Creazione Scraper Multithread Jina (Chrome 120 + 20 Nodi)
         run: |
-          cat << 'EOF' > jina_tester.py
-          import os
+          cat << 'EOF' > jina_scraper.py
           import json
+          import re
           import sys
           import time
           import random
@@ -47,12 +47,17 @@ jobs:
           import subprocess
           from pathlib import Path
           from urllib.parse import urlparse, quote
-          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+          from bs4 import BeautifulSoup
           from curl_cffi import requests
 
           def log(message: str):
               sys.stderr.write(message + "\n")
               sys.stderr.flush()
+
+          def human_sleep(mean: float, std_dev: float):
+              sleep_time = max(0.1, random.gauss(mean, std_dev))
+              time.sleep(sleep_time)
 
           class ProxyPool:
               def __init__(self, ports):
@@ -80,7 +85,7 @@ jobs:
 
               def _restart_proxy(self, port):
                   container_index = port - 40000
-                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha effettuato 35 chiamate. Cambio IP in background...")
+                  log(f"🔄 [AUTO-CLEAN] warproxy-{container_index} ha elaborato 35 richieste. Cambio IP IPv6 in background...")
                   subprocess.run(["docker", "restart", f"warproxy-{container_index}"], capture_output=True, check=False)
                   time.sleep(6)
                   with self.lock:
@@ -88,130 +93,188 @@ jobs:
 
           PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
 
-          # Lista delle 37 URL fallite estratte dai log precedenti
-          URLS_TO_TEST = [
-              # --- Fallite Oaxaca ---
-              "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
-              "https://eltonodelacochinilla.com/visitanos",
-              "https://klook.com/it/activity/150588-hierve-el-agua-mitla-mezcal-tour-in-mexico",
-              "https://hola-oaxaca.com/que-hacer/tour/hierve-el-agua",
-              "https://my.trip.com/travel-guide/attraction/oaxaca/templo-de-santo-domingo-de-guzmn-18697124",
-              "https://mindtrip.ai/inspiration/how-take-shared-taxi-colectivo-oaxaca/in-HZoeSkoK",
-              "https://oaxacae.com/2024/06/hierve-el-agua-oaxaca.html",
-              "https://oaxacaautentico.com/es/blog/como-llegar-y-moverse-en-oaxaca-guia-transporte",
-              "https://oaxaca.travel/index.php/es/mercados/mercado-20-de-noviembre-es",
-              "https://uncoveredhistory.com/mexico/monte-alban-the-encrypted-city",
-              "https://edenviaggi.it/racconti/monte-alban-viaggio-nellantica-capitale-zapoteca-di-oaxaca-in-messico",
-              "https://oaxaca.travel/index.php/en-us/markets-es/20-de-noviembre-market-en",
-              "https://santacultura.mx/arte-popular/muestran-proceso-ancestral-de-tapetes-de-lana-en-teotitlan-del-valle",
-              "https://hotelesdeoaxaca.com/atractivos-turisticos/mercado-20-de-noviembre.html",
-              "https://oaxacaairporttaxi.com/es",
-              # --- Fallite Orvieto ---
-              "https://acchiappamappa.com/pozzo-di-san-patrizio-orvieto-guida",
-              "https://alltrails.com/it-it/sentiero/italy/umbria/anello-della-rupe-di-orvieto",
-              "https://alltrails.com/trail/italy/umbria/anello-della-rupe-di-orvieto",
-              "https://comune.orvieto.tr.it/it/page/come-arrivare",
-              "https://comune.orvieto.tr.it/it/page/orvieto-carta-unica",
-              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
-              "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
-              "https://fsbusitalia.it/it/umbria/titoli-di-viaggio-tariffe-umbria/biglietti-tariffe-servizi-urbani-umbria/tariffe-orvieto.html",
-              "https://fsbusitalia.it/it/turismo/programma-il-tuo-viaggio/orvieto-urbs-vetus-dell-umbria.html",
-              "https://fsbusitalia.it/it/umbria/orari-linee-umbria/quibus-orvieto.html",
-              "https://it.wikiloc.com/percorsi-escursionismo/orvieto-anello-della-rupe-e-i-sotterranei-246324949",
-              "https://liveorvieto.com/blog/attrazioni_naturali/anello-della-rupe",
-              "https://olodramma.com/it/cosa-vedere-in-umbria-in-un-weekend-itinerario-di-3-giorni-tra-orvieto-spello-assisi-e-gubbio",
-              "https://neuralword.com/it/cucina/ristoranti-posti-dove-mangiare/mangiare-ad-orvieto-i-migliori-ristoranti",
-              "https://roadmindtrip.com/cosa-vedere-a-orvieto-guida-per-un-weekend",
-              "https://travelworld.it/visitare-orvieto-2-giorni-per-scoprire-la-perla-dellumbria",
-              "https://viaggiadipiu.it/2020/03/09/visitare-orvieto-informazioni-e-consigli-utili",
-              "https://flashpackingitaly.com/orvieto-card-review",
-              "https://umbriatourism.it/en/w/crocefisso-del-tufo-necropolis-orvieto",
-              "https://umbriatourism.it/it/w/duomo-di-santa-maria-assunta-in-cielo-it",
-              "https://umbriatourism.it/it/w/necropoli-di-crocifisso-del-tufo-orvieto",
-              "https://wikiloc.com/hiking-trails/gita-fuori-porta-due-viandanti-ad-orvieto-con-annesso-lanello-della-rupe-166636709"
+          ACCEPT_LANGUAGES = [
+              "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+              "it-IT,it;q=0.9",
+              "en-US,en;q=0.9,it;q=0.8"
           ]
 
-          def test_url_on_jina(url: str, task_id: int, total_tasks: int):
-              # Genera un nome file sicuro basato sull'host e l'hash MD5 dell'URL
-              parsed = urlparse(url)
-              domain = parsed.netloc.replace("www.", "")
-              url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
-              output_filename = f"jina_results/task_{task_id:02d}_{domain}_{url_hash}.txt"
+          BROWSER_PROFILES = {
+              "chrome": {
+                  "impersonate": "chrome120",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              },
+              "edge": {
+                  "impersonate": "chrome120",
+                  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              }
+          }
 
-              max_retries = 3
-              for attempt in range(1, max_retries + 1):
+          def get_minimal_headers(browser: str) -> dict:
+              profile = BROWSER_PROFILES[browser]
+              return {
+                  "user-agent": profile["ua"],
+                  "accept": profile["accept"],
+                  "accept-language": random.choice(ACCEPT_LANGUAGES),
+                  "accept-encoding": "gzip, deflate, br",
+              }
+
+          def create_session(port, browser):
+              impersonate_target = BROWSER_PROFILES[browser]["impersonate"]
+              proxies = {
+                  "http": f"socks5h://127.0.0.1:{port}",
+                  "https": f"socks5h://127.0.0.1:{port}"
+              }
+              sess = requests.Session(impersonate=impersonate_target, proxies=proxies)
+              sess.headers.update(get_minimal_headers(browser))
+              return sess
+
+          def fetch_jina(url: str, browser: str, port: int) -> str | None:
+              session = create_session(port, browser)
+              headers = get_minimal_headers(browser)
+              
+              # Integrazione eventuale Jina Token passato per ambiente
+              token = os.environ.get("JINA_API_KEY", "").strip()
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+                  
+              jina_endpoint = f"https://r.jina.ai/{url}"
+              try:
+                  response = session.get(jina_endpoint, headers=headers, timeout=20.0)
+                  if response.status_code == 200:
+                      return response.text
+              except Exception:
+                  pass
+              return None
+
+          def process_single_task(url: str, task_index: int, total_tasks: int, global_attempt: int) -> str | None:
+              if global_attempt == 1:
+                  time.sleep(random.uniform(0.1, 7.0))
+              
+              max_local_retries = 3
+              
+              for local_attempt in range(1, max_local_retries + 1):
                   port = PROXY_POOL.get_proxy()
                   if not port:
                       time.sleep(1.0)
                       continue
-
-                  proxies = {
-                      "http": f"socks5h://127.0.0.1:{port}",
-                      "https": f"socks5h://127.0.0.1:{port}"
-                  }
-
-                  # Endpoint Jina Reader
-                  jina_endpoint = f"https://r.jina.ai/{url}"
-
-                  try:
-                      # Utilizziamo curl-cffi per imitare un browser standard ed evitare blocchi diretti
-                      sess = requests.Session(impersonate="chrome120", proxies=proxies)
-                      headers = {
-                          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                          "accept": "text/plain, text/html, */*",
-                      }
                       
-                      response = sess.get(jina_endpoint, headers=headers, timeout=25.0)
-                      PROXY_POOL.report_usage(port)
-
-                      if response.status_code == 200:
-                          # Scrittura del markup / markdown estratto da Jina
-                          with open(output_filename, "w", encoding="utf-8") as f:
-                              f.write(f"--- SOURCE URL: {url} ---\n")
-                              f.write(f"--- JINA STATUS: {response.status_code} ---\n\n")
-                              f.write(response.text)
-                          
-                          log(f"[{task_id:02d}/{total_tasks}] [OK] JINA -> {domain} ({len(response.text)} byte salvati)")
-                          return True
-                      elif response.status_code == 429:
-                          log(f"[{task_id:02d}/{total_tasks}] [WARNING] Jina ha restituito 429 (Rate Limit) su porta {port}. Ritento con altro nodo...")
-                      else:
-                          log(f"[{task_id:02d}/{total_tasks}] [WARNING] Errore HTTP {response.status_code} per {domain} (Tentativo {attempt}/{max_retries})")
-
-                  except Exception as e:
-                      PROXY_POOL.report_usage(port)
-                      log(f"[{task_id:02d}/{total_tasks}] [WARNING] Errore connessione porta {port} per {domain}: {e}")
-
-                  time.sleep(random.uniform(2.0, 4.0))
-
-              log(f"❌ [{task_id:02d}/{total_tasks}] [FAIL] Impossibile recuperare {url} tramite Jina dopo {max_retries} tentativi.")
-              return False
-
-          def main():
-              total = len(URLS_TO_TEST)
-              log(f"Avvio test di {total} URL su Jina Reader API...")
-              
-              # Configurazione a 20 vie parallele
-              with ThreadPoolExecutor(max_workers=20) as executor:
-                  futures = {
-                      executor.submit(test_url_on_jina, url, idx + 1, total): url 
-                      for idx, url in enumerate(URLS_TO_TEST)
-                  }
-                  for future in as_completed(futures):
+                  browser = random.choice(["chrome", "edge"])
+                  content = None
+                  try:
+                      content = fetch_jina(url, browser, port)
+                  except Exception:
                       pass
 
-              log("Processo di recupero completato.")
+                  PROXY_POOL.report_usage(port)
+
+                  if content is not None and len(content) > 0:
+                      log(f"[{task_index:03d}/{total_tasks}] [OK] JINA -> {len(content)} byte recuperati per: '{url}'")
+                      return content
+                  else:
+                      human_sleep(1.0, 0.3)
+
+              log(f"[{task_index:03d}/{total_tasks}] [RITARDO] JINA per '{url}'. Pausa... (Giro {global_attempt})")
+              time.sleep(random.uniform(4.0, 6.0))
+              
+              return None
+
+          import os
+
+          def main():
+              urls = [
+                  "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
+                  "https://eltonodelacochinilla.com/visitanos",
+                  "https://klook.com/it/activity/150588-hierve-el-agua-mitla-mezcal-tour-in-mexico",
+                  "https://hola-oaxaca.com/que-hacer/tour/hierve-el-agua",
+                  "https://my.trip.com/travel-guide/attraction/oaxaca/templo-de-santo-domingo-de-guzmn-18697124",
+                  "https://mindtrip.ai/inspiration/how-take-shared-taxi-colectivo-oaxaca/in-HZoeSkoK",
+                  "https://oaxacae.com/2024/06/hierve-el-agua-oaxaca.html",
+                  "https://oaxacaautentico.com/es/blog/como-llegar-y-moverse-en-oaxaca-guia-transporte",
+                  "https://oaxaca.travel/index.php/es/markets-es/20-de-noviembre-market-en",
+                  "https://uncoveredhistory.com/mexico/monte-alban-the-encrypted-city",
+                  "https://edenviaggi.it/racconti/monte-alban-viaggio-nellantica-capitale-zapoteca-di-oaxaca-in-messico",
+                  "https://oaxaca.travel/index.php/en-us/markets-es/20-de-noviembre-market-en",
+                  "https://santacultura.mx/arte-popular/muestran-proceso-ancestral-de-tapetes-de-lana-en-teotitlan-del-valle",
+                  "https://hotelesdeoaxaca.com/atractivos-turisticos/mercado-20-de-noviembre.html",
+                  "https://oaxacaairporttaxi.com/es",
+                  "https://acchiappamappa.com/pozzo-di-san-patrizio-orvieto-guida",
+                  "https://alltrails.com/it-it/sentiero/italy/umbria/anello-della-rupe-di-orvieto",
+                  "https://alltrails.com/trail/italy/umbria/anello-della-rupe-di-orvieto",
+                  "https://comune.orvieto.tr.it/it/page/come-arrivare",
+                  "https://comune.orvieto.tr.it/it/page/orvieto-carta-unica",
+                  "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
+                  "https://comune.orvieto.tr.it/it/vivere/il-duomo-di-orvieto",
+                  "https://fsbusitalia.it/it/umbria/titoli-di-viaggio-tariffe-umbria/biglietti-tariffe-servizi-urbani-umbria/tariffe-orvieto.html",
+                  "https://fsbusitalia.it/it/turismo/programma-il-tuo-viaggio/orvieto-urbs-vetus-dell-umbria.html",
+                  "https://fsbusitalia.it/it/umbria/orari-linee-umbria/quibus-orvieto.html",
+                  "https://it.wikiloc.com/percorsi-escursionismo/orvieto-anello-della-rupe-e-i-sotterranei-246324949",
+                  "https://liveorvieto.com/blog/attrazioni_naturali/anello-della-rupe",
+                  "https://olodramma.com/it/cosa-vedere-in-umbria-in-un-weekend-itinerario-di-3-giorni-tra-orvieto-spello-assisi-e-gubbio",
+                  "https://neuralword.com/it/cucina/ristoranti-posti-dove-mangiare/mangiare-ad-orvieto-i-migliori-ristoranti",
+                  "https://roadmindtrip.com/cosa-vedere-a-orvieto-guida-per-un-weekend",
+                  "https://travelworld.it/visitare-orvieto-2-giorni-per-scoprire-la-perla-dellumbria",
+                  "https://viaggiadipiu.it/2020/03/09/visitare-orvieto-informazioni-e-consigli-utili",
+                  "https://flashpackingitaly.com/orvieto-card-review",
+                  "https://umbriatourism.it/en/w/crocefisso-del-tufo-necropolis-orvieto",
+                  "https://umbriatourism.it/it/w/duomo-di-santa-maria-assunta-in-cielo-it",
+                  "https://umbriatourism.it/it/w/necropoli-di-crocifisso-del-tufo-orvieto",
+                  "https://wikiloc.com/hiking-trails/gita-fuori-porta-due-viandanti-ad-orvieto-con-annesso-lanello-della-rupe-166636709"
+              ]
+
+              total_tasks = len(urls)
+              log(f"Inizio scraping di {total_tasks} pagine tramite l'API di Jina Reader.")
+
+              Path("jina_results").mkdir(exist_ok=True)
+              
+              MAX_GLOBAL_RETRIES = 5
+
+              with ThreadPoolExecutor(max_workers=20) as executor:
+                  futures = {
+                      executor.submit(process_single_task, url, idx + 1, total_tasks, 1): (url, idx + 1, 1)
+                      for idx, url in enumerate(urls)
+                  }
+
+                  while futures:
+                      done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                      
+                      for future in done:
+                          url, t_idx, global_attempt = futures.pop(future)
+                          
+                          try:
+                              content = future.result()
+                              
+                              if content is not None:
+                                  parsed = urlparse(url)
+                                  domain = parsed.netloc.replace("www.", "")
+                                  url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
+                                  temp_file = Path("jina_results") / f"task_{t_idx:03d}_{domain}_{url_hash}.txt"
+                                  with open(temp_file, "w", encoding="utf-8") as f:
+                                      f.write(f"--- SOURCE URL: {url} ---\n\n")
+                                      f.write(content)
+                              else:
+                                  if global_attempt < MAX_GLOBAL_RETRIES:
+                                      new_future = executor.submit(process_single_task, url, t_idx, total_tasks, global_attempt + 1)
+                                      futures[new_future] = (url, t_idx, global_attempt + 1)
+                                  else:
+                                      log(f"❌ ABBANDONO DEFINITIVO task {t_idx:03d} per la risorsa '{url}'.")
+                          except Exception as e:
+                              log(f"Errore grave nel thread task {t_idx:03d}: {e}")
 
           if __name__ == "__main__":
               main()
           EOF
 
-      - name: Esecuzione Test Jina (20 Thread Paralleli)
-        run: python -u jina_tester.py
+      - name: Esecuzione Scraping Jina Reader
+        env:
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+        run: python -u jina_scraper.py
 
-      - name: Archiviazione e Caricamento Risultati
+      - name: Upload Risultati Jina
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Estrazione_Jina
+          name: Risultati_Jina_Challenge
           path: jina_results/
