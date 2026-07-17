@@ -1,4 +1,4 @@
-name: Extract Markdown (100% Proxied Pipeline + ZIP)
+name: Extract Markdown (Fully Proxied Hybrid Pipeline + ZIP)
 
 on:
   workflow_dispatch:
@@ -233,8 +233,8 @@ jobs:
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(jina_response.text)
                               return f"[✅ JINA {index}/{total_urls}] {url} -> Salvato via Jina (Proxy: {proxy_addr})"
-                      except Exception:
-                          pass
+                  except Exception:
+                      pass
 
               with failed_lock:
                   failed_urls.append((index, url, filepath))
