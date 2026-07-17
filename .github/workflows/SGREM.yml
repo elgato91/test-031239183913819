@@ -1,10 +1,8 @@
 name: Extract Markdown with Jina AI
 
-# Permette di avviare l'azione manualmente dal tab "Actions" di GitHub
 on:
   workflow_dispatch:
 
-# Permessi necessari per permettere al bot di fare il commit dei nuovi file
 permissions:
   contents: write
 
@@ -22,6 +20,9 @@ jobs:
           python-version: '3.10'
 
       - name: Estrai Markdown con Jina AI
+        # Variabile fondamentale per vedere i log apparire riga per riga in tempo reale
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
           import urllib.request
@@ -29,6 +30,7 @@ jobs:
           import os
           import re
           import time
+          import sys
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -70,19 +72,19 @@ jobs:
               "https://wikiloc.com/hiking-trails/gita-fuori-porta-due-viandanti-ad-orvieto-con-annesso-lanello-della-rupe-166636709"
           ]
 
-          # Crea la cartella output se non esiste
           os.makedirs('output', exist_ok=True)
+          total_urls = len(URLS_TO_TEST)
 
-          for url in URLS_TO_TEST:
-              # Crea un nome file sicuro dall'URL (es: klook_com_it_activity_150588.md)
+          for index, url in enumerate(URLS_TO_TEST, start=1):
               clean_name = re.sub(r'^https?://', '', url)
               safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
               filepath = os.path.join('output', f"{safe_filename}.md")
               
               jina_url = f"https://r.jina.ai/{url}"
-              print(f"Scaricando: {url} ...")
               
-              # Aggiungiamo un User-Agent per evitare che Jina o il sito di destinazione ci blocchino
+              # flush=True forza la scrittura immediata in console senza attendere
+              print(f"[{index}/{total_urls}] Richiesta in corso per: {url}", flush=True)
+              
               req = urllib.request.Request(jina_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
               
               try:
@@ -90,11 +92,11 @@ jobs:
                       content = response.read().decode('utf-8')
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(content)
-                      print(f"  -> Salvato in {filepath}")
+                      print(f"  ---> FATTO! Salvato in: {filepath}\n", flush=True)
               except urllib.error.URLError as e:
-                  print(f"  -> Errore durante lo scaricamento di {url}: {e}")
+                  print(f"  ---> ERRORE: Fallito con errore {e}\n", flush=True)
               
-              # Pausa di 2 secondi per evitare rate-limiting da parte di r.jina.ai
+              # Piccola pausa per non saturare l'API
               time.sleep(2)
           EOF
 
@@ -103,5 +105,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
-          # Se non ci sono cambiamenti, non fa nulla, altrimenti fa il commit e push
           git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI" && git push)
