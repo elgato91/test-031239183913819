@@ -1,4 +1,4 @@
-name: Extract Markdown (Proxied Hybrid Pipeline + ZIP)
+name: Extract Markdown (Fully Proxied Hybrid Pipeline + ZIP)
 
 on:
   workflow_dispatch:
@@ -27,6 +27,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
+          # Allineamento rigoroso a colonna 1 per tutte le definizioni globali
           import os
           import re
           import requests
@@ -38,6 +39,9 @@ jobs:
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
           from camoufox.sync_api import Camoufox
+
+          class DeadProxyException(Exception):
+              pass
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -106,6 +110,7 @@ jobs:
               low_text = text.lower()
               
               if is_html:
+                  # Controllo dei titoli WAF/Anti-bot (solo per sorgente HTML)
                   title_match = re.search(r"<title[^>]*>(.*?)</title>", low_text, re.DOTALL)
                   title_text = title_match.group(1).strip() if title_match else ""
                   waf_titles = ["just a moment", "attention required", "access denied", 
@@ -115,6 +120,7 @@ jobs:
                       if wt in title_text:
                           return False, f"WAF rilevato nel titolo HTML: '{wt}'"
                   
+                  # Indicatori di blocco dentro l'HTML
                   blocking_indicators = [
                       "challenge-platform", "access denied", "403 forbidden", "cloudflare",
                       "just a moment", "security verification", "please enable js", "enable javascript",
@@ -129,6 +135,7 @@ jobs:
                       "one moment, please..."
                   ]
               else:
+                  # Indicatori di blocco specifici per il Markdown generato da Jina
                   blocking_indicators = [
                       "just a moment", "are you a robot", "prove your humanity",
                       "captcha verification", "please enter in the characters you see below",
@@ -148,7 +155,7 @@ jobs:
                       
               return True, ""
 
-          # Worker del produttore (Scanner)
+          # Worker dello scanner
           def scan_worker(proxy_addr):
               global working_count
               if stop_scanner.is_set():
@@ -166,7 +173,7 @@ jobs:
                   if r.status_code == 200 and "example" in r.text.lower():
                       with working_lock:
                           if len(working_proxies) < max_working and not stop_scanner.is_set():
-                              working_proxies.append((proxy_addr, latency))
+                              working_count += 1
                               proxy_queue.put(proxy_addr)
                               print(f"  [+] Proxy valido: {proxy_addr} | Latenza: {latency:.2f}s ({len(working_proxies)}/{max_working})", flush=True)
                               if len(working_proxies) >= max_working:
@@ -202,7 +209,7 @@ jobs:
                   try:
                       impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
                       headers_cffi = {
-                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9;image/avif,image/webp,image/apng,*/*;q=0.8",
+                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                           "Accept-Language": "en-US,en;q=0.9",
                           "Upgrade-Insecure-Requests": "1"
                       }
