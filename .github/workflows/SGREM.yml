@@ -1,4 +1,4 @@
-name: Extract Markdown (Hide from Jina via Proxy Rotation)
+name: Extract Markdown (Fast Scanner + Rate-Limited Queue)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pysocks
 
-      - name: Estrai Markdown mascherando l'IP a Jina AI
+      - name: Scannerizza Proxy e Estrai in Parallelo
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -35,6 +35,7 @@ jobs:
           import random
           import time
           import concurrent.futures
+          from queue import Queue
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -79,17 +80,67 @@ jobs:
           os.makedirs('output', exist_ok=True)
           total_urls = len(URLS_TO_TEST)
 
+          # FASE 1: DOWNLOAD E FILTRAGGIO RAPIDO DEI PROXY funzionanti
           print("==========================================", flush=True)
-          print("🔄 Scaricamento lista di Proxy SOCKS5 gratuiti...", flush=True)
+          print("🔄 Scaricamento liste proxy candidati...", flush=True)
           try:
-              # Scarichiamo una lista fresca di proxy SOCKS5 da una nota repository di GitHub
+              # SOCKS5 è la scelta migliore per instradare traffico SSL in modo pulito
               proxy_req = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", timeout=10)
-              PROXY_LIST = [p.strip() for p in proxy_req.text.split('\n') if p.strip()]
-              print(f"✅ Trovati {len(PROXY_LIST)} proxy disponibili per nascondersi da Jina!", flush=True)
+              raw_proxies = [p.strip() for p in proxy_req.text.split('\n') if p.strip()]
+              random.shuffle(raw_proxies)
+              print(f"✅ Trovati {len(raw_proxies)} proxy candidati. Avvio selezione rapida...", flush=True)
           except Exception as e:
-              print(f"⚠️ Errore nel download dei proxy: {e}. Lista vuota.", flush=True)
-              PROXY_LIST = []
+              print(f"⚠️ Errore nel recupero della lista proxy: {e}", flush=True)
+              raw_proxies = []
+
+          working_proxies = []
+          max_working = 20
+          test_url = "https://r.jina.ai/https://example.com"
+          test_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+          def test_single_proxy(proxy_addr):
+              # Se abbiamo già raggiunto l'obiettivo, usciamo all'istante
+              if len(working_proxies) >= max_working:
+                  return
+              
+              proxies = {
+                  'http': f'socks5h://{proxy_addr}',
+                  'https': f'socks5h://{proxy_addr}'
+              }
+              try:
+                  # Timeout cortissimo (3 secondi): se è lento lo scartiamo subito
+                  r = requests.get(test_url, headers=test_headers, proxies=proxies, timeout=3.0)
+                  # Verifichiamo che risponda correttamente e che non sia una pagina di errore di Cloudflare
+                  if r.status_code == 200 and "example" in r.text.lower():
+                      if len(working_proxies) < max_working:
+                          working_proxies.append(proxy_addr)
+                          print(f"  [+] Proxy funzionante trovato: {proxy_addr} ({len(working_proxies)}/{max_working})", flush=True)
+              except Exception:
+                  pass
+
+          # Lanciamo lo scanner parallelo con 150 thread per trovare rapidamente i 20 IP validi
+          print("🚀 Scansione parallela avviata (150 thread, max 3s di attesa per proxy)...", flush=True)
+          start_scan = time.time()
+          with concurrent.futures.ThreadPoolExecutor(max_workers=150) as executor:
+              # Prendiamo un campione di 500 proxy per non sovraccaricare la rete locale della macchina
+              futures = {executor.submit(test_single_proxy, p): p for p in raw_proxies[:500]}
+              for future in concurrent.futures.as_completed(futures):
+                  if len(working_proxies) >= max_working:
+                      break
+
+          scan_duration = time.time() - start_scan
+          print(f"⏱️ Scansione completata in {scan_duration:.2f} secondi.", flush=True)
+          print(f"📌 Proxy stabili selezionati ({len(working_proxies)}): {working_proxies}\n", flush=True)
           print("==========================================\n", flush=True)
+
+          if not working_proxies:
+              print("⚠️ Nessun proxy valido trovato. Procedo con la connessione diretta per evitare il blocco totale.", flush=True)
+
+          # FASE 2: CODA DI ESECUZIONE CON LEASING E RATE-LIMIT (20 RPM per IP)
+          # Ogni proxy viene salvato come tupla: (indirizzo, timestamp_ultimo_utilizzo)
+          proxy_queue = Queue()
+          for p in working_proxies:
+              proxy_queue.put((p, 0))
 
           def fetch_url(item):
               index, url = item
@@ -98,50 +149,72 @@ jobs:
               filepath = os.path.join('output', f"{safe_filename}.md")
               jina_url = f"https://r.jina.ai/{url}"
               
-              max_retries = 5
+              max_attempts = 3
               
-              for attempt in range(1, max_retries + 1):
-                  # Pesca un proxy casuale dalla lista
-                  proxy_addr = random.choice(PROXY_LIST) if PROXY_LIST else None
-                  
-                  if proxy_addr:
-                      # Usa socks5h in modo da risolvere i DNS (nomi a dominio) direttamente dal server Proxy
+              for attempt in range(1, max_attempts + 1):
+                  if not working_proxies:
+                      # Fallback diretto se non ci sono proxy validi
+                      proxies = None
+                      proxy_addr = "Direct IP"
+                  else:
+                      # Preleviamo un proxy e il suo tempo di ultimo utilizzo dalla coda
+                      proxy_addr, last_used = proxy_queue.get()
+                      
+                      # Enforce Cooldown (20 RPM = 1 richiesta ogni 3.0 secondi per singolo IP)
+                      now = time.time()
+                      elapsed = now - last_used
+                      if elapsed < 3.0:
+                          time.sleep(3.0 - elapsed)
+                          
                       proxies = {
                           'http': f'socks5h://{proxy_addr}',
                           'https': f'socks5h://{proxy_addr}'
                       }
-                  else:
-                      proxies = None
 
-                  # Cambiamo lo User-Agent a caso per sembrare browser diversi
                   headers = {
-                      'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36'
+                      'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
+                      'X-Return-Format': 'markdown'
                   }
                   
-                  print(f"[⌛ Avvio {index}/{total_urls}] (Tentativo {attempt}/{max_retries} via Proxy: {proxy_addr}) -> {url}", flush=True)
+                  print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
                   
                   try:
-                      # Usiamo un timeout basso (15 secondi). Se il proxy gratuito è morto/lento, fallisce in fretta e riprova
+                      # Timeout di 15 secondi per la chiamata reale su proxy già verificato
                       response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=15)
-                      
-                      # Se Jina ci da un 403 o 429, solleva l'eccezione in modo da forzare il tentativo con un nuovo proxy
                       response.raise_for_status()
                       
+                      # Controllo anti-captcha silente
+                      if "cloudflare" in response.text.lower() and "captcha" in response.text.lower():
+                          raise Exception("Intercettato blocco Captcha di Cloudflare")
+
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(response.text)
+                      
+                      # Operazione riuscita! Rimettiamo il proxy in coda aggiornando il timestamp di utilizzo
+                      if working_proxies:
+                          proxy_queue.put((proxy_addr, time.time()))
+                          proxy_queue.task_done()
                           
-                      return f"[✅ FATTO {index}/{total_urls}] Jina ha accettato la connessione. Salvato: {filepath}"
+                      return f"[✅ FATTO {index}/{total_urls}] {url} -> Salvato!"
                       
                   except Exception as e:
-                      # Errore (Proxy morto o IP bannato da Jina)
-                      if attempt == max_retries:
-                          return f"[❌ ERRORE {index}/{total_urls}] {url} Fallito definitivamente. Ultimo errore: {e}"
+                      # Se fallisce, reinseriamo il proxy applicando una piccola penalità di tempo (+3s)
+                      # così la coda preferirà altri proxy mentre questo si raffredda
+                      if working_proxies:
+                          proxy_queue.put((proxy_addr, time.time() + 3.0))
+                          proxy_queue.task_done()
+                          
+                      if attempt == max_attempts:
+                          return f"[❌ ERRORE {index}/{total_urls}] {url} Fallito definitivamente dopo {max_attempts} tentativi. Errore: {e}"
                       
-                      # Pausa brevissima prima di ripescare un nuovo proxy
+                      # Breve pausa prima del prossimo tentativo (che pescherà un proxy diverso)
                       time.sleep(1)
 
-          # Impostiamo 5 thread paralleli. Ognuno userà il proprio proxy ruotante.
-          with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+          # Avviamo i download in parallelo usando un numero di lavoratori pari ai proxy trovati (max 20)
+          workers = len(working_proxies) if working_proxies else 3
+          print(f"🚀 Avvio della coda di estrazione con {workers} lavoratori simultanei...", flush=True)
+          
+          with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
               items = list(enumerate(URLS_TO_TEST, start=1))
               future_to_url = {executor.submit(fetch_url, item): item for item in items}
               
@@ -155,4 +228,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
-          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI (Proxy Rotation)" && git push)
+          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown (Optimized Scanned Proxies)" && git push)
