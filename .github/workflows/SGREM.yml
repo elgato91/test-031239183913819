@@ -136,34 +136,51 @@ jobs:
               filepath = os.path.join('output', f"{safe_filename}.md")
               jina_url = f"https://r.jina.ai/{url}"
               
-              max_attempts = 2
+              max_attempts = 3
               failed_proxies = set()
               
               for attempt in range(1, max_attempts + 1):
-                  if not working_proxies:
+                  # Se i primi 2 tentativi con proxy falliscono, proviamo la connessione diretta a Jina (veloce e sicura)
+                  if attempt == max_attempts:
                       proxies = None
-                      proxy_addr = "Direct IP"
-                  else:
+                      proxy_addr = "Connessione Diretta (Last Resort)"
+                  elif working_proxies:
                       candidates = [p for p in working_proxies if p not in failed_proxies]
                       proxy_addr = random.choice(candidates) if candidates else random.choice(working_proxies)
-                      
                       proxies = {
                           'http': f'socks5h://{proxy_addr}',
                           'https': f'socks5h://{proxy_addr}'
                       }
+                  else:
+                      proxies = None
+                      proxy_addr = "Direct IP"
 
-                  # OTTIMIZZAZIONE 1: Ridotto lo scaglio temporale a soli 0.2 - 1.0 secondi
+                  # Scaglionamento iniziale minimo (0.2 - 1.0 secondi)
                   time.sleep(random.uniform(0.2, 1.0))
 
-                  headers = {
-                      'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
-                      'X-Return-Format': 'markdown'
-                  }
-                  
+                  # Log pulito e singolo per ogni tentativo
                   print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
                   
+                  # Se siamo all'ultimo tentativo, passiamo direttamente a Jina senza passare per curl-cffi
+                  if attempt == max_attempts:
+                      try:
+                          jina_headers = {
+                              'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
+                              'X-Return-Format': 'markdown'
+                          }
+                          jina_response = requests.get(jina_url, headers=jina_headers, proxies=None, timeout=10)
+                          if jina_response.status_code in [404, 422]:
+                              return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
+                          
+                          jina_response.raise_for_status()
+                          with open(filepath, 'w', encoding='utf-8') as f:
+                              f.write(jina_response.text)
+                          return f"[✅ JINA DIRECT {index}/{total_urls}] {url} -> Salvato via Jina (Direct Fallback)!"
+                      except Exception as e:
+                          return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito anche su Direct Fallback: {e}"
+
                   # ==========================================
-                  # 🚀 STEP A: TENTATIVO ULTRA STEALTH CON curl-cffi
+                  # 🚀 STEP A: TENTATIVO ULTRA STEALTH CON curl-cffi (Tentativi 1 e 2)
                   # ==========================================
                   try:
                       impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
@@ -180,14 +197,12 @@ jobs:
                           "Upgrade-Insecure-Requests": "1"
                       }
                       
-                      # OTTIMIZZAZIONE 2: Ridotto drasticamente il timeout stealth diretto a soli 4 secondi.
-                      # Se il proxy è troppo lento a fare l'handshake col sito, passiamo subito a Jina.
                       response = requests_cffi.get(
                           url,
                           headers=headers_cffi,
                           proxies=proxies,
                           impersonate=impersonate_target,
-                          timeout=4
+                          timeout=4  # Se il proxy è lento a connettersi al sito, passa subito a Jina
                       )
                       
                       lowered_html = response.text.lower()
@@ -208,14 +223,15 @@ jobs:
                       return f"[✅ STEALTH {index}/{total_urls}] {url} -> Scaricato direttamente tramite curl-cffi!"
 
                   # ==========================================
-                  # 🔄 STEP B: FALLBACK IMMEDIATO A JINA AI
+                  # 🔄 STEP B: FALLBACK IMMEDIATO A JINA AI (Tentativi 1 e 2)
                   # ==========================================
                   except Exception as stealth_err:
-                      print(f"[🔄 FALLBACK {index}/{total_urls}] Stealth fallito ({stealth_err}). Passaggio a Jina AI...", flush=True)
-                      
                       try:
-                          # OTTIMIZZAZIONE 3: Ridotto timeout di Jina a 8 secondi per evitare stalli su proxy morti
-                          jina_response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=8)
+                          jina_headers = {
+                              'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
+                              'X-Return-Format': 'markdown'
+                          }
+                          jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=8)
                           
                           if jina_response.status_code in [404, 422]:
                               return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
@@ -232,10 +248,7 @@ jobs:
                           
                       except Exception as jina_err:
                           failed_proxies.add(proxy_addr)
-                          if attempt == max_attempts:
-                              return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} Fallito definitivamente. Errore: {jina_err}"
-                          
-                          time.sleep(1)
+                          time.sleep(0.5)
 
           # Avviamo TUTTE le richieste contemporaneamente (37 thread)
           workers = total_urls
