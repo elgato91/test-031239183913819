@@ -134,7 +134,7 @@ jobs:
                       "performing security verification", "challenges.cloudflare.com",
                       "verification successful. waiting for", "attention required!"
                   ]
-
+          
               for ind in blocking_indicators:
                   if ind in low_text:
                       return False, f"WAF/Captcha/Blocco rilevato nel testo: '{ind}'"
@@ -194,12 +194,13 @@ jobs:
               failed_proxies = set()
               
               for attempt in range(1, max_attempts + 1):
-                  # Se i primi 2 tentativi falliscono, usiamo la connessione pulita di GitHub Actions (senza proxy)
+                  # Ultimo tentativo: Connessione Diretta a Jina (senza proxy)
                   if attempt == max_attempts:
                       proxies = None
                       proxy_addr = "Connessione Diretta (Last Resort)"
-                  elif working_proxies:
+                  else:
                       try:
+                          # Attende asincronamente l'inserimento dei proxy validi nella coda
                           proxy_addr = proxy_queue.get(block=True, timeout=12)
                           proxies = {
                               'http': f'socks5h://{proxy_addr}',
@@ -208,13 +209,32 @@ jobs:
                       except Exception:
                           proxies = None
                           proxy_addr = "Direct IP (Timeout Coda)"
-                  else:
-                      proxies = None
-                      proxy_addr = "Direct IP"
 
-                  # Scaglionamento iniziale minimo
                   time.sleep(random.uniform(0.2, 1.0))
                   print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
+                  
+                  # Salto diretto a Jina Direct per l'ultimo tentativo
+                  if attempt == max_attempts:
+                      try:
+                          jina_headers = {
+                              'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
+                              'X-Return-Format': 'markdown'
+                          }
+                          jina_response = requests.get(jina_url, headers=jina_headers, proxies=None, timeout=10)
+                          if jina_response.status_code in [404, 422]:
+                              return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
+                          jina_response.raise_for_status()
+                          
+                          # Validiamo il Markdown finale prima di accettarlo
+                          is_valid, reason = validate_content(jina_response.text, url, is_html=False)
+                          if not is_valid:
+                              return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito anche su Direct Fallback: {reason}"
+                              
+                          with open(filepath, 'w', encoding='utf-8') as f:
+                              f.write(jina_response.text)
+                          return f"[✅ JINA DIRECT {index}/{total_urls}] {url} -> Salvato via Jina (Direct Fallback)!"
+                      except Exception as e:
+                          return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito anche su Direct Fallback: {e}"
 
                   # ==========================================
                   # 🚀 STEP A: TENTATIVO ULTRA STEALTH CON curl-cffi
@@ -257,9 +277,8 @@ jobs:
                       
                       if proxies:
                           proxy_queue.put(proxy_addr)
-                      
-                      prefix = "STEALTH DIRECT" if attempt == max_attempts else "STEALTH"
-                      return f"[✅ {prefix} {index}/{total_urls}] {url} -> Scaricato direttamente tramite curl-cffi!"
+                          
+                      return f"[✅ STEALTH {index}/{total_urls}] {url} -> Scaricato direttamente tramite curl-cffi!"
 
                   # ==========================================
                   # 🔄 STEP B: FALLBACK IMMEDIATO A JINA AI
@@ -286,17 +305,11 @@ jobs:
                               
                           if proxies:
                               proxy_queue.put(proxy_addr)
-                          
-                          prefix = "JINA DIRECT" if attempt == max_attempts else "JINA"
-                          return f"[✅ {prefix} {index}/{total_urls}] {url} -> Salvato tramite Jina AI!"
+                              
+                          return f"[✅ JINA {index}/{total_urls}] {url} -> Salvato tramite Jina AI (Fallback)!"
                           
                       except Exception as jina_err:
-                          if proxies:
-                              failed_proxies.add(proxy_addr)
-                          
-                          if attempt == max_attempts:
-                              return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito. Ultimo errore Jina: {jina_err}"
-                          
+                          failed_proxies.add(proxy_addr)
                           time.sleep(0.5)
 
           # Avviamo TUTTE le richieste contemporaneamente (37 thread)
