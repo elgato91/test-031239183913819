@@ -8,6 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
+      # STEP ESSENZIALE per scaricare i file della repository sulla macchina virtuale
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Installazione Font di Sistema
         run: |
           sudo apt-get update
@@ -20,25 +24,20 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
-
       - name: Installazione Dipendenze Scraper
         run: |
           pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
           playwright install-deps chromium
-
       - name: Avvio Xvfb (Virtual Display Headful)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
-
       - name: Pre-inizializzazione Cache CloakBrowser
         run: |
           python -m cloakbrowser install
-
       - name: Setup Container WARP (IPv6)
         run: |
           docker pull ghcr.io/kingcc/warproxy:latest
-
           for i in {1..6}; do
             PORT=$((40000 + i))
             echo "Avvio container warproxy-$i sulla porta $PORT..."
@@ -53,16 +52,42 @@ jobs:
           
           echo "Attesa stabilizzazione tunnel WARP..."
           sleep 6
-
       - name: Inizializzazione Code DISTRIBUITE - STEP 1
         run: |
           cat << 'EOF' > m2_step1_setup.py
           import json
-          TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio"
-          ]
+          import os
+          TARGETS = []
+          # 1. Tentativo di caricamento da file urls.json
+          if os.path.exists("urls.json"):
+              try:
+                  with open("urls.json", "r", encoding="utf-8") as f:
+                      data = json.load(f)
+                      if isinstance(data, dict):
+                          # Supporta sia la chiave specifica della tua struttura che una generica
+                          TARGETS = data.get("urls_per_scraper") or data.get("urls") or []
+                      elif isinstance(data, list):
+                          TARGETS = data
+                  print(f"Caricati {len(TARGETS)} URL da urls.json")
+              except Exception as e:
+                  print(f"Errore nella lettura di urls.json: {e}")
+          # 2. Tentativo di caricamento da urls.txt se non è stato caricato nulla
+          if not TARGETS and os.path.exists("urls.txt"):
+              try:
+                  with open("urls.txt", "r", encoding="utf-8") as f:
+                      TARGETS = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+                  print(f"Caricati {len(TARGETS)} URL da urls.txt")
+              except Exception as e:
+                  print(f"Errore nella lettura di urls.txt: {e}")
+          # 3. Fallback di emergenza se nessun file è presente
+          if not TARGETS:
+              print("Nessun file configurato trovato. Utilizzo della lista predefinita.")
+              TARGETS = [
+                  "https://tls.browserleaks.com/json",
+                  "https://bot.sannysoft.com/",
+                  "https://abrahamjuliot.github.io/creepjs/",
+                  "https://www.comune.orvieto.tr.it/it/topics/parcheggi"
+              ]
           
           # Suddivisione matematica statica (Chunking) per performance ottimali
           for i in range(1, 7):
@@ -72,7 +97,6 @@ jobs:
           print("Code distribuite Step 1 generate con successo.")
           EOF
           python -u m2_step1_setup.py
-
       - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
         run: |
           cat << 'EOF' > m2_step1.py
@@ -83,13 +107,10 @@ jobs:
           import json
           from bs4 import BeautifulSoup
           from curl_cffi import requests
-
           DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
-
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           ACTIVE_PORT = 40000 + node_id
-
           def verify_proxy_active(port, max_retries=5, delay=5):
               test_session = requests.Session(impersonate="chrome120")
               test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
@@ -100,7 +121,6 @@ jobs:
                   except: pass
                   time.sleep(delay)
               return False
-
           def validate_html(html, url, status_code):
               if status_code >= 400: return False, f"Blocco HTTP {status_code}"
               if not html or len(html.strip()) < 300: return False, "HTML vuoto"
@@ -122,15 +142,12 @@ jobs:
               for ind in blocking_indicators:
                   if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
               return True, ""
-
           if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
-
           queue_file = f"/tmp/step1_queue_{node_id}.json"
           if not os.path.exists(queue_file): sys.exit(0)
           
           with open(queue_file, "r") as f:
               targets = json.load(f)
-
           results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
           failed_targets = []
           
@@ -140,7 +157,6 @@ jobs:
               "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
           })
-
           for url in targets:
               print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
               try:
@@ -162,11 +178,9 @@ jobs:
                   failed_targets.append(url)
               
               time.sleep(random.uniform(1.0, 2.0))
-
           with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
           with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
           EOF
-
       - name: Esecuzione Scraping Parallelo - STEP 1
         run: |
           echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
@@ -180,22 +194,18 @@ jobs:
             PIDS+=($!)
             sleep 1.5
           done
-
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
-
       - name: Refresh IP Container per lo STEP 2
         run: |
           echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
           docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
           sleep 6
-
       - name: Inizializzazione Code DISTRIBUITE - STEP 2
         run: |
           cat << 'EOF' > m2_step2_setup.py
           import json
           import os
-
           merged_failed = []
           for i in range(1, 7):
               filename = f"failed_node_{i}.json"
@@ -214,7 +224,6 @@ jobs:
           print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
           EOF
           python -u m2_step2_setup.py
-
       - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
         run: |
           cat << 'EOF' > m2_step2.py
@@ -227,11 +236,9 @@ jobs:
           from urllib.parse import urlparse, parse_qs
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
-
           if len(sys.argv) < 2: sys.exit(1)
           node_id = int(sys.argv[1])
           INITIAL_PORT = 40000 + node_id
-
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
                   parsed = urlparse(url)
@@ -240,7 +247,6 @@ jobs:
                       if param in queries: return queries[param][0]
               except: pass
               return default
-
           async def main():
               queue_file = f"/tmp/step2_queue_{node_id}.json"
               if not os.path.exists(queue_file): return
@@ -249,22 +255,18 @@ jobs:
               if not targets:
                   with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
                   return
-
               home_dir = os.path.expanduser("~")
               profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
               windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
               
-              # Profilo con noise attivo di default e path per font corretti
               base_args = [
                   "--no-sandbox",
                   "--disable-dev-shm-usage",
                   f"--fingerprint={random.randint(100000, 999999)}",
                   f"--fingerprint-fonts-dir={windows_fonts_dir}"
               ]
-
               print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
               try:
-                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
                   context = await launch_persistent_context_async(
                       profile_dir,
                       headless=False,
@@ -277,24 +279,19 @@ jobs:
                   )
                   page = await context.new_page()
                   
-                  # WARMUP Integrato - Creazione di cronologia valida
                   await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
                   await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
                   await asyncio.sleep(2)
-
               except Exception as e:
                   print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
                   return
-
               results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
-
               for url in targets:
                   print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
                   try:
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
                       if "bing.com" in url:
                           await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                           await asyncio.sleep(random.uniform(2.5, 4.0))
@@ -325,26 +322,21 @@ jobs:
                       else:
                           await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                       
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
                       try: await page.wait_for_load_state("networkidle", timeout=12000)
                       except: pass
                           
                       await asyncio.sleep(6) 
                       
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(1)
                       await page.keyboard.press("PageDown")
                       await asyncio.sleep(2)
                       
-                      # Scarica l'HTML in memoria una singola volta
                       raw_html = await page.content()
                       soup = BeautifulSoup(raw_html, 'html.parser')
                       text = soup.get_text(separator=' ', strip=True)[:5000]
                       text_lower = text.lower()
                       
-                      # Rilevamento passivo WAF/Captcha
                       blocking_indicators = [
                           "just a moment", "are you a robot", "prove your humanity",
                           "captcha verification", "please enter in the characters you see below",
@@ -359,23 +351,18 @@ jobs:
                       else:
                           results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
                           print(f"[NODO {node_id}] -> Fallito.", flush=True)
-
                   except Exception as e:
                       print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
                       results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
                   
                   await asyncio.sleep(random.uniform(4.0, 7.0))
-
               try: await context.close()
               except: pass
-
               with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
                   f.write(results)
-
           if __name__ == "__main__":
               asyncio.run(main())
           EOF
-
       - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
         run: |
           echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
@@ -389,7 +376,6 @@ jobs:
             PIDS+=($!)
             sleep 1.5
           done
-
           wait "${PIDS[@]}"
           kill $TAIL_PID || true
           
@@ -397,21 +383,18 @@ jobs:
             docker stop warproxy-$i || true
             docker rm warproxy-$i || true
           done
-
           touch output_node_1_step1.txt output_node_1_step2.txt \
                 output_node_2_step1.txt output_node_2_step2.txt \
                 output_node_3_step1.txt output_node_3_step2.txt \
                 output_node_4_step1.txt output_node_4_step2.txt \
                 output_node_5_step1.txt output_node_5_step2.txt \
                 output_node_6_step1.txt output_node_6_step2.txt
-
           cat output_node_1_step1.txt output_node_1_step2.txt \
               output_node_2_step1.txt output_node_2_step2.txt \
               output_node_3_step1.txt output_node_3_step2.txt \
               output_node_4_step1.txt output_node_4_step2.txt \
               output_node_5_step1.txt output_node_5_step2.txt \
               output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
-
       - name: Upload Artifact Macchina 2
         uses: actions/upload-artifact@v4
         with:
