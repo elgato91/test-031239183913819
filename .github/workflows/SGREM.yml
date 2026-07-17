@@ -1,4 +1,4 @@
-name: Extract Markdown with Jina AI (via Tor)
+name: Extract Markdown with Jina AI (WARP + Parallel)
 
 on:
   workflow_dispatch:
@@ -14,35 +14,44 @@ jobs:
       - name: Checkout del repository
         uses: actions/checkout@v4
 
-      # 1. Installa e avvia il servizio Tor sulla macchina GitHub
-      - name: Installa e avvia Tor
+      - name: Installa e avvia Cloudflare WARP
         run: |
+          # Aggiunge la repository ufficiale di Cloudflare e installa il client WARP
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update
-          sudo apt-get install -y tor
-          sudo systemctl start tor
-          echo "Attendendo 15 secondi per la creazione del circuito Tor..."
-          sleep 15
+          sudo apt-get install -y cloudflare-warp
+
+          # Configura WARP in modalità "proxy locale" sulla porta 40000 
+          # (Questo serve a mascherare le richieste di Python senza far disconnettere la macchina da GitHub)
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos mode proxy
+          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos connect
+          
+          echo "Attendendo l'inizializzazione del tunnel WARP..."
+          sleep 10
+          warp-cli --accept-tos status
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 2. Installiamo requests e PySocks per supportare i proxy SOCKS5 di Tor
       - name: Installa dipendenze Python
         run: |
           python -m pip install --upgrade pip
           pip install requests pysocks
 
-      - name: Estrai Markdown con Jina AI
+      - name: Estrai Markdown in parallelo
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
           import os
           import re
-          import time
           import requests
+          import concurrent.futures
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -86,51 +95,57 @@ jobs:
 
           os.makedirs('output', exist_ok=True)
           
-          # Indirizziamo tutto il traffico sul demone Tor locale (porta standard 9050)
-          # NOTA: Usiamo "socks5h" per far risolvere anche i DNS (nomi a dominio) direttamente a Tor
+          # Indirizziamo tutto il traffico sul demone WARP che abbiamo appena avviato
           proxies = {
-              'http': 'socks5h://127.0.0.1:9050',
-              'https': 'socks5h://127.0.0.1:9050'
+              'http': 'socks5h://127.0.0.1:40000',
+              'https': 'socks5h://127.0.0.1:40000'
           }
           headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
           print("==========================================", flush=True)
-          print("Verifica dell'IP di connessione tramite Tor...", flush=True)
+          print("Verifica dell'IP di connessione tramite WARP...", flush=True)
           try:
               ip_info = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=15).json()
               print(f"✅ CONNESSO! Il tuo IP mascherato attuale è: {ip_info['ip']}", flush=True)
           except Exception as e:
-              print(f"⚠️ Errore di connessione a Tor: {e}", flush=True)
-              print("Proseguo comunque senza IP tracking...", flush=True)
+              print(f"⚠️ Errore di connessione a WARP: {e}", flush=True)
+              print("Proseguo comunque...", flush=True)
           print("==========================================\n", flush=True)
 
           total_urls = len(URLS_TO_TEST)
 
-          for index, url in enumerate(URLS_TO_TEST, start=1):
+          # Questa è la singola operazione che verrà lanciata in parallelo
+          def fetch_url(item):
+              index, url = item
               clean_name = re.sub(r'^https?://', '', url)
               safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
               filepath = os.path.join('output', f"{safe_filename}.md")
-              
               jina_url = f"https://r.jina.ai/{url}"
               
-              print(f"[{index}/{total_urls}] Richiesta in corso per: {url}", flush=True)
+              print(f"[⌛ Avvio {index}/{total_urls}] {url}", flush=True)
               
               try:
-                  # Impostiamo un timeout di 60 secondi perché la rete Tor può essere lenta
                   response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=60)
-                  
-                  # Solleva un'eccezione se il sito risponde con un errore (es. 403, 500)
                   response.raise_for_status()
                   
                   with open(filepath, 'w', encoding='utf-8') as f:
                       f.write(response.text)
-                  print(f"  ---> FATTO! Salvato in: {filepath}\n", flush=True)
+                  return f"[✅ FATTO {index}/{total_urls}] Salvato: {filepath}"
                   
               except requests.exceptions.RequestException as e:
-                  print(f"  ---> ERRORE: Fallito. Dettagli: {e}\n", flush=True)
+                  return f"[❌ ERRORE {index}/{total_urls}] Fallito su {url} | Motivo: {e}"
+
+          # Eseguiamo il pool parallelo: processiamo 5 link alla volta
+          with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+              # Creiamo una lista di tuple (indice, url)
+              items = list(enumerate(URLS_TO_TEST, start=1))
               
-              # Pausa di sicurezza per Jina
-              time.sleep(2)
+              # Inviamo tutti i task in coda. 'as_completed' ci stampa il risultato appena uno dei processi ha finito
+              future_to_url = {executor.submit(fetch_url, item): item for item in items}
+              for future in concurrent.futures.as_completed(future_to_url):
+                  result = future.result()
+                  print(result + "\n", flush=True)
+
           EOF
 
       - name: Esegui commit e push dei risultati
@@ -138,4 +153,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
-          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI & Tor" && git push)
+          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI (WARP + Parallel)" && git push)
