@@ -1,4 +1,4 @@
-name: Extract Markdown (Asynchronous Producer-Consumer + ZIP)
+name: Extract Markdown (Robust Validation + ZIP)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pysocks curl-cffi markdownify
 
-      - name: Scannerizza e Estrai in Pipeline Asincrona
+      - name: Pipeline Asincrona con Validazione Antibot
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -87,7 +87,61 @@ jobs:
           working_lock = threading.Lock()
           max_working = 50
 
-          # Funzione worker del produttore (Scanner)
+          # FUNZIONE DI VALIDAZIONE ROBUSTA CONTRO I FALSI POSITIVI
+          def validate_content(text, url, is_html=True):
+              if any(site in url for site in ["example.com", "api.ipify.org"]):
+                  return True, ""
+                  
+              if not text or len(text.strip()) < 300:
+                  return False, "Contenuto vuoto o eccessivamente corto (< 300 caratteri)"
+                  
+              low_text = text.lower()
+              
+              if is_html:
+                  # Controllo dei titoli WAF/Anti-bot (solo per sorgente HTML)
+                  title_match = re.search(r"<title[^>]*>(.*?)</title>", low_text, re.DOTALL)
+                  title_text = title_match.group(1).strip() if title_match else ""
+                  waf_titles = ["just a moment", "attention required", "access denied", 
+                                "checking your browser", "robot challenge screen", 
+                                "403 forbidden", "forbidden", "access forbidden"]
+                  for wt in waf_titles:
+                      if wt in title_text:
+                          return False, f"WAF rilevato nel titolo HTML: '{wt}'"
+                  
+                  # Indicatori di blocco dentro l'HTML
+                  blocking_indicators = [
+                      "challenge-platform", "access denied", "403 forbidden", "cloudflare",
+                      "just a moment", "security verification", "please enable js", "enable javascript",
+                      "are you a robot", "please wait for verification", "we've detected unusual activity",
+                      "if you are not redirected", "unusual traffic from your computer network",
+                      "checking your browser", "prove your humanity", "captcha verification",
+                      "please enter in the characters you see below", "access to this page is forbidden",
+                      "error 1020", "you have been blocked", "pardon our interruption",
+                      "se non vieni reindirizzato", "se hai problemi ad accedere",
+                      "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
+                      "checking the site connection security"
+                  ]
+              else:
+                  # Indicatori di blocco specifici per il Markdown generato da Jina
+                  blocking_indicators = [
+                      "just a moment", "are you a robot", "prove your humanity",
+                      "captcha verification", "please enter in the characters you see below",
+                      "access is forbidden", "access to this page is forbidden", "challenge-platform",
+                      "we've detected unusual activity", "robot challenge screen", 
+                      "checking the site connection security", "unusual traffic from your computer network",
+                      "403 forbidden", "forbidden", "target url returned error",
+                      "page maybe requiring captcha", "please make sure you are authorized",
+                      "performing security verification", "challenges.cloudflare.com",
+                      "verification successful. waiting for", "attention required!"
+                  ]
+
+              for ind in blocking_indicators:
+                  if ind in low_text:
+                      return False, f"WAF/Captcha/Blocco rilevato nel testo: '{ind}'"
+                      
+              return True, ""
+
+          # Worker del produttore (Scanner)
           def scan_worker(proxy_addr):
               global working_count
               if stop_scanner.is_set():
@@ -99,13 +153,11 @@ jobs:
               }
               try:
                   test_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                  # Test rapido di 3 secondi per validare il proxy
                   r = requests.get("https://r.jina.ai/https://example.com", headers=test_headers, proxies=proxies, timeout=3.0)
                   if r.status_code == 200 and "example" in r.text.lower():
                       with working_lock:
                           if working_count < max_working and not stop_scanner.is_set():
                               working_count += 1
-                              # Inviamo immediatamente il proxy alla coda per sbloccare i download
                               proxy_queue.put(proxy_addr)
                               print(f"  [+] Proxy valido inviato alla coda: {proxy_addr} ({working_count}/{max_working})", flush=True)
               except Exception:
@@ -123,14 +175,14 @@ jobs:
               print(f"⚠️ Errore recupero proxy: {e}", flush=True)
               raw_proxies = []
 
-          # AVVIO DELLO SCANNER IN BACKGROUND (Asincrono e non bloccante)
+          # AVVIO DELLO SCANNER IN BACKGROUND
           print("🚀 Avvio della scansione proxy in background...", flush=True)
           scanner_executor = concurrent.futures.ThreadPoolExecutor(max_workers=200)
           for p in raw_proxies[:1000]:
               scanner_executor.submit(scan_worker, p)
           print("==========================================\n", flush=True)
 
-          # FUNZIONE WORKER DEI CONSUMATORI (Download + Fallback)
+          # FUNZIONE WORKER DEI CONSUMATORI
           def fetch_url(item):
               index, url = item
               clean_name = re.sub(r'^https?://', '', url)
@@ -148,8 +200,6 @@ jobs:
                       proxy_addr = "Connessione Diretta (Last Resort)"
                   else:
                       try:
-                          # Attende in maniera bloccante che lo scanner inserisca un proxy nella coda.
-                          # Se entro 12 secondi non arriva nulla, procede in connessione diretta.
                           proxy_addr = proxy_queue.get(block=True, timeout=12)
                           proxies = {
                               'http': f'socks5h://{proxy_addr}',
@@ -159,7 +209,6 @@ jobs:
                           proxies = None
                           proxy_addr = "Direct IP (Timeout Coda)"
 
-                  # Scaglionamento minimo
                   time.sleep(random.uniform(0.2, 1.0))
                   print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
                   
@@ -173,8 +222,13 @@ jobs:
                           jina_response = requests.get(jina_url, headers=jina_headers, proxies=None, timeout=10)
                           if jina_response.status_code in [404, 422]:
                               return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
-                          
                           jina_response.raise_for_status()
+                          
+                          # Validiamo il Markdown finale prima di accettarlo
+                          is_valid, reason = validate_content(jina_response.text, url, is_html=False)
+                          if not is_valid:
+                              return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito anche su Direct Fallback: {reason}"
+                              
                           with open(filepath, 'w', encoding='utf-8') as f:
                               f.write(jina_response.text)
                           return f"[✅ JINA DIRECT {index}/{total_urls}] {url} -> Salvato via Jina (Direct Fallback)!"
@@ -207,22 +261,19 @@ jobs:
                           timeout=4
                       )
                       
-                      lowered_html = response.text.lower()
                       if response.status_code != 200:
                           raise Exception(f"HTTP status non ottimale: {response.status_code}")
-                          
-                      if "cloudflare" in lowered_html and ("captcha" in lowered_html or "just a moment" in lowered_html or "enable javascript" in lowered_html):
-                          raise Exception("Intercettata protezione avanzata di Cloudflare")
-                          
-                      if len(response.text.strip()) < 300:
-                          raise Exception("HTML ricevuto troppo vuoto o non conforme")
+                      
+                      # Validazione rigorosa del codice HTML scaricato
+                      is_valid, reason = validate_content(response.text, url, is_html=True)
+                      if not is_valid:
+                          raise Exception(f"Validazione HTML fallita: {reason}")
 
                       markdown_content = md(response.text, heading_style="ATX")
                       
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(markdown_content)
                       
-                      # Successo! Reinseriamo il proxy sano nella coda per permettere ad altri thread di usarlo [1]
                       if proxies:
                           proxy_queue.put(proxy_addr)
                           
@@ -241,23 +292,22 @@ jobs:
                           
                           if jina_response.status_code in [404, 422]:
                               return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
-                          
                           jina_response.raise_for_status()
                           
-                          if "cloudflare" in jina_response.text.lower() and "captcha" in jina_response.text.lower():
-                              raise Exception("Captcha Cloudflare rilevato anche sul fallback Jina")
+                          # Validazione rigorosa del Markdown di Jina prima del salvataggio
+                          is_valid, reason = validate_content(jina_response.text, url, is_html=False)
+                          if not is_valid:
+                              raise Exception(f"Validazione Markdown Jina fallita: {reason}")
 
                           with open(filepath, 'w', encoding='utf-8') as f:
                               f.write(jina_response.text)
                               
-                          # Successo! Rimettiamo il proxy funzionante in coda per gli altri [1]
                           if proxies:
                               proxy_queue.put(proxy_addr)
                               
                           return f"[✅ JINA {index}/{total_urls}] {url} -> Salvato tramite Jina AI (Fallback)!"
                           
                       except Exception as jina_err:
-                          # Se fallisce, NON rimettiamo il proxy in coda (lo scartiamo)
                           failed_proxies.add(proxy_addr)
                           time.sleep(0.5)
 
