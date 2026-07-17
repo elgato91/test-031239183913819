@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Installazione Dipendenze Scraper Veloce
+      - name: Installazione Dipendenze
         run: |
           pip install beautifulsoup4 curl-cffi
 
@@ -27,32 +27,21 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
             sleep 0.3
           done
+          
+          echo "Attesa stabilizzazione tunnel WARP..."
+          sleep 12
 
-      - name: Attesa stabilizzazione tunnel WARP
-        run: |
-          echo "Verifica e attesa apertura delle 20 porte SOCKS5..."
-          for i in {1..20}; do
-            PORT=$((40000 + i))
-            echo -n "Attesa porta $PORT... "
-            for attempt in {1..30}; do
-              if nc -z 127.0.0.1 $PORT; then
-                echo "ONLINE!"
-                break
-              fi
-              sleep 1
-            done
-          done
-
-      - name: Creazione Cartella Temporanea Risultati
+      - name: Creazione Cartella Risultati
         run: mkdir -p jina_results
 
-      - name: Creazione Scraper Jina Monotentativo (Chrome 120 + 20 Nodi)
+      - name: Creazione Scraper Jina (Monotentativo, 20 Nodi)
         run: |
           cat << 'EOF' > jina_scraper.py
-          import json
-          import sys
-          import hashlib
           import os
+          import sys
+          import random
+          import hashlib
+          import threading
           from pathlib import Path
           from urllib.parse import urlparse
           from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,7 +51,16 @@ jobs:
               sys.stderr.write(message + "\n")
               sys.stderr.flush()
 
-          PORTS = [40000 + i for i in range(1, 21)]
+          class ProxyPool:
+              def __init__(self, ports):
+                  self.ports = ports
+                  self.lock = threading.Lock()
+
+              def get_proxy(self):
+                  with self.lock:
+                      return random.choice(self.ports)
+
+          PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -104,16 +102,15 @@ jobs:
               "https://wikiloc.com/hiking-trails/gita-fuori-porta-due-viandanti-ad-orvieto-con-annesso-lanello-della-rupe-166636709"
           ]
 
-          def process_url(url: str, task_index: int, total_tasks: int) -> bool:
-              # Associazione deterministica 1:1 della porta host in base all'indice del task
-              port = PORTS[(task_index - 1) % len(PORTS)]
-              
+          def process_single_url(url: str, task_index: int, total_tasks: int) -> bool:
+              port = PROXY_POOL.get_proxy()
               proxies = {
                   "http": f"socks5h://127.0.0.1:{port}",
                   "https": f"socks5h://127.0.0.1:{port}"
               }
               
               jina_endpoint = f"https://r.jina.ai/{url}"
+              
               headers = {
                   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -125,36 +122,38 @@ jobs:
 
               try:
                   sess = requests.Session(impersonate="chrome120", proxies=proxies)
-                  response = sess.get(jina_endpoint, headers=headers, timeout=20.0)
+                  # Unico tentativo, nessuna ripetizione
+                  response = sess.get(jina_endpoint, headers=headers, timeout=25.0)
                   
                   if response.status_code == 200 and response.text:
                       parsed = urlparse(url)
                       domain = parsed.netloc.replace("www.", "")
                       url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
                       output_file = Path("jina_results") / f"task_{task_index:03d}_{domain}_{url_hash}.txt"
+                      
                       with open(output_file, "w", encoding="utf-8") as f:
                           f.write(f"--- SOURCE URL: {url} ---\n\n")
                           f.write(response.text)
+                          
                       log(f"[{task_index:03d}/{total_tasks}] [OK] JINA (Porta {port}) -> {domain}")
                       return True
                   else:
                       log(f"[{task_index:03d}/{total_tasks}] [FAIL] JINA (Porta {port}) -> HTTP {response.status_code} per '{url}'")
               except Exception as e:
-                  log(f"[{task_index:03d}/{total_tasks}] [FAIL] JINA (Porta {port}) -> Errore: {e} per '{url}'")
+                  # Catturo in un'unica linea l'errore per averlo a log
+                  log(f"[{task_index:03d}/{total_tasks}] [FAIL] JINA (Porta {port}) -> Errore: {type(e).__name__} per '{url}'")
+              
               return False
 
           def main():
               total = len(URLS_TO_TEST)
-              log(f"Avvio estrazione di {total} URL su Jina (Monotentativo, max 20 thread)...")
-              Path("jina_results").mkdir(exist_ok=True)
+              log(f"Avvio estrazione di {total} URL su Jina (Monotentativo, 20 thread)...")
               
               with ThreadPoolExecutor(max_workers=20) as executor:
-                  futures = {
-                      executor.submit(process_url, url, idx + 1, total): url
-                      for idx, url in enumerate(URLS_TO_TEST)
-                  }
+                  futures = [executor.submit(process_single_url, url, idx + 1, total) for idx, url in enumerate(URLS_TO_TEST)]
                   for future in as_completed(futures):
                       pass
+                      
               log("Processo di scraping terminato.")
 
           if __name__ == "__main__":
