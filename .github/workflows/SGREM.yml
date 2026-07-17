@@ -148,7 +148,7 @@ jobs:
               return True, ""
 
           def scan_worker(proxy_addr):
-              global working_count
+              global working_count, working_proxies
               if stop_scanner.is_set():
                   return
               
@@ -164,10 +164,11 @@ jobs:
                   if r.status_code == 200 and "example" in r.text.lower():
                       with working_lock:
                           if len(working_proxies) < max_working and not stop_scanner.is_set():
-                              working_count += 1
+                              working_proxies.append((proxy_addr, latency))
+                              working_count = len(working_proxies)
                               proxy_queue.put(proxy_addr)
-                              print(f"  [+] Proxy valido: {proxy_addr} | Latenza: {latency:.2f}s ({len(working_proxies)}/{max_working})", flush=True)
-                              if len(working_proxies) >= max_working:
+                              print(f"  [+] Proxy valido: {proxy_addr} | Latenza: {latency:.2f}s ({working_count}/{max_working})", flush=True)
+                              if working_count >= max_working:
                                   stop_scanner.set()
               except Exception:
                   pass
