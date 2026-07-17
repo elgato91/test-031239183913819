@@ -252,7 +252,7 @@ jobs:
               print(f"  [🦊 Worker CF {worker_id}] Avvio worker asincrono...", flush=True)
               
               browser = None
-              while not q_jobs.empty() and not stop_scanner.is_set():
+              while not q_jobs.empty():
                   try:
                       # Preleva il prossimo proxy veloce disponibile per questo worker
                       proxy_addr = q_proxies.get(block=False)
@@ -366,10 +366,11 @@ jobs:
                       failed_queue.put(item)
                       
                   # Popoliamo la coda asincrona dei proxy veloci per i lavoratori Camoufox
-                  for p in camoufox_proxies:
+                  # Utilizziamo l'intera lista di general_proxies come backup in caso di fallimento
+                  for p in general_proxies:
                       cf_proxy_queue.put(p)
                       
-                  num_workers = min(20, len(camoufox_proxies), len(failed_urls))
+                  num_workers = min(20, len(general_proxies), len(failed_urls))
                   cf_threads = []
                   for w_id in range(1, num_workers + 1):
                       t = threading.Thread(target=camoufox_persistent_worker, args=(w_id, failed_queue, cf_proxy_queue))
