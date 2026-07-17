@@ -1,4 +1,4 @@
-name: Extract Markdown with Jina AI (WARP + Parallel)
+name: Extract Markdown (Hide from Jina via Proxy Rotation)
 
 on:
   workflow_dispatch:
@@ -14,25 +14,6 @@ jobs:
       - name: Checkout del repository
         uses: actions/checkout@v4
 
-      - name: Installa e avvia Cloudflare WARP
-        run: |
-          # Aggiunge la repository ufficiale di Cloudflare e installa il client WARP
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          sudo apt-get install -y cloudflare-warp
-
-          # Configura WARP in modalità "proxy locale" sulla porta 40000 
-          # (Questo serve a mascherare le richieste di Python senza far disconnettere la macchina da GitHub)
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos mode proxy
-          warp-cli --accept-tos proxy port 40000
-          warp-cli --accept-tos connect
-          
-          echo "Attendendo l'inizializzazione del tunnel WARP..."
-          sleep 10
-          warp-cli --accept-tos status
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -43,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pysocks
 
-      - name: Estrai Markdown in parallelo
+      - name: Estrai Markdown mascherando l'IP a Jina AI
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -51,6 +32,8 @@ jobs:
           import os
           import re
           import requests
+          import random
+          import time
           import concurrent.futures
 
           URLS_TO_TEST = [
@@ -94,27 +77,20 @@ jobs:
           ]
 
           os.makedirs('output', exist_ok=True)
-          
-          # Indirizziamo tutto il traffico sul demone WARP che abbiamo appena avviato
-          proxies = {
-              'http': 'socks5h://127.0.0.1:40000',
-              'https': 'socks5h://127.0.0.1:40000'
-          }
-          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-
-          print("==========================================", flush=True)
-          print("Verifica dell'IP di connessione tramite WARP...", flush=True)
-          try:
-              ip_info = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=15).json()
-              print(f"✅ CONNESSO! Il tuo IP mascherato attuale è: {ip_info['ip']}", flush=True)
-          except Exception as e:
-              print(f"⚠️ Errore di connessione a WARP: {e}", flush=True)
-              print("Proseguo comunque...", flush=True)
-          print("==========================================\n", flush=True)
-
           total_urls = len(URLS_TO_TEST)
 
-          # Questa è la singola operazione che verrà lanciata in parallelo
+          print("==========================================", flush=True)
+          print("🔄 Scaricamento lista di Proxy SOCKS5 gratuiti...", flush=True)
+          try:
+              # Scarichiamo una lista fresca di proxy SOCKS5 da una nota repository di GitHub
+              proxy_req = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", timeout=10)
+              PROXY_LIST = [p.strip() for p in proxy_req.text.split('\n') if p.strip()]
+              print(f"✅ Trovati {len(PROXY_LIST)} proxy disponibili per nascondersi da Jina!", flush=True)
+          except Exception as e:
+              print(f"⚠️ Errore nel download dei proxy: {e}. Lista vuota.", flush=True)
+              PROXY_LIST = []
+          print("==========================================\n", flush=True)
+
           def fetch_url(item):
               index, url = item
               clean_name = re.sub(r'^https?://', '', url)
@@ -122,29 +98,55 @@ jobs:
               filepath = os.path.join('output', f"{safe_filename}.md")
               jina_url = f"https://r.jina.ai/{url}"
               
-              print(f"[⌛ Avvio {index}/{total_urls}] {url}", flush=True)
+              max_retries = 5
               
-              try:
-                  response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=60)
-                  response.raise_for_status()
+              for attempt in range(1, max_retries + 1):
+                  # Pesca un proxy casuale dalla lista
+                  proxy_addr = random.choice(PROXY_LIST) if PROXY_LIST else None
                   
-                  with open(filepath, 'w', encoding='utf-8') as f:
-                      f.write(response.text)
-                  return f"[✅ FATTO {index}/{total_urls}] Salvato: {filepath}"
-                  
-              except requests.exceptions.RequestException as e:
-                  return f"[❌ ERRORE {index}/{total_urls}] Fallito su {url} | Motivo: {e}"
+                  if proxy_addr:
+                      # Usa socks5h in modo da risolvere i DNS (nomi a dominio) direttamente dal server Proxy
+                      proxies = {
+                          'http': f'socks5h://{proxy_addr}',
+                          'https': f'socks5h://{proxy_addr}'
+                      }
+                  else:
+                      proxies = None
 
-          # Eseguiamo il pool parallelo: processiamo 5 link alla volta
+                  # Cambiamo lo User-Agent a caso per sembrare browser diversi
+                  headers = {
+                      'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36'
+                  }
+                  
+                  print(f"[⌛ Avvio {index}/{total_urls}] (Tentativo {attempt}/{max_retries} via Proxy: {proxy_addr}) -> {url}", flush=True)
+                  
+                  try:
+                      # Usiamo un timeout basso (15 secondi). Se il proxy gratuito è morto/lento, fallisce in fretta e riprova
+                      response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=15)
+                      
+                      # Se Jina ci da un 403 o 429, solleva l'eccezione in modo da forzare il tentativo con un nuovo proxy
+                      response.raise_for_status()
+                      
+                      with open(filepath, 'w', encoding='utf-8') as f:
+                          f.write(response.text)
+                          
+                      return f"[✅ FATTO {index}/{total_urls}] Jina ha accettato la connessione. Salvato: {filepath}"
+                      
+                  except Exception as e:
+                      # Errore (Proxy morto o IP bannato da Jina)
+                      if attempt == max_retries:
+                          return f"[❌ ERRORE {index}/{total_urls}] {url} Fallito definitivamente. Ultimo errore: {e}"
+                      
+                      # Pausa brevissima prima di ripescare un nuovo proxy
+                      time.sleep(1)
+
+          # Impostiamo 5 thread paralleli. Ognuno userà il proprio proxy ruotante.
           with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-              # Creiamo una lista di tuple (indice, url)
               items = list(enumerate(URLS_TO_TEST, start=1))
-              
-              # Inviamo tutti i task in coda. 'as_completed' ci stampa il risultato appena uno dei processi ha finito
               future_to_url = {executor.submit(fetch_url, item): item for item in items}
+              
               for future in concurrent.futures.as_completed(future_to_url):
-                  result = future.result()
-                  print(result + "\n", flush=True)
+                  print(future.result() + "\n", flush=True)
 
           EOF
 
@@ -153,4 +155,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
-          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI (WARP + Parallel)" && git push)
+          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown via Jina AI (Proxy Rotation)" && git push)
