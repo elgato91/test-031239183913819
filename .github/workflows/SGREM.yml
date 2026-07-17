@@ -27,9 +27,21 @@ jobs:
               -d ghcr.io/kingcc/warproxy:latest
             sleep 0.3
           done
-          
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 12
+
+      - name: Attesa stabilizzazione tunnel WARP
+        run: |
+          echo "Verifica e attesa apertura delle 20 porte SOCKS5..."
+          for i in {1..20}; do
+            PORT=$((40000 + i))
+            echo -n "Attesa porta $PORT... "
+            for attempt in {1..30}; do
+              if nc -z 127.0.0.1 $PORT; then
+                echo "ONLINE!"
+                break
+              fi
+              sleep 1
+            done
+          done
 
       - name: Creazione Cartella Temporanea Risultati
         run: mkdir -p jina_results
@@ -39,10 +51,7 @@ jobs:
           cat << 'EOF' > jina_scraper.py
           import json
           import sys
-          import time
-          import random
           import hashlib
-          import threading
           import os
           from pathlib import Path
           from urllib.parse import urlparse
@@ -53,16 +62,7 @@ jobs:
               sys.stderr.write(message + "\n")
               sys.stderr.flush()
 
-          class ProxyPool:
-              def __init__(self, ports):
-                  self.ports = ports
-                  self.lock = threading.Lock()
-
-              def get_proxy(self):
-                  with self.lock:
-                      return random.choice(self.ports)
-
-          PROXY_POOL = ProxyPool([40000 + i for i in range(1, 21)])
+          PORTS = [40000 + i for i in range(1, 21)]
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -104,17 +104,21 @@ jobs:
               "https://wikiloc.com/hiking-trails/gita-fuori-porta-due-viandanti-ad-orvieto-con-annesso-lanello-della-rupe-166636709"
           ]
 
-          def process_single_url(url: str, task_index: int, total_tasks: int) -> bool:
-              port = PROXY_POOL.get_proxy()
+          def process_url(url: str, task_index: int, total_tasks: int) -> bool:
+              # Associazione deterministica 1:1 della porta host in base all'indice del task
+              port = PORTS[(task_index - 1) % len(PORTS)]
+              
               proxies = {
                   "http": f"socks5h://127.0.0.1:{port}",
                   "https": f"socks5h://127.0.0.1:{port}"
               }
+              
               jina_endpoint = f"https://r.jina.ai/{url}"
               headers = {
                   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               }
+              
               token = os.environ.get("JINA_API_KEY", "").strip()
               if token:
                   headers["Authorization"] = f"Bearer {token}"
@@ -146,7 +150,7 @@ jobs:
               
               with ThreadPoolExecutor(max_workers=20) as executor:
                   futures = {
-                      executor.submit(process_single_url, url, idx + 1, total): url
+                      executor.submit(process_url, url, idx + 1, total): url
                       for idx, url in enumerate(URLS_TO_TEST)
                   }
                   for future in as_completed(futures):
