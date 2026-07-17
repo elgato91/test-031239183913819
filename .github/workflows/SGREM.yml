@@ -1,4 +1,4 @@
-name: Extract Markdown (Ultra Fast Pipeline + ZIP)
+name: Extract Markdown (Pipeline + Camoufox Bypass + ZIP)
 
 on:
   workflow_dispatch:
@@ -16,12 +16,13 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Installa dipendenze Python
+      - name: Installa dipendenze Python e Camoufox
         run: |
           python -m pip install --upgrade pip
-          pip install requests pysocks curl-cffi markdownify
+          pip install requests pysocks curl-cffi markdownify camoufox[geoip]
+          python -m camoufox fetch
 
-      - name: Pipeline Asincrona Protetta con Validazione Antibot
+      - name: Pipeline Asincrona Protetta con Validazione Antibot e Camoufox
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -36,6 +37,7 @@ jobs:
           from queue import Queue
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
+          from camoufox.sync_api import Camoufox
 
           URLS_TO_TEST = [
               "https://catholicindex.org/mx/churches/mx-oaxaca-oaxaca-de-juarez-templo-de-santo-domingo-de-guzman-05ffe56e",
@@ -86,6 +88,8 @@ jobs:
           working_count = 0
           working_lock = threading.Lock()
           max_working = 50
+          # Limita l'esecuzione di Camoufox a max 3 istanze simultanee per preservare la RAM del server
+          camoufox_semaphore = threading.Semaphore(3)
 
           # FUNZIONE DI VALIDAZIONE ROBUSTA CONTRO I FALSI POSITIVI
           def validate_content(text, url, is_html=True):
@@ -196,12 +200,19 @@ jobs:
               failed_proxies = set()
               
               for attempt in range(1, max_attempts + 1):
-                  # Se i primi 2 tentativi falliscono, usiamo la connessione pulita di GitHub Actions (senza proxy)
-                  # MA esclusivamente verso Jina AI (che fa da scudo per il nostro IP). 
-                  # Non faremo mai richieste curl-cffi dirette ai siti senza proxy.
+                  # Ultimo tentativo:
+                  # 1. Proviamo Camoufox con un Proxy (se disponibile) -> 100% coperti.
+                  # 2. Se fallisce, Jina Direct (IP GitHub esposto solo verso Jina, il sito finale vede Jina).
                   if attempt == max_attempts:
-                      proxies = None
-                      proxy_addr = "Jina Direct (Last Resort)"
+                      try:
+                          proxy_addr = proxy_queue.get(block=True, timeout=8)
+                          proxies = {
+                              'http': f'socks5h://{proxy_addr}',
+                              'https': f'socks5h://{proxy_addr}'
+                          }
+                      except Exception:
+                          proxies = None
+                          proxy_addr = "Nessuno (Saltato a Jina Direct)"
                   else:
                       try:
                           proxy_addr = proxy_queue.get(block=True, timeout=12)
@@ -210,23 +221,48 @@ jobs:
                               'https': f'socks5h://{proxy_addr}'
                           }
                       except Exception:
-                          # Se la coda va in timeout, saltiamo direttamente a Jina Direct
                           proxies = None
-                          proxy_addr = "Jina Direct (Timeout Coda)"
+                          proxy_addr = "Direct IP (Timeout Coda)"
 
                   time.sleep(random.uniform(0.2, 1.0))
-                  print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
                   
-                  # ==============================================================================
-                  # 🚀 CASO A: ULTIMO TENTATIVO (Jina Direct senza Proxy - Sicuro per l'IP del server)
-                  # ==============================================================================
-                  if proxies is None:
+                  # ==========================================
+                  # 🚀 STEP ULTIMA SPIAGGIA (TENTATIVO 3: CAMOUFOX PROXIED o JINA DIRECT)
+                  # ==========================================
+                  if attempt == max_attempts:
+                      # Se abbiamo un proxy valido, lanciamo la corazzata Camoufox in maniera protetta
+                      if proxies is not None:
+                          print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} (Anti-Detect Camoufox via {proxy_addr}) -> {url}", flush=True)
+                          try:
+                              proxy_config = {"server": f"socks5://{proxy_addr}"}
+                              with camoufox_semaphore:
+                                  with Camoufox(proxy=proxy_config, headless=True, geoip=True) as browser:
+                                      page = browser.new_page()
+                                      # Timeout generoso di 20s per permettere a Camoufox di caricare e risolvere JS
+                                      page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                      html_content = page.content()
+
+                              is_valid, reason = validate_content(html_content, url, is_html=True)
+                              if not is_valid:
+                                  raise Exception(f"Validazione Camoufox fallita: {reason}")
+
+                              markdown_content = md(html_content, heading_style="ATX")
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              
+                              proxy_queue.put(proxy_addr)
+                              return f"[✅ CAMOUFOX {index}/{total_urls}] {url} -> Salvato tramite browser Camoufox!"
+                          except Exception as cf_err:
+                              # Se Camoufox fallisce, scendiamo all'ultimissima spiaggia: Jina Direct
+                              pass
+
+                      # Ultimissima spiaggia: Chiamata Jina Direct (il tuo server non tocca mai il sito finale)
+                      print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} (Last Resort Jina Direct) -> {url}", flush=True)
                       try:
                           jina_headers = {
                               'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
                               'X-Return-Format': 'markdown'
                           }
-                          # La richiesta parte da GitHub verso Jina (IP Jina visiterà il sito, proteggendo il tuo server)
                           jina_response = requests.get(jina_url, headers=jina_headers, proxies=None, timeout=10)
                           if jina_response.status_code in [404, 422]:
                               return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
@@ -240,11 +276,15 @@ jobs:
                               f.write(jina_response.text)
                           return f"[✅ JINA DIRECT {index}/{total_urls}] {url} -> Salvato via Jina (Direct Fallback)!"
                       except Exception as e:
-                          return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito anche su Direct Fallback: {e}"
+                          return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito su Direct Fallback: {e}"
 
-                  # ==============================================================================
-                  # 🚀 STEP B: TENTATIVO ULTRA STEALTH CON curl-cffi (SOLO se abbiamo un proxy attivo)
-                  # ==============================================================================
+                  # ==========================================
+                  # 🚀 STEP STANDARD: TENTATIVO STEALTH CON curl-cffi (Tentativi 1 e 2)
+                  # ==========================================
+                  if proxies is None:
+                      continue
+
+                  print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
                   try:
                       impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
                       headers_cffi = {
@@ -285,9 +325,9 @@ jobs:
                           
                       return f"[✅ STEALTH {index}/{total_urls}] {url} -> Scaricato direttamente tramite curl-cffi!"
 
-                  # ==============================================================================
-                  # 🔄 STEP C: FALLBACK IMMEDIATO A JINA AI (Usando comunque il Proxy)
-                  # ==============================================================================
+                  # ==========================================
+                  # 🔄 FALLBACK IMMEDIATO A JINA AI (Tentativi 1 e 2)
+                  # ==========================================
                   except Exception as stealth_err:
                       try:
                           jina_headers = {
