@@ -1,10 +1,7 @@
-name: Extract Markdown (Fast Scanner + Rate-Limited Queue)
+name: Extract Markdown (Fast Queue + Downloadable ZIP)
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   extract-and-save:
@@ -80,11 +77,10 @@ jobs:
           os.makedirs('output', exist_ok=True)
           total_urls = len(URLS_TO_TEST)
 
-          # FASE 1: DOWNLOAD E FILTRAGGIO RAPIDO DEI PROXY funzionanti
+          # FASE 1: DOWNLOAD E FILTRAGGIO RAPIDO DEI PROXY
           print("==========================================", flush=True)
           print("🔄 Scaricamento liste proxy candidati...", flush=True)
           try:
-              # SOCKS5 è la scelta migliore per instradare traffico SSL in modo pulito
               proxy_req = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", timeout=10)
               raw_proxies = [p.strip() for p in proxy_req.text.split('\n') if p.strip()]
               random.shuffle(raw_proxies)
@@ -99,7 +95,6 @@ jobs:
           test_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
           def test_single_proxy(proxy_addr):
-              # Se abbiamo già raggiunto l'obiettivo, usciamo all'istante
               if len(working_proxies) >= max_working:
                   return
               
@@ -108,9 +103,7 @@ jobs:
                   'https': f'socks5h://{proxy_addr}'
               }
               try:
-                  # Timeout cortissimo (3 secondi): se è lento lo scartiamo subito
                   r = requests.get(test_url, headers=test_headers, proxies=proxies, timeout=3.0)
-                  # Verifichiamo che risponda correttamente e che non sia una pagina di errore di Cloudflare
                   if r.status_code == 200 and "example" in r.text.lower():
                       if len(working_proxies) < max_working:
                           working_proxies.append(proxy_addr)
@@ -118,11 +111,9 @@ jobs:
               except Exception:
                   pass
 
-          # Lanciamo lo scanner parallelo con 150 thread per trovare rapidamente i 20 IP validi
           print("🚀 Scansione parallela avviata (150 thread, max 3s di attesa per proxy)...", flush=True)
           start_scan = time.time()
           with concurrent.futures.ThreadPoolExecutor(max_workers=150) as executor:
-              # Prendiamo un campione di 500 proxy per non sovraccaricare la rete locale della macchina
               futures = {executor.submit(test_single_proxy, p): p for p in raw_proxies[:500]}
               for future in concurrent.futures.as_completed(futures):
                   if len(working_proxies) >= max_working:
@@ -134,10 +125,9 @@ jobs:
           print("==========================================\n", flush=True)
 
           if not working_proxies:
-              print("⚠️ Nessun proxy valido trovato. Procedo con la connessione diretta per evitare il blocco totale.", flush=True)
+              print("⚠️ Nessun proxy valido trovato. Procedo con la connessione diretta.", flush=True)
 
           # FASE 2: CODA DI ESECUZIONE CON LEASING E RATE-LIMIT (20 RPM per IP)
-          # Ogni proxy viene salvato come tupla: (indirizzo, timestamp_ultimo_utilizzo)
           proxy_queue = Queue()
           for p in working_proxies:
               proxy_queue.put((p, 0))
@@ -153,14 +143,12 @@ jobs:
               
               for attempt in range(1, max_attempts + 1):
                   if not working_proxies:
-                      # Fallback diretto se non ci sono proxy validi
                       proxies = None
                       proxy_addr = "Direct IP"
                   else:
-                      # Preleviamo un proxy e il suo tempo di ultimo utilizzo dalla coda
                       proxy_addr, last_used = proxy_queue.get()
                       
-                      # Enforce Cooldown (20 RPM = 1 richiesta ogni 3.0 secondi per singolo IP)
+                      # Cooldown (20 RPM = 1 richiesta ogni 3.0 secondi per singolo IP)
                       now = time.time()
                       elapsed = now - last_used
                       if elapsed < 3.0:
@@ -179,18 +167,23 @@ jobs:
                   print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
                   
                   try:
-                      # Timeout di 15 secondi per la chiamata reale su proxy già verificato
                       response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=15)
+                      
+                      # OTTIMIZZAZIONE: se l'errore è 422 o 404, è un problema di Jina col sito finale. Inutile riprovare.
+                      if response.status_code in [404, 422]:
+                          if working_proxies:
+                              proxy_queue.put((proxy_addr, time.time()))
+                              proxy_queue.task_done()
+                          return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {response.status_code}) -> {url}"
+                      
                       response.raise_for_status()
                       
-                      # Controllo anti-captcha silente
                       if "cloudflare" in response.text.lower() and "captcha" in response.text.lower():
                           raise Exception("Intercettato blocco Captcha di Cloudflare")
 
                       with open(filepath, 'w', encoding='utf-8') as f:
                           f.write(response.text)
                       
-                      # Operazione riuscita! Rimettiamo il proxy in coda aggiornando il timestamp di utilizzo
                       if working_proxies:
                           proxy_queue.put((proxy_addr, time.time()))
                           proxy_queue.task_done()
@@ -198,19 +191,15 @@ jobs:
                       return f"[✅ FATTO {index}/{total_urls}] {url} -> Salvato!"
                       
                   except Exception as e:
-                      # Se fallisce, reinseriamo il proxy applicando una piccola penalità di tempo (+3s)
-                      # così la coda preferirà altri proxy mentre questo si raffredda
                       if working_proxies:
                           proxy_queue.put((proxy_addr, time.time() + 3.0))
                           proxy_queue.task_done()
                           
                       if attempt == max_attempts:
-                          return f"[❌ ERRORE {index}/{total_urls}] {url} Fallito definitivamente dopo {max_attempts} tentativi. Errore: {e}"
+                          return f"[❌ ERRORE {index}/{total_urls}] {url} Fallito definitivamente. Errore: {e}"
                       
-                      # Breve pausa prima del prossimo tentativo (che pescherà un proxy diverso)
                       time.sleep(1)
 
-          # Avviamo i download in parallelo usando un numero di lavoratori pari ai proxy trovati (max 20)
           workers = len(working_proxies) if working_proxies else 3
           print(f"🚀 Avvio della coda di estrazione con {workers} lavoratori simultanei...", flush=True)
           
@@ -223,9 +212,10 @@ jobs:
 
           EOF
 
-      - name: Esegui commit e push dei risultati
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/
-          git diff --staged --quiet || (git commit -m "📝 Auto-extract markdown (Optimized Scanned Proxies)" && git push)
+      # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
+      - name: Carica i file estratti come Artefatto ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: jina-markdown-outputs
+          path: output/
+          retention-days: 7 # Lo ZIP rimarrà disponibile al download per 7 giorni
