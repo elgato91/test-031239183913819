@@ -1,4 +1,4 @@
-name: Extract Markdown (Stealth curl-cffi + Jina Fallback + ZIP)
+name: Extract Markdown (Ultra Fast Hybrid + ZIP)
 
 on:
   workflow_dispatch:
@@ -152,13 +152,19 @@ jobs:
                           'https': f'socks5h://{proxy_addr}'
                       }
 
-                  # Scaglionamento iniziale (0.5 - 2.5 secondi)
-                  time.sleep(random.uniform(0.5, 2.5))
+                  # OTTIMIZZAZIONE 1: Ridotto lo scaglio temporale a soli 0.2 - 1.0 secondi
+                  time.sleep(random.uniform(0.2, 1.0))
 
+                  headers = {
+                      'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
+                      'X-Return-Format': 'markdown'
+                  }
+                  
+                  print(f"[⌛ Avvio {index}/{total_urls}] Tentativo {attempt}/{max_attempts} via {proxy_addr} -> {url}", flush=True)
+                  
                   # ==========================================
                   # 🚀 STEP A: TENTATIVO ULTRA STEALTH CON curl-cffi
                   # ==========================================
-                  print(f"[⌛ Avvio {index}/{total_urls}] (Stealth Direct via {proxy_addr}) -> {url}", flush=True)
                   try:
                       impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
                       headers_cffi = {
@@ -174,27 +180,26 @@ jobs:
                           "Upgrade-Insecure-Requests": "1"
                       }
                       
-                      # Impersona l'handshake e le impronte crittografiche reali di un browser
+                      # OTTIMIZZAZIONE 2: Ridotto drasticamente il timeout stealth diretto a soli 4 secondi.
+                      # Se il proxy è troppo lento a fare l'handshake col sito, passiamo subito a Jina.
                       response = requests_cffi.get(
                           url,
                           headers=headers_cffi,
                           proxies=proxies,
                           impersonate=impersonate_target,
-                          timeout=10
+                          timeout=4
                       )
                       
                       lowered_html = response.text.lower()
                       if response.status_code != 200:
                           raise Exception(f"HTTP status non ottimale: {response.status_code}")
                           
-                      # Se c'è una schermata di blocco di Cloudflare con Captcha, passiamo a Jina
                       if "cloudflare" in lowered_html and ("captcha" in lowered_html or "just a moment" in lowered_html or "enable javascript" in lowered_html):
                           raise Exception("Intercettata protezione avanzata di Cloudflare")
                           
                       if len(response.text.strip()) < 300:
                           raise Exception("HTML ricevuto troppo vuoto o non conforme")
 
-                      # Conversione locale a Markdown con stile ATX (# per titoli)
                       markdown_content = md(response.text, heading_style="ATX")
                       
                       with open(filepath, 'w', encoding='utf-8') as f:
@@ -209,12 +214,8 @@ jobs:
                       print(f"[🔄 FALLBACK {index}/{total_urls}] Stealth fallito ({stealth_err}). Passaggio a Jina AI...", flush=True)
                       
                       try:
-                          jina_headers = {
-                              'User-Agent': f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/{random.randint(110, 122)}.0.0.0 Safari/537.36',
-                              'X-Return-Format': 'markdown'
-                          }
-                          # Riproviamo la chiamata di Jina usando lo stesso proxy
-                          jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=10)
+                          # OTTIMIZZAZIONE 3: Ridotto timeout di Jina a 8 secondi per evitare stalli su proxy morti
+                          jina_response = requests.get(jina_url, headers=headers, proxies=proxies, timeout=8)
                           
                           if jina_response.status_code in [404, 422]:
                               return f"[❌ ERRORE {index}/{total_urls}] Jina non supporta questo URL (Status {jina_response.status_code}) -> {url}"
@@ -230,11 +231,9 @@ jobs:
                           return f"[✅ JINA {index}/{total_urls}] {url} -> Salvato tramite Jina AI (Fallback)!"
                           
                       except Exception as jina_err:
-                          # Se falliscono sia il tentativo diretto che il fallback, contrassegniamo il proxy come difettoso
                           failed_proxies.add(proxy_addr)
-                          
                           if attempt == max_attempts:
-                              return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} fallito. Ultimo errore Jina: {jina_err}"
+                              return f"[❌ ERRORE DEFINITIVO {index}/{total_urls}] {url} Fallito definitivamente. Errore: {jina_err}"
                           
                           time.sleep(1)
 
