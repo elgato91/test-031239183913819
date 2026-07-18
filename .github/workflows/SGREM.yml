@@ -29,7 +29,7 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
-      - name: Installa dipendenze sistema, Python, Camoufox e Utility WARP
+      - name: Installa dipendenze sistema, Python, CloakBrowser e Utility WARP
         run: |
           # Aggiorna pacchetti di sistema
           sudo apt-get update
@@ -44,10 +44,16 @@ jobs:
           sudo mv wireproxy /usr/local/bin/wireproxy
           sudo chmod +x /usr/local/bin/wireproxy
           
-          # Installa le dipendenze Python e Camoufox, bloccando Playwright alla versione 1.60.0 stabile
+          # Installa le dipendenze Python e CloakBrowser
           python -m pip install --upgrade pip
-          pip install requests pysocks curl-cffi markdownify "playwright==1.60.0" "cloverlabs-camoufox[geoip]"
-          python -m camoufox fetch
+          pip install requests pysocks curl-cffi markdownify beautifulsoup4 playwright "cloakbrowser[geoip]"
+          python -m playwright install-deps chromium
+          python -m cloakbrowser install
+
+      - name: Avvio Xvfb (Virtual Display Headful per CloakBrowser)
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Pipeline 100% Proxata con Validazione Antibot e Tunneling WARP
         run: |
@@ -65,7 +71,7 @@ jobs:
           from queue import Queue, Empty
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
-          from camoufox.sync_api import Camoufox
+          from cloakbrowser import launch
 
           URLS_TO_TEST = [
               "https://www.facebook.com/groups/expatsinparaguay/",
@@ -396,108 +402,106 @@ jobs:
 
               return False, f"[⚠️ FAIL {index}] {url} -> Richiede step successivo.", (index, url, filepath)
 
-          def camoufox_worker_thread(worker_id, warp_proxy_addr, public_proxies, jobs_queue):
-              print(f"  [🦊 Worker CF {worker_id}] Avvio browser con default WARP {warp_proxy_addr}...", flush=True)
+          def cloakbrowser_worker_thread(worker_id, warp_proxy_addr, public_proxies, jobs_queue):
+              print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
               
               try:
-                  with Camoufox(
-                      proxy={"server": f"socks5://{warp_proxy_addr}"},
-                      headless="virtual", # Abilita la simulazione del display virtuale per superare i check di rendering
+                  # Avvio CloakBrowser nativo sul display virtuale Xvfb
+                  browser = launch(
+                      proxy=f"socks5://{warp_proxy_addr}",
+                      headless=False,
                       geoip=True, 
-                      humanize=True, 
-                      i_know_what_im_doing=True
-                  ) as browser:
-                      # Creazione contesto disabilitando controlli SSL sui canali di instradamento
-                      context = browser.new_context(ignore_https_errors=True)
-                      print(f"  [🦊 Worker CF {worker_id}] Browser pronto!", flush=True)
+                      humanize=True
+                  )
+                  print(f"  [🕵️ Worker CB {worker_id}] Browser pronto!", flush=True)
+                  
+                  while True:
+                      try:
+                          item = jobs_queue.get_nowait()
+                      except Empty:
+                          break
                       
-                      while True:
+                      index, url, filepath = item
+                      print(f"  [🕵️ Worker CB {worker_id}] Scaricamento: {url}", flush=True)
+                      
+                      success = False
+                      error_msg = ""
+                      
+                      # --- TENTATIVO 1: Tramite IP WARP assegnato ---
+                      try:
+                          page = browser.new_page()
+                          
                           try:
-                              item = jobs_queue.get_nowait()
-                          except Empty:
-                              break
+                              page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                              try:
+                                  page.wait_for_load_state("networkidle", timeout=8000)
+                              except Exception:
+                                  pass
+                          except Exception:
+                              pass
+                                      
+                          html_content = page.content()
+                          markdown_content = md(html_content, heading_style="ATX")
                           
-                          index, url, filepath = item
-                          print(f"  [🦊 Worker CF {worker_id}] Scaricamento: {url}", flush=True)
+                          is_valid, reason = validate_markdown(markdown_content, url)
+                          if is_valid:
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              print(f"[✅ CLOAKBROWSER SUCCESS {index}] {url} -> Estratto con successo via WARP!", flush=True)
+                              success = True
+                          else:
+                              error_msg = f"Validazione fallita su WARP: {reason}"
+                          page.close()
+                      except Exception as e:
+                          error_msg = f"Errore su WARP: {e}"
                           
-                          success = False
-                          error_msg = ""
-                          
-                          # --- TENTATIVO 1: Tramite IP WARP assegnato ---
-                          try:
-                              page = context.new_page()
+                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
+                      if not success and public_proxies:
+                          fallback_attempts = 3
+                          for f_idx in range(fallback_attempts):
+                              fallback_proxy = random.choice(public_proxies)
+                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy: {fallback_proxy}...", flush=True)
                               
                               try:
-                                  page.goto(url, wait_until="load", timeout=20000)
-                                  page.wait_for_timeout(2000)
-                              except Exception:
+                                  fallback_context = browser.new_context(
+                                      proxy={"server": f"socks5://{fallback_proxy}"},
+                                      ignore_https_errors=True
+                                  )
+                                  page = fallback_context.new_page()
+                                  
                                   try:
-                                      page.wait_for_timeout(1500)
+                                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                                      try:
+                                          page.wait_for_load_state("networkidle", timeout=6000)
+                                      except Exception:
+                                          pass
                                   except Exception:
                                       pass
-                                      
-                              html_content = page.content()
-                              markdown_content = md(html_content, heading_style="ATX")
-                              
-                              is_valid, reason = validate_markdown(markdown_content, url)
-                              if is_valid:
-                                  with open(filepath, 'w', encoding='utf-8') as f:
-                                      f.write(markdown_content)
-                                  print(f"[✅ CAMOUFOX SUCCESS {index}] {url} -> Estratto con successo via WARP!", flush=True)
-                                  success = True
-                              else:
-                                  error_msg = f"Validazione fallita su WARP: {reason}"
-                              page.close()
-                          except Exception as e:
-                              error_msg = f"Errore su WARP: {e}"
-                              
-                          # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
-                          if not success and public_proxies:
-                              fallback_attempts = 3
-                              for f_idx in range(fallback_attempts):
-                                  fallback_proxy = random.choice(public_proxies)
-                                  print(f"  [🦊 Worker CF {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy: {fallback_proxy}...", flush=True)
-                                  
-                                  try:
-                                      fallback_context = browser.new_context(
-                                          proxy={"server": f"socks5://{fallback_proxy}"},
-                                          ignore_https_errors=True
-                                      )
-                                      page = fallback_context.new_page()
-                                      
-                                      try:
-                                          page.goto(url, wait_until="load", timeout=20000)
-                                          page.wait_for_timeout(2000)
-                                      except Exception:
-                                          try:
-                                              page.wait_for_timeout(1500)
-                                          except Exception:
-                                              pass
                                               
-                                      html_content = page.content()
-                                      markdown_content = md(html_content, heading_style="ATX")
-                                      
-                                      is_valid, reason = validate_markdown(markdown_content, url)
-                                      fallback_context.close()
-                                      
-                                      if is_valid:
-                                          with open(filepath, 'w', encoding='utf-8') as f:
-                                              f.write(markdown_content)
-                                          print(f"[✅ CAMOUFOX FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
-                                          success = True
-                                          break
-                                      else:
-                                          error_msg = f"Validazione fallita su fallback: {reason}"
-                                  except Exception as fe:
-                                      error_msg = f"Errore su fallback: {fe}"
-                                      
-                              if not success:
-                                  print(f"[❌ CAMOUFOX ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
+                                  html_content = page.content()
+                                  markdown_content = md(html_content, heading_style="ATX")
                                   
-                          jobs_queue.task_done()
-                      context.close()
+                                  is_valid, reason = validate_markdown(markdown_content, url)
+                                  fallback_context.close()
+                                  
+                                  if is_valid:
+                                      with open(filepath, 'w', encoding='utf-8') as f:
+                                          f.write(markdown_content)
+                                      print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
+                                      success = True
+                                      break
+                                  else:
+                                      error_msg = f"Validazione fallita su fallback: {reason}"
+                              except Exception as fe:
+                                  error_msg = f"Errore su fallback: {fe}"
+                                  
+                          if not success:
+                              print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
+                              
+                      jobs_queue.task_done()
+                  browser.close()
               except Exception as e:
-                  print(f"  [❌ CAMOUFOX Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
+                  print(f"  [❌ CLOAKBROWSER Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
 
           if __name__ == '__main__':
               # DOWNLOAD LISTA PROXY (Sorgenti multiple per massimizzare la freschezza e disponibilità dei SOCKS5 globali)
@@ -587,26 +591,26 @@ jobs:
                           if not success:
                               failed_phase2a.append(failed_item)
 
-                  # FASE 2b: Avvio Camoufox con 20 browser paralleli su WARP per i rimanenti fallimenti
+                  # FASE 2b: Avvio CloakBrowser con 20 browser paralleli su WARP per i rimanenti fallimenti
                   if failed_phase2a:
                       print("\n==========================================", flush=True)
-                      print(f"🔥 FASE 2b: Avvio di {min(20, len(active_warp_proxies))} browser paralleli Camoufox per risolvere {len(failed_phase2a)} URL rimanenti...", flush=True)
+                      print(f"🔥 FASE 2b: Avvio di {min(20, len(active_warp_proxies))} browser paralleli CloakBrowser per risolvere {len(failed_phase2a)} URL rimanenti...", flush=True)
                       print("==========================================\n", flush=True)
                       
                       jobs_queue = Queue()
                       for item in failed_phase2a:
                           jobs_queue.put(item)
                           
-                      cf_threads = []
-                      num_cf_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
+                      cb_threads = []
+                      num_cb_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
                       
-                      for w_id in range(1, num_cf_workers + 1):
+                      for w_id in range(1, num_cb_workers + 1):
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
-                          t = threading.Thread(target=camoufox_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
+                          t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
                           t.start()
-                          cf_threads.append(t)
+                          cb_threads.append(t)
                           
-                      for t in cf_threads:
+                      for t in cb_threads:
                           t.join()
                   else:
                       print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
