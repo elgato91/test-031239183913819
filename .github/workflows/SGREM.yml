@@ -102,7 +102,7 @@ jobs:
           stop_scanner = threading.Event()
           working_count = 0
           working_lock = threading.Lock()
-          max_working = 50
+          max_working = 100 # Incrementato per assicurare un ampio pool di proxy funzionanti per WARP
           working_proxies = []
 
           # Gestione WARP
@@ -110,6 +110,7 @@ jobs:
           active_warp_proxies = []
           warp_processes = []
           warp_counter = 0
+          stop_registration = threading.Event()
 
           def parse_wgcf_profile(filepath):
               private_key = None
@@ -132,56 +133,44 @@ jobs:
                           
               return private_key, public_key, endpoint
 
-          def validate_content(text, url, is_html=True):
-              if any(site in url for site in ["example.com", "api.ipify.org"]):
-                  return True, ""
+          def validate_markdown(markdown_text, url):
+              if not markdown_text:
+                  return False, "Markdown vuoto"
                   
-              if not text or len(text.strip()) < 300:
-                  return False, "Contenuto vuoto o eccessivamente corto (< 300 caratteri)"
-                  
-              low_text = text.lower()
+              # Pulizia del testo da tag markdown, link e spazi per valutare il contenuto testuale reale
+              text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text) # Rimuove link mantenendo l'ancora
+              text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only) # Rimuove immagini
+              text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only) # Rimuove sintassi base
+              text_only = ' '.join(text_only.split())
               
-              if is_html:
-                  title_match = re.search(r"<title[^>]*>(.*?)</title>", low_text, re.DOTALL)
-                  title_text = title_match.group(1).strip() if title_match else ""
-                  waf_titles = ["just a moment", "attention required", "access denied", 
-                                "checking your browser", "robot challenge screen", 
-                                "403 forbidden", "forbidden", "access forbidden", "one moment, please..."]
-                  for wt in waf_titles:
-                      if wt in title_text:
-                          return False, f"WAF rilevato nel titolo HTML: '{wt}'"
+              char_count = len(text_only)
+              if char_count < 300:
+                  return False, f"Testo utile nel markdown insufficiente ({char_count} caratteri)"
                   
-                  blocking_indicators = [
-                      "challenge-platform", "access denied", "403 forbidden", "cloudflare",
-                      "just a moment", "security verification", "please enable js", "enable javascript",
-                      "are you a robot", "please wait for verification", "we've detected unusual activity",
-                      "if you are not redirected", "unusual traffic from your computer network",
-                      "checking your browser", "prove your humanity", "captcha verification",
-                      "please enter in the characters you see below", "access to this page is forbidden",
-                      "error 1020", "you have been blocked", "pardon our interruption",
-                      "se non vieni reindirizzato", "se hai problemi ad accedere",
-                      "robot challenge screen", "ci siamo quasi", "verifica di sicurezza",
-                      "checking the site connection security", "please wait while your request is being verified",
-                      "one moment, please..."
-                  ]
-              else:
-                  blocking_indicators = [
-                      "just a moment", "are you a robot", "prove your humanity",
-                      "captcha verification", "please enter in the characters you see below",
-                      "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                      "we've detected unusual activity", "robot challenge screen", 
-                      "checking the site connection security", "unusual traffic from your computer network",
-                      "403 forbidden", "forbidden", "target url returned error",
-                      "page maybe requiring captcha", "please make sure you are authorized",
-                      "performing security verification", "challenges.cloudflare.com",
-                      "verification successful. waiting for", "attention required!",
-                      "please wait while your request is being verified", "one moment, please..."
-                  ]
-          
+              low_text = markdown_text.lower()
+              blocking_indicators = [
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
+                  "just a moment", "security verification", "please enable js", "enable javascript",
+                  "are you a robot", "please wait for verification", "we've detected unusual activity",
+                  "unusual traffic from your computer network", "checking your browser", 
+                  "prove your humanity", "captcha verification", "robot challenge screen",
+                  "one moment, please...", "pardon our interruption"
+              ]
               for ind in blocking_indicators:
                   if ind in low_text:
-                      return False, f"WAF/Captcha/Blocco rilevato nel testo: '{ind}'"
+                      return False, f"Rilevato blocco o captcha nel testo: '{ind}'"
                       
+              # Controllo se il testo estratto contiene quasi esclusivamente il nome del dominio (pagine guscio)
+              domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
+              if domain_match:
+                  domain = domain_match.group(1).lower().split('.')[0]
+                  words = text_only.lower().split()
+                  if len(words) > 0:
+                      domain_occurrences = sum(1 for w in words if domain in w)
+                      ratio = domain_occurrences / len(words)
+                      if ratio > 0.35 and len(words) < 100:
+                          return False, f"Contenuto fittizio: contiene quasi esclusivamente riferimenti al dominio '{domain}'"
+                          
               return True, ""
 
           def scan_worker(proxy_addr):
@@ -210,102 +199,105 @@ jobs:
               except Exception:
                   pass
 
-          def register_warp_worker(proxy_list_queue):
+          def register_single_warp(proxy_addr):
               global warp_counter
-              while not proxy_list_queue.empty():
-                  with warp_success_lock:
-                      if len(active_warp_proxies) >= 20:
-                          break
-                      current_idx = warp_counter
-                      warp_counter += 1
+              if stop_registration.is_set():
+                  return
                   
-                  try:
-                      proxy = proxy_list_queue.get_nowait()
-                  except Empty:
-                      break
+              with warp_success_lock:
+                  if len(active_warp_proxies) >= 20:
+                      stop_registration.set()
+                      return
+                  current_idx = warp_counter
+                  warp_counter += 1
+                  
+              local_port = 20001 + current_idx
+              dir_name = f"warp_{current_idx}"
+              os.makedirs(dir_name, exist_ok=True)
+              
+              env = os.environ.copy()
+              env["HTTP_PROXY"] = f"socks5h://{proxy_addr}"
+              env["HTTPS_PROXY"] = f"socks5h://{proxy_addr}"
+              env["ALL_PROXY"] = f"socks5h://{proxy_addr}"
+              
+              try:
+                  # 1. wgcf register
+                  reg_res = subprocess.run(
+                      ["wgcf", "register", "--accept-tos"],
+                      env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8
+                  )
+                  if reg_res.returncode != 0 or stop_registration.is_set():
+                      return
                       
-                  local_port = 20001 + current_idx
-                  dir_name = f"warp_{current_idx}"
-                  os.makedirs(dir_name, exist_ok=True)
-                  
-                  env = os.environ.copy()
-                  env["HTTP_PROXY"] = f"socks5h://{proxy}"
-                  env["HTTPS_PROXY"] = f"socks5h://{proxy}"
-                  env["ALL_PROXY"] = f"socks5h://{proxy}"
-                  
-                  try:
-                      # 1. wgcf register
-                      reg_res = subprocess.run(
-                          ["wgcf", "register", "--accept-tos"],
-                          env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10
-                      )
-                      if reg_res.returncode != 0:
-                          continue
-                          
-                      # 2. wgcf generate
-                      gen_res = subprocess.run(
-                          ["wgcf", "generate"],
-                          env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10
-                      )
-                      if gen_res.returncode != 0:
-                          continue
-                          
-                      # 3. Estrazione dei dati per la config di wireproxy
-                      profile_path = os.path.join(dir_name, "wgcf-profile.conf")
-                      private_key, public_key, endpoint = parse_wgcf_profile(profile_path)
+                  # 2. wgcf generate
+                  gen_res = subprocess.run(
+                      ["wgcf", "generate"],
+                      env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8
+                  )
+                  if gen_res.returncode != 0 or stop_registration.is_set():
+                      return
                       
-                      if not private_key or not public_key:
-                          continue
-                          
-                      # 4. Creazione file di configurazione custom per wireproxy
-                      wp_config_path = os.path.join(dir_name, "wireproxy.conf")
-                      wp_config_content = textwrap.dedent(f"""\
-                          [Interface]
-                          PrivateKey = {private_key}
-                          Address = 172.16.0.2/32
-                          DNS = 1.1.1.1
-                          MTU = 1280
+                  # 3. Estrazione dei dati per la config di wireproxy
+                  profile_path = os.path.join(dir_name, "wgcf-profile.conf")
+                  private_key, public_key, endpoint = parse_wgcf_profile(profile_path)
+                  
+                  if not private_key or not public_key or stop_registration.is_set():
+                      return
+                      
+                  # 4. Creazione file di configurazione custom per wireproxy
+                  wp_config_path = os.path.join(dir_name, "wireproxy.conf")
+                  wp_config_content = textwrap.dedent(f"""\
+                      [Interface]
+                      PrivateKey = {private_key}
+                      Address = 172.16.0.2/32
+                      DNS = 1.1.1.1, 8.8.8.8
+                      MTU = 1280
 
-                          [Peer]
-                          PublicKey = {public_key}
-                          Endpoint = {endpoint}
-                          AllowedIPs = 0.0.0.0/0
+                      [Peer]
+                      PublicKey = {public_key}
+                      Endpoint = {endpoint}
+                      AllowedIPs = 0.0.0.0/0
 
-                          [Socks5]
-                          BindAddress = 127.0.0.1:{local_port}
-                      """)
-                      with open(wp_config_path, "w") as f:
-                          f.write(wp_config_content)
-                          
-                      # 5. Avvio wireproxy in background
-                      proc = subprocess.Popen(
-                          ["wireproxy", "-c", "wireproxy.conf"],
-                          cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                      )
+                      [Socks5]
+                      BindAddress = 127.0.0.1:{local_port}
+                  """)
+                  with open(wp_config_path, "w") as f:
+                      f.write(wp_config_content)
                       
-                      # Test rapido di funzionamento del proxy locale WARP
-                      time.sleep(1.0)
-                      test_proxies = {
-                          'http': f'socks5://127.0.0.1:{local_port}',
-                          'https': f'socks5://127.0.0.1:{local_port}'
-                      }
-                      try:
-                          test_r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=test_proxies, timeout=5.0)
-                          if "warp=on" in test_r.text:
-                              with warp_success_lock:
-                                  if len(active_warp_proxies) < 20:
-                                      active_warp_proxies.append(f"127.0.0.1:{local_port}")
-                                      warp_processes.append(proc)
-                                      print(f"  [✅ WARP PRONTO] Istanza {len(active_warp_proxies)} avviata su 127.0.0.1:{local_port} (tramite proxy {proxy})", flush=True)
-                                  else:
-                                      proc.terminate()
-                          else:
-                              proc.terminate()
-                      except Exception:
+                  if stop_registration.is_set():
+                      return
+
+                  # 5. Avvio wireproxy in background
+                  proc = subprocess.Popen(
+                      ["wireproxy", "-c", "wireproxy.conf"],
+                      cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                  )
+                  
+                  # Test rapido di funzionamento del proxy locale WARP
+                  time.sleep(1.0)
+                  test_proxies = {
+                      'http': f'socks5://127.0.0.1:{local_port}',
+                      'https': f'socks5://127.0.0.1:{local_port}'
+                  }
+                  try:
+                      test_r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=test_proxies, timeout=4.0)
+                      if "warp=on" in test_r.text:
+                          with warp_success_lock:
+                              if len(active_warp_proxies) < 20 and not stop_registration.is_set():
+                                  active_warp_proxies.append(f"127.0.0.1:{local_port}")
+                                  warp_processes.append(proc)
+                                  print(f"  [✅ WARP PRONTO] Istanza {len(active_warp_proxies)} avviata su 127.0.0.1:{local_port} (tramite proxy {proxy_addr})", flush=True)
+                                  if len(active_warp_proxies) >= 20:
+                                      stop_registration.set()
+                              else:
+                                  proc.terminate()
+                      else:
                           proc.terminate()
-                          
                   except Exception:
-                      pass
+                      proc.terminate()
+                      
+              except Exception:
+                  pass
 
           def fetch_url_lightweight(item, proxies_list):
               index, url = item
@@ -320,7 +312,6 @@ jobs:
               max_light_attempts = 2
               for attempt in range(1, max_light_attempts + 1):
                   proxy_addr = random.choice(proxies_list)
-                  # Se locale usiamo socks5 standard, se pubblico socks5h per instradare DNS remoto
                   proxy_url = f"socks5://{proxy_addr}" if "127.0.0.1" in proxy_addr else f"socks5h://{proxy_addr}"
                   proxies = {
                       'http': proxy_url,
@@ -345,9 +336,9 @@ jobs:
                           timeout=6
                       )
                       if response.status_code == 200:
-                          is_valid, reason = validate_content(response.text, url, is_html=True)
+                          markdown_content = md(response.text, heading_style="ATX")
+                          is_valid, reason = validate_markdown(markdown_content, url)
                           if is_valid:
-                              markdown_content = md(response.text, heading_style="ATX")
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(markdown_content)
                               return True, f"[✅ STEALTH {index}] {url} -> Scaricato via curl-cffi (Proxy: {proxy_addr})", None
@@ -362,10 +353,11 @@ jobs:
                       }
                       jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=10)
                       if jina_response.status_code == 200:
-                          is_valid, reason = validate_content(jina_response.text, url, is_html=False)
+                          markdown_content = jina_response.text
+                          is_valid, reason = validate_markdown(markdown_content, url)
                           if is_valid:
                               with open(filepath, 'w', encoding='utf-8') as f:
-                                  f.write(jina_response.text)
+                                  f.write(markdown_content)
                               return True, f"[✅ JINA {index}] {url} -> Salvato via Jina (Proxy: {proxy_addr})", None
                   except Exception:
                       pass
@@ -384,7 +376,10 @@ jobs:
                       humanize=True, 
                       i_know_what_im_doing=True
                   ) as browser:
+                      # Ignora gli errori SSL derivanti dall'instradamento proxy
+                      context = browser.new_context(ignore_https_errors=True)
                       print(f"  [🦊 Worker CF {worker_id}] Browser pronto!", flush=True)
+                      
                       while True:
                           try:
                               item = jobs_queue.get_nowait()
@@ -394,18 +389,18 @@ jobs:
                           index, url, filepath = item
                           print(f"  [🦊 Worker CF {worker_id}] Scaricamento: {url}", flush=True)
                           try:
-                              page = browser.new_page()
-                              # Blocco dei contenuti pesanti
+                              page = context.new_page()
+                              # Blocco elementi non essenziali
                               page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
                               
-                              page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                              page.goto(url, wait_until="domcontentloaded", timeout=25000)
                               html_content = page.content()
                               
-                              is_valid, reason = validate_content(html_content, url, is_html=True)
-                              if not is_valid:
-                                      raise Exception(f"Validazione fallita: {reason}")
-                                      
                               markdown_content = md(html_content, heading_style="ATX")
+                              is_valid, reason = validate_markdown(markdown_content, url)
+                              if not is_valid:
+                                      raise Exception(f"Validazione Markdown fallita: {reason}")
+                                      
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(markdown_content)
                               print(f"[✅ CAMOUFOX SUCCESS {index}] {url} -> Estratto con successo!", flush=True)
@@ -430,10 +425,10 @@ jobs:
                   print(f"⚠️ Errore recupero proxy: {e}", flush=True)
                   raw_proxies = []
 
-              # AVVIO DELLO SCANNER (Trova 50 proxy pubblici veloci per la Fase 1)
-              print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 50 funzionanti)...", flush=True)
-              with concurrent.futures.ThreadPoolExecutor(max_workers=200) as scanner_executor:
-                  futures = {scanner_executor.submit(scan_worker, p): p for p in raw_proxies[:1500]}
+              # AVVIO DELLO SCANNER (Trova fino a 100 proxy sicuri in parallelo)
+              print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 100 funzionanti)...", flush=True)
+              with concurrent.futures.ThreadPoolExecutor(max_workers=300) as scanner_executor:
+                  futures = {scanner_executor.submit(scan_worker, p): p for p in raw_proxies[:2000]}
                   concurrent.futures.wait(futures)
 
               working_proxies.sort(key=lambda x: x[1])
@@ -442,7 +437,7 @@ jobs:
               if not sorted_proxy_addrs:
                   print("⚠️ Nessun proxy pubblico valido trovato. Fallback su connessione diretta per la Fase 1.", flush=True)
 
-              # FASE 1: curl-cffi E Jina con i 50 proxy pubblici
+              # FASE 1: curl-cffi E Jina con i proxy pubblici
               print("\n==========================================", flush=True)
               print(f"🚀 FASE 1: Estrazione con {len(sorted_proxy_addrs)} proxy pubblici...", flush=True)
               print("==========================================\n", flush=True)
@@ -457,32 +452,29 @@ jobs:
                       if not success:
                           failed_phase1.append(failed_item)
 
-              # FASE 2: Registrazione WARP (solo se vi sono URL falliti)
+              # FASE 2: Registrazione concorrente WARP (solo per gli URL non estratti)
               if failed_phase1:
                   print("\n==========================================", flush=True)
-                  print(f"🌀 FASE 2: Avvio registrazione di fino a 20 IP WARP locali usando l'intera lista dei proxy...", flush=True)
+                  print(f"🌀 FASE 2: Registrazione ultra-concorrente di 20 IP WARP tramite i proxy funzionanti...", flush=True)
                   print("==========================================\n", flush=True)
                   
-                  registration_queue = Queue()
-                  for p in raw_proxies:
-                      registration_queue.put(p)
-                      
-                  reg_threads = []
-                  # Avvio di 20 thread paralleli per sveltire la configurazione concorrente di wireproxy
-                  for i in range(20):
-                      t = threading.Thread(target=register_warp_worker, args=(registration_queue,))
-                      t.start()
-                      reg_threads.append(t)
-                  for t in reg_threads:
-                      t.join()
+                  stop_registration.clear()
+                  active_warp_proxies = []
+                  warp_processes = []
+                  warp_counter = 0
+
+                  # Lancio ultra-veloce della registrazione in parallelo sui proxy preventivamente validati
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=40) as register_executor:
+                      futures = [register_executor.submit(register_single_warp, p) for p in sorted_proxy_addrs[:100]]
+                      concurrent.futures.wait(futures)
                       
                   if not active_warp_proxies:
-                      print("⚠️ Registrazione WARP fallita o non riuscita. Fallback sui proxy pubblici originali.", flush=True)
+                      print("⚠️ Registrazione WARP non riuscita. Fallback sui proxy pubblici originali.", flush=True)
                       active_warp_proxies = sorted_proxy_addrs
                   else:
-                      print(f"\n🎉 Totale tunnel WARP locali attivi: {len(active_warp_proxies)}", flush=True)
+                      print(f"\n🎉 Totale tunnel WARP locali attivati: {len(active_warp_proxies)}", flush=True)
 
-                  # FASE 2a: Ritesta gli URL falliti con curl-cffi usando i proxy WARP
+                  # FASE 2a: Retest degli URL falliti con curl-cffi usando i proxy WARP
                   print("\n==========================================", flush=True)
                   print(f"🚀 FASE 2a: Retest di {len(failed_phase1)} URL falliti tramite IP WARP con curl-cffi/Jina...", flush=True)
                   print("==========================================\n", flush=True)
@@ -510,7 +502,6 @@ jobs:
                       num_cf_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
                       
                       for w_id in range(1, num_cf_workers + 1):
-                          # Associa ciascun worker a un IP WARP distinto
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
                           t = threading.Thread(target=camoufox_worker_thread, args=(w_id, proxy_for_worker, jobs_queue))
                           t.start()
@@ -521,7 +512,7 @@ jobs:
                   else:
                       print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
               else:
-                  print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1 senza ricorrere a WARP!", flush=True)
+                  print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1!", flush=True)
                   
               # SPEGNIMENTO DEI PROCESSI WIREPROXY IN BACKGROUND
               if warp_processes:
