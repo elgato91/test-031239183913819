@@ -142,8 +142,11 @@ jobs:
                               elif key == "endpoint":
                                   endpoint = val
                                   
-              if not dns_servers:
-                  dns_servers = ["1.1.1.1", "8.8.8.8"]
+              # Integrazione preventiva di server DNS globali alternativi instradati
+              for backup_dns in ["8.8.8.8", "9.9.9.9"]:
+                  if backup_dns not in dns_servers:
+                      dns_servers.append(backup_dns)
+                      
               if not addresses:
                   addresses = ["172.16.0.2/32"]
                   
@@ -153,14 +156,15 @@ jobs:
               if not markdown_text:
                   return False, "Markdown vuoto"
                   
-              # Estrazione del solo testo per evitare falsi positivi su markup vuoti
+              # Estrazione del solo testo per evitare falsi positivi su markup vuoti o SPA non idratate
               text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text)
               text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only)
               text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only)
               text_only = ' '.join(text_only.split())
               
               char_count = len(text_only)
-              if char_count < 300:
+              # Soglia abbassata a 200 per tollerare pagine di informazioni stradali/direzioni reali ma brevi
+              if char_count < 200:
                   return False, f"Testo utile nel markdown insufficiente ({char_count} caratteri)"
                   
               low_text = markdown_text.lower()
@@ -176,7 +180,7 @@ jobs:
                   if ind in low_text:
                       return False, f"Rilevato blocco o captcha nel testo: '{ind}'"
                       
-              # Rilevamento delle pagine guscio
+              # Rilevamento delle pagine guscio vuote
               domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
               if domain_match:
                   domain = domain_match.group(1).lower().split('.')[0]
@@ -415,7 +419,16 @@ jobs:
                               page = context.new_page()
                               page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
                               
-                              page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                              # Navigazione robusta con attesa dell'evento load e buffer di sicurezza per SPA/idratazione
+                              try:
+                                  page.goto(url, wait_until="load", timeout=15000)
+                                  page.wait_for_timeout(2500)
+                              except Exception:
+                                  try:
+                                      page.wait_for_timeout(2000)
+                                  except Exception:
+                                      pass
+                                      
                               html_content = page.content()
                               
                               markdown_content = md(html_content, heading_style="ATX")
@@ -431,51 +444,78 @@ jobs:
                           except Exception as e:
                               error_msg = f"Errore su WARP: {e}"
                               
-                          # --- TENTATIVO 2 (FALLBACK): Tramite uno dei 100 proxy pubblici veloci se WARP fallisce ---
+                          # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
                           if not success and public_proxies:
-                              fallback_proxy = random.choice(public_proxies)
-                              print(f"  [🦊 Worker CF {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Tento fallback su proxy pubblico: {fallback_proxy}...", flush=True)
-                              
-                              try:
-                                  fallback_context = browser.new_context(
-                                      proxy={"server": f"socks5://{fallback_proxy}"},
-                                      ignore_https_errors=True
-                                  )
-                                  page = fallback_context.new_page()
-                                  page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
+                              fallback_attempts = 3
+                              for f_idx in range(fallback_attempts):
+                                  fallback_proxy = random.choice(public_proxies)
+                                  print(f"  [🦊 Worker CF {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy: {fallback_proxy}...", flush=True)
                                   
-                                  page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                                  html_content = page.content()
-                                  
-                                  markdown_content = md(html_content, heading_style="ATX")
-                                  is_valid, reason = validate_markdown(markdown_content, url)
-                                  if is_valid:
-                                      with open(filepath, 'w', encoding='utf-8') as f:
-                                          f.write(markdown_content)
-                                      print(f"[✅ CAMOUFOX FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5!", flush=True)
-                                      success = True
-                                  else:
-                                      print(f"[❌ CAMOUFOX FALLBACK FAIL {index}] {url} fallito anche su Proxy Pubblico: {reason}", flush=True)
-                                  fallback_context.close()
-                              except Exception as fe:
-                                  print(f"[❌ CAMOUFOX FALLBACK FAIL {index}] {url} errore su Proxy Pubblico: {fe}", flush=True)
+                                  try:
+                                      fallback_context = browser.new_context(
+                                          proxy={"server": f"socks5://{fallback_proxy}"},
+                                          ignore_https_errors=True
+                                      )
+                                      page = fallback_context.new_page()
+                                      page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
+                                      
+                                      try:
+                                          page.goto(url, wait_until="load", timeout=15000)
+                                          page.wait_for_timeout(2500)
+                                      except Exception:
+                                          try:
+                                              page.wait_for_timeout(2000)
+                                          except Exception:
+                                              pass
+                                              
+                                      html_content = page.content()
+                                      
+                                      markdown_content = md(html_content, heading_style="ATX")
+                                      is_valid, reason = validate_markdown(markdown_content, url)
+                                      fallback_context.close()
+                                      
+                                      if is_valid:
+                                          with open(filepath, 'w', encoding='utf-8') as f:
+                                              f.write(markdown_content)
+                                          print(f"[✅ CAMOUFOX FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
+                                          success = True
+                                          break
+                                      else:
+                                          error_msg = f"Validazione fallita su fallback: {reason}"
+                                  except Exception as fe:
+                                      error_msg = f"Errore su fallback: {fe}"
+                                      
+                              if not success:
+                                  print(f"[❌ CAMOUFOX ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                                   
                           jobs_queue.task_done()
               except Exception as e:
                   print(f"  [❌ CAMOUFOX Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
 
           if __name__ == '__main__':
-              # DOWNLOAD LISTA PROXY
+              # DOWNLOAD LISTA PROXY (Sorgenti multiple per massimizzare la freschezza e disponibilità dei SOCKS5)
               print("==========================================", flush=True)
               print("🔄 Scaricamento liste proxy candidati...", flush=True)
-              try:
-                  proxy_req = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", timeout=10)
-                  raw_proxies = [p.strip() for p in proxy_req.text.split('\n') if p.strip()]
-                  random.shuffle(raw_proxies)
-                  print(f"✅ Recuperati {len(raw_proxies)} proxy candidati.", flush=True)
-              except Exception as e:
-                  print(f"⚠️ Errore recupero proxy: {e}", flush=True)
-                  raw_proxies = []
+              proxy_urls = [
+                  "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                  "https://raw.githubusercontent.com/Hookzof/socks5_list/master/socks5.txt",
+                  "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"
+              ]
+              raw_proxies_set = set()
+              for p_url in proxy_urls:
+                  try:
+                      r = requests.get(p_url, timeout=10)
+                      if r.status_code == 200:
+                          for line in r.text.split('\n'):
+                              line = line.strip()
+                              if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
+                                  raw_proxies_set.add(line)
+                  except Exception:
+                      pass
+                      
+              raw_proxies = list(raw_proxies_set)
+              random.shuffle(raw_proxies)
+              print(f"✅ Recuperati {len(raw_proxies)} proxy candidati.", flush=True)
 
               # AVVIO DELLO SCANNER (Trova fino a 100 proxy sicuri in parallelo)
               print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 100 funzionanti)...", flush=True)
