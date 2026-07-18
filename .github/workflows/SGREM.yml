@@ -16,6 +16,19 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Installazione Font di Sistema
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer \
+            fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf || true
+          
+          mkdir -p ~/.local/share/fonts/windows
+          cp /usr/share/fonts/truetype/msttcorefonts/*.ttf ~/.local/share/fonts/windows/ || true
+          cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
+          fc-cache -f -v
+
       - name: Installa dipendenze sistema, Python, Camoufox e Utility WARP
         run: |
           # Aggiorna pacchetti di sistema
@@ -31,9 +44,9 @@ jobs:
           sudo mv wireproxy /usr/local/bin/wireproxy
           sudo chmod +x /usr/local/bin/wireproxy
           
-          # Installa le dipendenze Python e Camoufox
+          # Installa le dipendenze Python e Camoufox (cloverlabs-camoufox per stabilità API)
           python -m pip install --upgrade pip
-          pip install requests pysocks curl-cffi markdownify camoufox[geoip]
+          pip install requests pysocks curl-cffi markdownify "cloverlabs-camoufox[geoip]"
           python -m camoufox fetch
 
       - name: Pipeline 100% Proxata con Validazione Antibot e Tunneling WARP
@@ -49,6 +62,7 @@ jobs:
           import subprocess
           import sys
           import textwrap
+          from urllib.parse import urlparse, parse_qs
           from queue import Queue, Empty
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
@@ -90,6 +104,17 @@ jobs:
           warp_processes = []
           warp_counter = 0
           stop_registration = threading.Event()
+
+          def get_query_from_url(url, default="migliore carbonara roma"):
+              try:
+                  parsed = urlparse(url)
+                  queries = parse_qs(parsed.query)
+                  for param in ['q', 'query', 'p', 'find_desc']:
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
+              return default
 
           def parse_wgcf_profile(filepath):
               private_key = None
@@ -344,7 +369,7 @@ jobs:
                       impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
                       headers_cffi = {
                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                          "Accept-Language": "en-US,en;q=0.9",
+                          "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                           "Upgrade-Insecure-Requests": "1"
                       }
                       response = requests_cffi.get(
@@ -389,14 +414,26 @@ jobs:
               try:
                   with Camoufox(
                       proxy={"server": f"socks5://{warp_proxy_addr}"},
-                      headless=True,
+                      headless="virtual", # Esegue il display virtuale headful per superare il check grafico
                       geoip=True, 
                       humanize=True, 
                       i_know_what_im_doing=True
                   ) as browser:
-                      # Creazione contesto disabilitando controlli SSL sui canali di instradamento
+                      
+                      # Creazione del contesto di sessione
                       context = browser.new_context(ignore_https_errors=True)
-                      print(f"  [🦊 Worker CF {worker_id}] Browser pronto!", flush=True)
+                      print(f"  [🦊 Worker CF {worker_id}] Browser pronto! Inizio Warmup...", flush=True)
+                      
+                      # --- FASE DI WARMUP SULLA SESSIONE ---
+                      try:
+                          warmup_page = context.new_page()
+                          warmup_page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
+                          time.sleep(random.uniform(1.5, 3.0))
+                          warmup_page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=15000)
+                          time.sleep(random.uniform(1.5, 3.0))
+                          warmup_page.close()
+                      except Exception:
+                          pass
                       
                       while True:
                           try:
@@ -413,16 +450,51 @@ jobs:
                           # --- TENTATIVO 1: Tramite IP WARP assegnato ---
                           try:
                               page = context.new_page()
-                              # Rimosso il blocco dei fogli di stile, delle immagini e dei caratteri per consentire il superamento visivo dei WAF
+                              query_to_search = get_query_from_url(url)
                               
-                              try:
-                                  page.goto(url, wait_until="load", timeout=20000)
-                                  page.wait_for_timeout(2000)
-                              except Exception:
+                              # RICERCA NATIVA SIMULATA (evita lo shadowban e blocchi automatici sui motori di ricerca)
+                              if "bing.com" in url:
+                                  page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=25000)
+                                  time.sleep(random.uniform(2.0, 3.5))
                                   try:
-                                      page.wait_for_timeout(1500)
+                                      search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                      search_box.fill(query_to_search)
+                                      page.keyboard.press("Enter")
                                   except Exception:
-                                      pass
+                                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                                      
+                              elif "startpage.com" in url:
+                                  page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=25000)
+                                  time.sleep(random.uniform(2.0, 3.5))
+                                  try:
+                                      search_box = page.locator("input#q").first
+                                      search_box.fill(query_to_search)
+                                      page.keyboard.press("Enter")
+                                  except Exception:
+                                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                                      
+                              elif "html.duckduckgo.com" in url:
+                                  page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=25000)
+                                  time.sleep(random.uniform(2.0, 3.5))
+                                  try:
+                                      search_box = page.locator("input[name=q]").first
+                                      search_box.fill(query_to_search)
+                                      page.keyboard.press("Enter")
+                                  except Exception:
+                                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                              else:
+                                  page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                              
+                              # Attesa fine traffico e simulazione Lazy Load manuale (Emulazione tastiera)
+                              try:
+                                  page.wait_for_load_state("networkidle", timeout=8000)
+                              except Exception:
+                                  pass
+                              
+                              page.keyboard.press("PageDown")
+                              time.sleep(random.uniform(1.0, 1.5))
+                              page.keyboard.press("PageDown")
+                              time.sleep(random.uniform(1.5, 2.5))
                                       
                               html_content = page.content()
                               markdown_content = md(html_content, heading_style="ATX")
@@ -451,18 +523,18 @@ jobs:
                                           proxy={"server": f"socks5://{fallback_proxy}"},
                                           ignore_https_errors=True
                                       )
-                                      page = fallback_context.new_page()
+                                      f_page = fallback_context.new_page()
                                       
                                       try:
-                                          page.goto(url, wait_until="load", timeout=20000)
-                                          page.wait_for_timeout(2000)
-                                      except Exception:
+                                          f_page.goto(url, wait_until="domcontentloaded", timeout=25000)
                                           try:
-                                              page.wait_for_timeout(1500)
+                                              f_page.wait_for_load_state("networkidle", timeout=6000)
                                           except Exception:
                                               pass
+                                      except Exception:
+                                          pass
                                               
-                                      html_content = page.content()
+                                      html_content = f_page.content()
                                       markdown_content = md(html_content, heading_style="ATX")
                                       
                                       is_valid, reason = validate_markdown(markdown_content, url)
@@ -550,7 +622,7 @@ jobs:
                   warp_processes = []
                   warp_counter = 0
 
-                  # Lancio ultra-veloce della registrazione in parallelo sui proxy preventivamente validati
+                  # Lancio della registrazione in parallelo sui proxy preventivamente validati
                   with concurrent.futures.ThreadPoolExecutor(max_workers=40) as register_executor:
                       futures = [register_executor.submit(register_single_warp, p) for p in sorted_proxy_addrs[:100]]
                       concurrent.futures.wait(futures)
