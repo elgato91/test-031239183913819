@@ -102,7 +102,7 @@ jobs:
           stop_scanner = threading.Event()
           working_count = 0
           working_lock = threading.Lock()
-          max_working = 100 # Incrementato per assicurare un ampio pool di proxy funzionanti per WARP
+          max_working = 100
           working_proxies = []
 
           # Gestione WARP
@@ -114,33 +114,49 @@ jobs:
 
           def parse_wgcf_profile(filepath):
               private_key = None
+              addresses = []
+              dns_servers = []
               public_key = None
               endpoint = "engage.cloudflareclient.com:2408"
               
               if os.path.exists(filepath):
                   with open(filepath, "r") as f:
-                      content = f.read()
-                      pk_match = re.search(r"PrivateKey\s*=\s*([^\s]+)", content)
-                      pub_match = re.search(r"PublicKey\s*=\s*([^\s]+)", content)
-                      ep_match = re.search(r"Endpoint\s*=\s*([^\s]+)", content)
-                      
-                      if pk_match:
-                          private_key = pk_match.group(1).strip()
-                      if pub_match:
-                          public_key = pub_match.group(1).strip()
-                      if ep_match:
-                          endpoint = ep_match.group(1).strip()
-                          
-              return private_key, public_key, endpoint
+                      for line in f:
+                          line = line.strip()
+                          if not line or line.startswith("#"):
+                              continue
+                          if "=" in line:
+                              key, val = line.split("=", 1)
+                              key = key.strip().lower()
+                              val = val.strip()
+                              if key == "privatekey":
+                                  private_key = val
+                              elif key == "address":
+                                  parts = [p.strip() for p in val.split(",") if p.strip()]
+                                  addresses.extend(parts)
+                              elif key == "dns":
+                                  parts = [p.strip() for p in val.split(",") if p.strip()]
+                                  dns_servers.extend(parts)
+                              elif key == "publickey":
+                                  public_key = val
+                              elif key == "endpoint":
+                                  endpoint = val
+                                  
+              if not dns_servers:
+                  dns_servers = ["1.1.1.1", "8.8.8.8"]
+              if not addresses:
+                  addresses = ["172.16.0.2/32"]
+                  
+              return private_key, addresses, dns_servers, public_key, endpoint
 
           def validate_markdown(markdown_text, url):
               if not markdown_text:
                   return False, "Markdown vuoto"
                   
-              # Pulizia del testo da tag markdown, link e spazi per valutare il contenuto testuale reale
-              text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text) # Rimuove link mantenendo l'ancora
-              text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only) # Rimuove immagini
-              text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only) # Rimuove sintassi base
+              # Estrazione del solo testo per evitare falsi positivi su markup vuoti
+              text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text)
+              text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only)
+              text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only)
               text_only = ' '.join(text_only.split())
               
               char_count = len(text_only)
@@ -160,7 +176,7 @@ jobs:
                   if ind in low_text:
                       return False, f"Rilevato blocco o captcha nel testo: '{ind}'"
                       
-              # Controllo se il testo estratto contiene quasi esclusivamente il nome del dominio (pagine guscio)
+              # Rilevamento delle pagine guscio
               domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
               if domain_match:
                   domain = domain_match.group(1).lower().split('.')[0]
@@ -237,26 +253,30 @@ jobs:
                   if gen_res.returncode != 0 or stop_registration.is_set():
                       return
                       
-                  # 3. Estrazione dei dati per la config di wireproxy
+                  # 3. Estrazione dinamica e totale dei dati dal profilo wgcf
                   profile_path = os.path.join(dir_name, "wgcf-profile.conf")
-                  private_key, public_key, endpoint = parse_wgcf_profile(profile_path)
+                  private_key, addresses, dns_servers, public_key, endpoint = parse_wgcf_profile(profile_path)
                   
                   if not private_key or not public_key or stop_registration.is_set():
                       return
                       
-                  # 4. Creazione file di configurazione custom per wireproxy
+                  # 4. Generazione configurazione allineata di wireproxy
+                  address_lines = "\n".join([f"Address = {addr}" for addr in addresses])
+                  dns_lines = f"DNS = {', '.join(dns_servers)}"
+                  
                   wp_config_path = os.path.join(dir_name, "wireproxy.conf")
                   wp_config_content = textwrap.dedent(f"""\
                       [Interface]
                       PrivateKey = {private_key}
-                      Address = 172.16.0.2/32
-                      DNS = 1.1.1.1, 8.8.8.8
+                      {address_lines}
+                      {dns_lines}
                       MTU = 1280
 
                       [Peer]
                       PublicKey = {public_key}
                       Endpoint = {endpoint}
                       AllowedIPs = 0.0.0.0/0
+                      AllowedIPs = ::/0
 
                       [Socks5]
                       BindAddress = 127.0.0.1:{local_port}
@@ -364,20 +384,17 @@ jobs:
 
               return False, f"[⚠️ FAIL {index}] {url} -> Richiede step successivo.", (index, url, filepath)
 
-          def camoufox_worker_thread(worker_id, proxy_addr, jobs_queue):
-              print(f"  [🦊 Worker CF {worker_id}] Avvio browser con WARP proxy {proxy_addr}...", flush=True)
-              proxy_config = {"server": f"socks5://{proxy_addr}"}
+          def camoufox_worker_thread(worker_id, warp_proxy_addr, public_proxies, jobs_queue):
+              print(f"  [🦊 Worker CF {worker_id}] Avvio browser con default WARP {warp_proxy_addr}...", flush=True)
               
               try:
                   with Camoufox(
-                      proxy=proxy_config,
+                      proxy={"server": f"socks5://{warp_proxy_addr}"},
                       headless=True,
                       geoip=True, 
                       humanize=True, 
                       i_know_what_im_doing=True
                   ) as browser:
-                      # Ignora gli errori SSL derivanti dall'instradamento proxy
-                      context = browser.new_context(ignore_https_errors=True)
                       print(f"  [🦊 Worker CF {worker_id}] Browser pronto!", flush=True)
                       
                       while True:
@@ -388,9 +405,14 @@ jobs:
                           
                           index, url, filepath = item
                           print(f"  [🦊 Worker CF {worker_id}] Scaricamento: {url}", flush=True)
+                          
+                          success = False
+                          error_msg = ""
+                          
+                          # --- TENTATIVO 1: Tramite IP WARP assegnato ---
                           try:
+                              context = browser.new_context(ignore_https_errors=True)
                               page = context.new_page()
-                              # Blocco elementi non essenziali
                               page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
                               
                               page.goto(url, wait_until="domcontentloaded", timeout=25000)
@@ -398,19 +420,49 @@ jobs:
                               
                               markdown_content = md(html_content, heading_style="ATX")
                               is_valid, reason = validate_markdown(markdown_content, url)
-                              if not is_valid:
-                                      raise Exception(f"Validazione Markdown fallita: {reason}")
-                                      
-                              with open(filepath, 'w', encoding='utf-8') as f:
-                                  f.write(markdown_content)
-                              print(f"[✅ CAMOUFOX SUCCESS {index}] {url} -> Estratto con successo!", flush=True)
-                              page.close()
+                              if is_valid:
+                                  with open(filepath, 'w', encoding='utf-8') as f:
+                                      f.write(markdown_content)
+                                  print(f"[✅ CAMOUFOX SUCCESS {index}] {url} -> Estratto con successo via WARP!", flush=True)
+                                  success = True
+                              else:
+                                  error_msg = f"Validazione fallita su WARP: {reason}"
+                              context.close()
                           except Exception as e:
-                              print(f"[❌ CAMOUFOX FAIL {index}] {url} fallito: {e}", flush=True)
-                          finally:
-                              jobs_queue.task_done()
+                              error_msg = f"Errore su WARP: {e}"
+                              
+                          # --- TENTATIVO 2 (FALLBACK): Tramite uno dei 100 proxy pubblici veloci se WARP fallisce ---
+                          if not success and public_proxies:
+                              fallback_proxy = random.choice(public_proxies)
+                              print(f"  [🦊 Worker CF {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Tento fallback su proxy pubblico: {fallback_proxy}...", flush=True)
+                              
+                              try:
+                                  fallback_context = browser.new_context(
+                                      proxy={"server": f"socks5://{fallback_proxy}"},
+                                      ignore_https_errors=True
+                                  )
+                                  page = fallback_context.new_page()
+                                  page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
+                                  
+                                  page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                                  html_content = page.content()
+                                  
+                                  markdown_content = md(html_content, heading_style="ATX")
+                                  is_valid, reason = validate_markdown(markdown_content, url)
+                                  if is_valid:
+                                      with open(filepath, 'w', encoding='utf-8') as f:
+                                          f.write(markdown_content)
+                                      print(f"[✅ CAMOUFOX FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5!", flush=True)
+                                      success = True
+                                  else:
+                                      print(f"[❌ CAMOUFOX FALLBACK FAIL {index}] {url} fallito anche su Proxy Pubblico: {reason}", flush=True)
+                                  fallback_context.close()
+                              except Exception as fe:
+                                  print(f"[❌ CAMOUFOX FALLBACK FAIL {index}] {url} errore su Proxy Pubblico: {fe}", flush=True)
+                                  
+                          jobs_queue.task_done()
               except Exception as e:
-                  print(f"  [❌ CAMOUFOX Worker {worker_id}] Inizializzazione browser fallita: {e}", flush=True)
+                  print(f"  [❌ CAMOUFOX Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
 
           if __name__ == '__main__':
               # DOWNLOAD LISTA PROXY
@@ -503,7 +555,7 @@ jobs:
                       
                       for w_id in range(1, num_cf_workers + 1):
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
-                          t = threading.Thread(target=camoufox_worker_thread, args=(w_id, proxy_for_worker, jobs_queue))
+                          t = threading.Thread(target=camoufox_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
                           t.start()
                           cf_threads.append(t)
                           
