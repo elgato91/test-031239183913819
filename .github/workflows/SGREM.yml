@@ -46,7 +46,7 @@ jobs:
           
           # Installa le dipendenze Python e Camoufox, bloccando Playwright alla versione 1.60.0 stabile
           python -m pip install --upgrade pip
-          pip install requests pysocks curl-cffi markdownify "playwright==1.60.0" "playwright-core==1.60.0" "cloverlabs-camoufox[geoip]"
+          pip install requests pysocks curl-cffi markdownify "playwright==1.60.0" "cloverlabs-camoufox[geoip]"
           python -m camoufox fetch
 
       - name: Pipeline 100% Proxata con Validazione Antibot e Tunneling WARP
