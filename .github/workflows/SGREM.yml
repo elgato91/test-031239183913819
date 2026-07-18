@@ -89,8 +89,7 @@ jobs:
               "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
               "https://search.yahoo.com/search?p=migliore+carbonara+roma",
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving",
-              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio"
+              "https://www.canadianinsider.com/money-is-moving"
           ]
 
           os.makedirs('output', exist_ok=True)
@@ -173,6 +172,9 @@ jobs:
                   "unusual traffic from your computer network", "checking your browser", 
                   "prove your humanity", "captcha verification", "robot challenge screen",
                   "one moment, please...", "pardon our interruption",
+                  "you've been blocked by network security",
+                  "blocked by network security",
+                  "use your developer token",
                   # Indicatori specifici per bloccare gli avvisi testuali di Jina Reader
                   "warning: this page maybe requiring captcha",
                   "please make sure you are authorized to access this page",
@@ -417,7 +419,6 @@ jobs:
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
                           f"--fingerprint={random.randint(100000, 999999)}",
-                          "--fingerprint-storage-quota=5000",
                           "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"  # Cartella dei font reali caricata sul runner Linux
                       ]
                   )
@@ -440,11 +441,21 @@ jobs:
                           page = browser.new_page()
                           
                           try:
-                              page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                              # Caricamento completo con sincronizzazione dei tempi per assestare JS
+                              page.goto(url, wait_until="load", timeout=35000)
                               try:
-                                  page.wait_for_load_state("networkidle", timeout=8000)
+                                  page.wait_for_load_state("networkidle", timeout=12000)
                               except Exception:
                                   pass
+                              
+                              # Tempo di attesa esecuzione JS (Bypass indicatore enable javascript)
+                              time.sleep(6.0)
+                              
+                              # Scorrimento Lazy Load simulato
+                              page.keyboard.press("PageDown")
+                              time.sleep(1.0)
+                              page.keyboard.press("PageDown")
+                              time.sleep(2.0)
                           except Exception:
                               pass
                                       
@@ -478,11 +489,18 @@ jobs:
                                   page = fallback_context.new_page()
                                   
                                   try:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                                      page.goto(url, wait_until="load", timeout=35000)
                                       try:
-                                          page.wait_for_load_state("networkidle", timeout=6000)
+                                          page.wait_for_load_state("networkidle", timeout=12000)
                                       except Exception:
                                           pass
+                                      
+                                      time.sleep(6.0)
+                                      
+                                      page.keyboard.press("PageDown")
+                                      time.sleep(1.0)
+                                      page.keyboard.press("PageDown")
+                                      time.sleep(2.0)
                                   except Exception:
                                       pass
                                               
@@ -609,10 +627,10 @@ jobs:
                       for item in failed_phase2a:
                           jobs_queue.put(item)
                           
-                      cb_threads = []
-                      num_cb_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
+                      cf_threads = []
+                      num_cf_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
                       
-                      for w_id in range(1, num_cb_workers + 1):
+                      for w_id in range(1, num_cf_workers + 1):
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
                           t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
                           t.start()
