@@ -142,7 +142,7 @@ jobs:
                               elif key == "endpoint":
                                   endpoint = val
                                   
-              # Integrazione preventiva di server DNS globali alternativi instradati
+              # Integrazione preventiva di server DNS globali alternativi instradati nel tunnel
               for backup_dns in ["8.8.8.8", "9.9.9.9"]:
                   if backup_dns not in dns_servers:
                       dns_servers.append(backup_dns)
@@ -163,7 +163,6 @@ jobs:
               text_only = ' '.join(text_only.split())
               
               char_count = len(text_only)
-              # Soglia abbassata a 200 per tollerare pagine di informazioni stradali/direzioni reali ma brevi
               if char_count < 200:
                   return False, f"Testo utile nel markdown insufficiente ({char_count} caratteri)"
                   
@@ -174,7 +173,11 @@ jobs:
                   "are you a robot", "please wait for verification", "we've detected unusual activity",
                   "unusual traffic from your computer network", "checking your browser", 
                   "prove your humanity", "captcha verification", "robot challenge screen",
-                  "one moment, please...", "pardon our interruption"
+                  "one moment, please...", "pardon our interruption",
+                  # Indicatori specifici per intercettare ed escludere i finti messaggi di successo di Jina Reader
+                  "warning: this page maybe requiring captcha",
+                  "please make sure you are authorized to access this page",
+                  "this page maybe requiring captcha, please make sure you are authorized"
               ]
               for ind in blocking_indicators:
                   if ind in low_text:
@@ -399,6 +402,8 @@ jobs:
                       humanize=True, 
                       i_know_what_im_doing=True
                   ) as browser:
+                      # Creazione contesto disabilitando controlli SSL sui canali di instradamento
+                      context = browser.new_context(ignore_https_errors=True)
                       print(f"  [🦊 Worker CF {worker_id}] Browser pronto!", flush=True)
                       
                       while True:
@@ -415,14 +420,12 @@ jobs:
                           
                           # --- TENTATIVO 1: Tramite IP WARP assegnato ---
                           try:
-                              context = browser.new_context(ignore_https_errors=True)
                               page = context.new_page()
-                              page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
+                              # Rimosso il blocco di fogli di stile, immagini e font per consentire il superamento visivo dei WAF
                               
-                              # Navigazione robusta con attesa dell'evento load e buffer di sicurezza per SPA/idratazione
                               try:
-                                  page.goto(url, wait_until="load", timeout=15000)
-                                  page.wait_for_timeout(2500)
+                                  page.goto(url, wait_until="load", timeout=20000)
+                                  page.wait_for_timeout(3000)
                               except Exception:
                                   try:
                                       page.wait_for_timeout(2000)
@@ -430,8 +433,8 @@ jobs:
                                       pass
                                       
                               html_content = page.content()
-                              
                               markdown_content = md(html_content, heading_style="ATX")
+                              
                               is_valid, reason = validate_markdown(markdown_content, url)
                               if is_valid:
                                   with open(filepath, 'w', encoding='utf-8') as f:
@@ -440,7 +443,7 @@ jobs:
                                   success = True
                               else:
                                   error_msg = f"Validazione fallita su WARP: {reason}"
-                              context.close()
+                              page.close()
                           except Exception as e:
                               error_msg = f"Errore su WARP: {e}"
                               
@@ -457,11 +460,10 @@ jobs:
                                           ignore_https_errors=True
                                       )
                                       page = fallback_context.new_page()
-                                      page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
                                       
                                       try:
-                                          page.goto(url, wait_until="load", timeout=15000)
-                                          page.wait_for_timeout(2500)
+                                          page.goto(url, wait_until="load", timeout=20000)
+                                          page.wait_for_timeout(3000)
                                       except Exception:
                                           try:
                                               page.wait_for_timeout(2000)
@@ -469,8 +471,8 @@ jobs:
                                               pass
                                               
                                       html_content = page.content()
-                                      
                                       markdown_content = md(html_content, heading_style="ATX")
+                                      
                                       is_valid, reason = validate_markdown(markdown_content, url)
                                       fallback_context.close()
                                       
@@ -489,11 +491,12 @@ jobs:
                                   print(f"[❌ CAMOUFOX ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                                   
                           jobs_queue.task_done()
+                      context.close()
               except Exception as e:
                   print(f"  [❌ CAMOUFOX Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
 
           if __name__ == '__main__':
-              # DOWNLOAD LISTA PROXY (Sorgenti multiple per massimizzare la freschezza e disponibilità dei SOCKS5)
+              # DOWNLOAD LISTA PROXY (Sorgenti multiple per massimizzare la freschezza e disponibilità dei SOCKS5 globali)
               print("==========================================", flush=True)
               print("🔄 Scaricamento liste proxy candidati...", flush=True)
               proxy_urls = [
@@ -515,7 +518,7 @@ jobs:
                       
               raw_proxies = list(raw_proxies_set)
               random.shuffle(raw_proxies)
-              print(f"✅ Recuperati {len(raw_proxies)} proxy candidati.", flush=True)
+              print(f"✅ Recuperati {len(raw_proxies)} proxy candidati totali.", flush=True)
 
               # AVVIO DELLO SCANNER (Trova fino a 100 proxy sicuri in parallelo)
               print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 100 funzionanti)...", flush=True)
