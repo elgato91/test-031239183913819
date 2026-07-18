@@ -134,7 +134,7 @@ jobs:
                                   addresses.extend(parts)
                               elif key == "dns":
                                   parts = [p.strip() for p in val.split(",") if p.strip()]
-                                  dns_servers.extend(parts)
+                                  dns_servers.append(parts)
                               elif key == "publickey":
                                   public_key = val
                               elif key == "endpoint":
@@ -406,12 +406,19 @@ jobs:
               print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
               
               try:
-                  # Avvio CloakBrowser nativo sul display virtuale Xvfb
+                  # Configurazione avanzata dei parametri stealth di avvio (allineata a CloakBrowser)
                   browser = launch(
                       proxy=f"socks5://{warp_proxy_addr}",
                       headless=False,
                       geoip=True, 
-                      humanize=True
+                      humanize=True,
+                      args=[
+                          "--no-sandbox",
+                          "--disable-dev-shm-usage",
+                          "--disable-http2",  # Indispensabile per evitare controlli TLS/JA3/HTTP2 fingerprinting su Google e Yelp
+                          f"--fingerprint={random.randint(100000, 999999)}",
+                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"  # Cartella dei font reali caricata sul runner Linux
+                      ]
                   )
                   print(f"  [🕵️ Worker CB {worker_id}] Browser pronto!", flush=True)
                   
@@ -608,9 +615,9 @@ jobs:
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
                           t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
                           t.start()
-                          cb_threads.append(t)
+                          cf_threads.append(t)
                           
-                      for t in cb_threads:
+                      for t in cf_threads:
                           t.join()
                   else:
                       print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
@@ -630,11 +637,3 @@ jobs:
           EOF
           export PYTHONUNBUFFERED=1
           python extract.py
-
-      # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
-      - name: Carica i file estratti come Artefatto ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: jina-markdown-outputs
-          path: output/
-          retention-days: 7
