@@ -1,12 +1,20 @@
-name: Test RAG Challenge 2026 Università di Roma Corso di Computer Science
+name: Extract Markdown (Fully Proxied Hybrid Pipeline + ZIP)
 
-on: 
+on:
   workflow_dispatch:
 
 jobs:
-  machine2_cdp_insocket:
+  extract-and-save:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Installazione Font di Sistema
         run: |
@@ -21,51 +29,55 @@ jobs:
           cp /usr/share/fonts/truetype/msttcorefonts/*.TTF ~/.local/share/fonts/windows/ || true
           fc-cache -f -v
 
-      - name: Installazione Dipendenze Scraper
+      - name: Installa dipendenze sistema, Python, CloakBrowser e Utility WARP
         run: |
-          pip install "cloakbrowser[geoip]" beautifulsoup4 playwright requests "requests[socks]" curl-cffi
-          playwright install-deps chromium
+          # Aggiorna pacchetti di sistema
+          sudo apt-get update
+          
+          # Installa wgcf (Utility per la registrazione degli account WARP)
+          sudo curl -fsSL https://github.com/ViRb3/wgcf/releases/download/v2.2.29/wgcf_2.2.29_linux_amd64 -o /usr/local/bin/wgcf
+          sudo chmod +x /usr/local/bin/wgcf
+          
+          # Installa wireproxy (Proxy SOCKS5 leggero basato su WireGuard)
+          curl -fsSL https://github.com/pufferffish/wireproxy/releases/download/v1.0.9/wireproxy_linux_amd64.tar.gz -o wireproxy.tar.gz
+          tar -xzf wireproxy.tar.gz
+          sudo mv wireproxy /usr/local/bin/wireproxy
+          sudo chmod +x /usr/local/bin/wireproxy
+          
+          # Installa le dipendenze Python e CloakBrowser
+          python -m pip install --upgrade pip
+          pip install requests pysocks curl-cffi markdownify beautifulsoup4 playwright "cloakbrowser[geoip]"
+          python -m playwright install-deps chromium
+          python -m cloakbrowser install
 
-      - name: Avvio Xvfb (Virtual Display Headful)
+      - name: Avvio Xvfb (Virtual Display Headful per CloakBrowser)
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: Pre-inizializzazione Cache CloakBrowser
+      - name: Pipeline 100% Proxata con Validazione Antibot e Tunneling WARP
         run: |
-          python -m cloakbrowser install
+          cat << 'EOF' > extract.py
+          import os
+          import re
+          import requests
+          import random
+          import time
+          import concurrent.futures
+          import threading
+          import subprocess
+          import sys
+          import textwrap
+          import asyncio
+          from queue import Queue, Empty
+          from urllib.parse import urlparse, parse_qs
+          from curl_cffi import requests as requests_cffi
+          from markdownify import markdownify as md
+          from cloakbrowser import launch_persistent_context_async
+          from bs4 import BeautifulSoup
 
-      - name: Setup Container WARP (IPv6)
-        run: |
-          docker pull ghcr.io/kingcc/warproxy:latest
-
-          for i in {1..6}; do
-            PORT=$((40000 + i))
-            echo "Avvio container warproxy-$i sulla porta $PORT..."
-            docker run --name warproxy-$i \
-              --network host \
-              -e SOCKS5_PORT=$PORT \
-              -e DNS=2606:4700:4700::1111,2606:4700:4700::1001 \
-              -e VERBOSE=true \
-              -d ghcr.io/kingcc/warproxy:latest
-            sleep 0.5
-          done
-          
-          echo "Attesa stabilizzazione tunnel WARP..."
-          sleep 6
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 1
-        run: |
-          cat << 'EOF' > m2_step1_setup.py
-          import json
-          TARGETS = [
-              "https://tls.browserleaks.com/json",
-              "https://bot.sannysoft.com/",
-              "https://abrahamjuliot.github.io/creepjs/",
-              "https://pixelscan.net/",
-              "https://bot.incolumitas.com/",
-              "https://www.deviceinfo.me/",
-              "https://www.facebook.com/groups/expatsinparaguay/",
+          URLS_TO_TEST = [
+              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
@@ -82,357 +94,679 @@ jobs:
               "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
               "https://www.canadianinsider.com/money-is-moving"
           ]
-          
-          # Suddivisione matematica statica (Chunking) per performance ottimali
-          for i in range(1, 7):
-              chunk = TARGETS[i-1::6]
-              with open(f"/tmp/step1_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-          print("Code distribuite Step 1 generate con successo.")
-          EOF
-          python -u m2_step1_setup.py
 
-      - name: Creazione Script Python - STEP 1 (Veloce curl-cffi)
-        run: |
-          cat << 'EOF' > m2_step1.py
-          import time
-          import sys
-          import random
-          import os
-          import json
-          from bs4 import BeautifulSoup
-          from curl_cffi import requests
+          os.makedirs('output', exist_ok=True)
+          total_urls = len(URLS_TO_TEST)
 
-          DIAGNOSTIC_SITES = ["ipify", "browserleaks", "sannysoft", "creepjs", "pixelscan", "incolumitas", "deviceinfo"]
+          # Scanner variabili
+          proxy_queue = Queue()
+          stop_scanner = threading.Event()
+          working_count = 0
+          working_lock = threading.Lock()
+          max_working = 100
+          working_proxies = []
 
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          ACTIVE_PORT = 40000 + node_id
-
-          def verify_proxy_active(port, max_retries=5, delay=5):
-              test_session = requests.Session(impersonate="chrome120")
-              test_session.proxies = {"http": f"socks5h://127.0.0.1:{port}", "https": f"socks5h://127.0.0.1:{port}"}
-              for _ in range(max_retries):
-                  try:
-                      resp = test_session.get("https://api6.ipify.org?format=json", timeout=6)
-                      if resp.status_code == 200: return True
-                  except: pass
-                  time.sleep(delay)
-              return False
-
-          def validate_html(html, url, status_code):
-              if status_code >= 400: return False, f"Blocco HTTP {status_code}"
-              if not html or len(html.strip()) < 300: return False, "HTML vuoto"
-              if any(site in url for site in DIAGNOSTIC_SITES): return True, ""
-              
-              low_html = html.lower()
-              blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", 
-                  "just a moment", "security verification", "please enable js", "enable javascript",
-                  "are you a robot", "please wait for verification", "we've detected unusual activity",
-                  "if you are not redirected", "unusual traffic from your computer network",
-                  "checking your browser", "prove your humanity", "captcha verification", 
-                  "please enter in the characters you see below", "access to this page is forbidden",
-                  "error 1020", "you have been blocked", "pardon our interruption",
-                  "se non vieni reindirizzato", "se hai problemi ad accedere", 
-                  "robot challenge screen", "ci siamo quasi", "verifica di sicurezza"
-              ]
-              
-              for ind in blocking_indicators:
-                  if ind in low_html: return False, f"WAF/Captcha rilevato: {ind}"
-              return True, ""
-
-          if not verify_proxy_active(ACTIVE_PORT): sys.exit(0)
-
-          queue_file = f"/tmp/step1_queue_{node_id}.json"
-          if not os.path.exists(queue_file): sys.exit(0)
-          
-          with open(queue_file, "r") as f:
-              targets = json.load(f)
-
-          results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 1 (curl-cffi)\n{'#'*60}\n"
-          failed_targets = []
-          
-          session = requests.Session(impersonate="chrome120")
-          session.proxies = {"http": f"socks5h://127.0.0.1:{ACTIVE_PORT}", "https": f"socks5h://127.0.0.1:{ACTIVE_PORT}"}
-          session.headers.update({
-              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-          })
-
-          for url in targets:
-              print(f"[NODO {node_id}] [STEP 1] Richiesta: {url}", flush=True)
-              try:
-                  resp = session.get(url, timeout=12)
-                  is_ok, err_msg = validate_html(resp.text, url, resp.status_code)
-                  
-                  if is_ok:
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      if any(site in url for site in DIAGNOSTIC_SITES):
-                          text = soup.get_text(separator=' ', strip=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO:\n{text}\n"
-                      print(f"[NODO {node_id}] -> Successo Rapido!", flush=True)
-                  else:
-                      print(f"[NODO {node_id}] -> Bloccato, passo allo Step 2: {err_msg}", flush=True)
-                      failed_targets.append(url)
-              except Exception as e:
-                  print(f"[NODO {node_id}] -> Errore rete. Passo allo Step 2.", flush=True)
-                  failed_targets.append(url)
-              
-              time.sleep(random.uniform(1.0, 2.0))
-
-          with open(f"output_node_{node_id}_step1.txt", "w", encoding="utf-8") as f: f.write(results)
-          with open(f"failed_node_{node_id}.json", "w", encoding="utf-8") as f: json.dump(failed_targets, f)
-          EOF
-
-      - name: Esecuzione Scraping Parallelo - STEP 1
-        run: |
-          echo 'Avvio processi paralleli per STEP 1 (Velocità Pura)...'
-          touch node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log
-          tail -q -f node1_step1.log node2_step1.log node3_step1.log node4_step1.log node5_step1.log node6_step1.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step1.py $i > node${i}_step1.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-
-      - name: Refresh IP Container per lo STEP 2
-        run: |
-          echo 'Riavvio dei container per pulire la sessione WARP per lo Step 2...'
-          docker restart warproxy-1 warproxy-2 warproxy-3 warproxy-4 warproxy-5 warproxy-6
-          sleep 6
-
-      - name: Inizializzazione Code DISTRIBUITE - STEP 2
-        run: |
-          cat << 'EOF' > m2_step2_setup.py
-          import json
-          import os
-
-          merged_failed = []
-          for i in range(1, 7):
-              filename = f"failed_node_{i}.json"
-              if os.path.exists(filename):
-                  with open(filename, "r", encoding="utf-8") as f:
-                      try: merged_failed.extend(json.load(f))
-                      except Exception: pass
-          
-          unique_failed = list(dict.fromkeys(merged_failed))
-          
-          for i in range(1, 7):
-              chunk = unique_failed[i-1::6]
-              with open(f"/tmp/step2_queue_{i}.json", "w") as f:
-                  json.dump(chunk, f)
-                  
-          print(f"Code Step 2 distribuite con {len(unique_failed)} target da recuperare con CloakBrowser.")
-          EOF
-          python -u m2_step2_setup.py
-
-      - name: Creazione Script Python - STEP 2 (Async + CloakBrowser Ottimizzato - No CDP Noise)
-        run: |
-          cat << 'EOF' > m2_step2.py
-          import asyncio
-          import time
-          import sys
-          import random
-          import os
-          import json
-          from urllib.parse import urlparse, parse_qs
-          from cloakbrowser import launch_persistent_context_async
-          from bs4 import BeautifulSoup
-
-          if len(sys.argv) < 2: sys.exit(1)
-          node_id = int(sys.argv[1])
-          INITIAL_PORT = 40000 + node_id
+          # Gestione WARP
+          warp_success_lock = threading.Lock()
+          active_warp_proxies = []
+          warp_processes = []
+          warp_counter = 0
+          stop_registration = threading.Event()
 
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
                   parsed = urlparse(url)
                   queries = parse_qs(parsed.query)
                   for param in ['q', 'query', 'p', 'find_desc']:
-                      if param in queries: return queries[param][0]
-              except: pass
+                      if param in queries:
+                          return queries[param][0]
+              except Exception:
+                  pass
               return default
 
-          async def main():
-              queue_file = f"/tmp/step2_queue_{node_id}.json"
-              if not os.path.exists(queue_file): return
+          def parse_wgcf_profile(filepath):
+              private_key = None
+              addresses = []
+              dns_servers = []
+              public_key = None
+              endpoint = "engage.cloudflareclient.com:2408"
               
-              with open(queue_file, "r") as f: targets = json.load(f)
-              if not targets:
-                  with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f: f.write("")
-                  return
-
-              home_dir = os.path.expanduser("~")
-              profile_dir = os.path.join(home_dir, f".cloak_profiles/node_{node_id}_step2")
-              windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
-              
-              # Profilo con noise attivo di default e path per font corretti
-              base_args = [
-                  "--no-sandbox",
-                  "--disable-dev-shm-usage",
-                  f"--fingerprint={random.randint(100000, 999999)}",
-                  f"--fingerprint-fonts-dir={windows_fonts_dir}"
-              ]
-
-              print(f"[NODO {node_id}] Avvio singola sessione Persistente (Warmup + Scraping)...", flush=True)
-              try:
-                  # Avvio unificato. geoip=True gestirà dinamicamente locale e timezone in base al proxy WARP.
-                  context = await launch_persistent_context_async(
-                      profile_dir,
-                      headless=False,
-                      humanize=True,
-                      human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
-                      proxy=f"socks5://127.0.0.1:{INITIAL_PORT}",
-                      geoip=True,
-                      viewport={"width": 1920, "height": 1080},
-                      args=base_args
-                  )
-                  page = await context.new_page()
+              if os.path.exists(filepath):
+                  with open(filepath, "r") as f:
+                      for line in f:
+                          line = line.strip()
+                          if not line or line.startswith("#"):
+                              continue
+                          if "=" in line:
+                              key, val = line.split("=", 1)
+                              key = key.strip().lower()
+                              val = val.strip()
+                              if key == "privatekey":
+                                  private_key = val
+                              elif key == "address":
+                                  parts = [p.strip() for p in val.split(",") if p.strip()]
+                                  addresses.extend(parts)
+                              elif key == "dns":
+                                  parts = [p.strip() for p in val.split(",") if p.strip()]
+                                  dns_servers.extend(parts)
+                              elif key == "publickey":
+                                  public_key = val
+                              elif key == "endpoint":
+                                  endpoint = val
+                                  
+              # Risoluzione Dual-Stack preferendo DNS IPv6 per WARP
+              dns_servers = ["2606:4700:4700::1111", "1.1.1.1", "2606:4700:4700::1001", "8.8.8.8"]
+                      
+              if not addresses:
+                  addresses = ["172.16.0.2/32", "fd00:53b:43::1/128"]
                   
-                  # WARMUP Integrato - Creazione di cronologia valida
-                  await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
-                  await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
-                  await asyncio.sleep(2)
+              return private_key, addresses, dns_servers, public_key, endpoint
 
-              except Exception as e:
-                  print(f"[NODO {node_id}] Errore critico avvio Browser: {e}")
+          def clean_html_and_to_markdown(html_content):
+              try:
+                  soup = BeautifulSoup(html_content, 'html.parser')
+                  for element in soup(["noscript", "script", "style", "iframe", "meta", "head"]):
+                      element.decompose()
+                  cleaned_html = str(soup)
+              except Exception:
+                  cleaned_html = html_content
+              return md(cleaned_html, heading_style="ATX")
+
+          def validate_markdown(markdown_text, url):
+              if not markdown_text:
+                  return False, "Markdown vuoto"
+                  
+              text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text)
+              text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only)
+              text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only)
+              text_only = ' '.join(text_only.split())
+              
+              char_count = len(text_only)
+              if char_count < 200:
+                  return False, f"Testo utile nel markdown insufficiente ({char_count} caratteri)"
+                  
+              low_text = markdown_text.lower()
+              blocking_indicators = [
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
+                  "just a moment", "security verification", "please enable js", "enable javascript",
+                  "are you a robot", "please wait for verification", "we've detected unusual activity",
+                  "unusual traffic from your computer network", "checking your browser", 
+                  "prove your humanity", "captcha verification", "robot challenge screen",
+                  "one moment, please...", "pardon our interruption",
+                  "you've been blocked by network security",
+                  "blocked by network security",
+                  "use your developer token",
+                  "warning: this page maybe requiring captcha",
+                  "please make sure you are authorized to access this page",
+                  "this page maybe requiring captcha",
+                  "the request could not be satisfied",
+                  "block access from your country",
+                  "generated by cloudfront",
+                  "under construction",
+                  "mindtrip is under construction",
+                  "problem loading page",
+                  "accept the risk and continue",
+                  "network security settings might be causing this",
+                  "accept the risk",
+                  "connection is untrusted",
+                  "one last step",
+                  "please solve the challenge below",
+                  "solve the challenge below to continue",
+                  "sending automated queries",
+                  "not allowed to access yelp",
+                  "yelp.com/captcha"
+              ]
+              for ind in blocking_indicators:
+                  if ind in low_text:
+                      return False, f"Rilevato blocco, captcha o errore nel testo: '{ind}'"
+                      
+              domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
+              if domain_match:
+                  domain = domain_match.group(1).lower().split('.')[0]
+                  words = text_only.lower().split()
+                  if len(words) > 0:
+                      domain_occurrences = sum(1 for w in words if domain in w)
+                      ratio = domain_occurrences / len(words)
+                      if ratio > 0.35 and len(words) < 100:
+                          return False, f"Contenuto fittizio: contiene quasi esclusivamente riferimenti al dominio '{domain}'"
+                          
+              return True, ""
+
+          def scan_worker(proxy_addr):
+              global working_count, working_proxies
+              if stop_scanner.is_set():
                   return
+              
+              proxies = {
+                  'http': f'socks5h://{proxy_addr}',
+                  'https': f'socks5h://{proxy_addr}'
+              }
+              try:
+                  test_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                  start_time = time.time()
+                  r = requests.get("https://r.jina.ai/https://example.com", headers=test_headers, proxies=proxies, timeout=3.0)
+                  latency = time.time() - start_time
+                  if r.status_code == 200 and "example" in r.text.lower():
+                      with working_lock:
+                          if len(working_proxies) < max_working and not stop_scanner.is_set():
+                              working_proxies.append((proxy_addr, latency))
+                              working_count = len(working_proxies)
+                              proxy_queue.put(proxy_addr)
+                              print(f"  [+] Proxy valido: {proxy_addr} | Latenza: {latency:.2f}s ({working_count}/{max_working})", flush=True)
+                              if working_count >= max_working:
+                                  stop_scanner.set()
+              except Exception:
+                  pass
 
-              results = f"\n{'#'*60}\nREPORT NODO {node_id} - STEP 2 (Fallback)\n{'#'*60}\n"
+          def register_single_warp(proxy_addr):
+              global warp_counter
+              if stop_registration.is_set():
+                  return
+                  
+              with warp_success_lock:
+                  if len(active_warp_proxies) >= 20:
+                      stop_registration.set()
+                      return
+                  current_idx = warp_counter
+                  warp_counter += 1
+                  
+              local_port = 20001 + current_idx
+              dir_name = f"warp_{current_idx}"
+              os.makedirs(dir_name, exist_ok=True)
+              
+              env = os.environ.copy()
+              env["HTTP_PROXY"] = f"socks5h://{proxy_addr}"
+              env["HTTPS_PROXY"] = f"socks5h://{proxy_addr}"
+              env["ALL_PROXY"] = f"socks5h://{proxy_addr}"
+              
+              try:
+                  # 1. wgcf register
+                  reg_res = subprocess.run(
+                      ["wgcf", "register", "--accept-tos"],
+                      env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8
+                  )
+                  if reg_res.returncode != 0 or stop_registration.is_set():
+                      return
+                      
+                  # 2. wgcf generate
+                  gen_res = subprocess.run(
+                      ["wgcf", "generate"],
+                      env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8
+                  )
+                  if gen_res.returncode != 0 or stop_registration.is_set():
+                      return
+                      
+                  # 3. Estrazione dinamica e totale dei dati dal profilo wgcf
+                  profile_path = os.path.join(dir_name, "wgcf-profile.conf")
+                  private_key, addresses, dns_servers, public_key, endpoint = parse_wgcf_profile(profile_path)
+                  
+                  if not private_key or not public_key or stop_registration.is_set():
+                      return
+                      
+                  # 4. Generazione configurazione allineata di wireproxy
+                  address_lines = "\n".join([f"Address = {addr}" for addr in addresses])
+                  dns_lines = f"DNS = {', '.join(dns_servers)}"
+                  
+                  wp_config_path = os.path.join(dir_name, "wireproxy.conf")
+                  wp_config_content = textwrap.dedent(f"""\
+                      [Interface]
+                      PrivateKey = {private_key}
+                      {address_lines}
+                      {dns_lines}
+                      MTU = 1280
 
-              for url in targets:
-                  print(f"[NODO {node_id}] Recupero Avanzato: {url}", flush=True)
+                      [Peer]
+                      PublicKey = {public_key}
+                      Endpoint = {endpoint}
+                      AllowedIPs = 0.0.0.0/0
+                      AllowedIPs = ::/0
+
+                      [Socks5]
+                      BindAddress = 127.0.0.1:{local_port}
+                  """)
+                  with open(wp_config_path, "w") as f:
+                      f.write(wp_config_content)
+                      
+                  if stop_registration.is_set():
+                      return
+
+                  # 5. Avvio wireproxy in background
+                  proc = subprocess.Popen(
+                      ["wireproxy", "-c", "wireproxy.conf"],
+                      cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                  )
+                  
+                  # Test rapido di funzionamento del proxy locale WARP
+                  time.sleep(1.0)
+                  test_proxies = {
+                      'http': f'socks5h://127.0.0.1:{local_port}',
+                      'https': f'socks5h://127.0.0.1:{local_port}'
+                  }
                   try:
+                      test_r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=test_proxies, timeout=4.0)
+                      if "warp=on" in test_r.text:
+                          with warp_success_lock:
+                              if len(active_warp_proxies) < 20 and not stop_registration.is_set():
+                                  active_warp_proxies.append(f"127.0.0.1:{local_port}")
+                                  warp_processes.append(proc)
+                                  print(f"  [✅ WARP PRONTO] Istanza {len(active_warp_proxies)} avviata su 127.0.0.1:{local_port} (tramite proxy {proxy_addr})", flush=True)
+                                  if len(active_warp_proxies) >= 20:
+                                      stop_registration.set()
+                              else:
+                                  proc.terminate()
+                      else:
+                          proc.terminate()
+                  except Exception:
+                      proc.terminate()
+                      
+              except Exception:
+                  pass
+
+          def fetch_url_lightweight(item, proxies_list):
+              index, url = item
+              clean_name = re.sub(r'^https?://', '', url)
+              safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
+              filepath = os.path.join('output', f"{safe_filename}.md")
+              jina_url = f"https://r.jina.ai/{url}"
+              
+              if "bing.com" in url:
+                  return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
+
+              if "google.com" in url:
+                  return False, f"[⏭️ FORCED GOOGLE {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
+                  
+              if not proxies_list:
+                  return False, f"[⚠️ NO PROXY {index}/{total_urls}] {url}", (index, url, filepath)
+                  
+              max_light_attempts = 2
+              for attempt in range(1, max_light_attempts + 1):
+                  proxy_addr = random.choice(proxies_list)
+                  proxy_url = f"socks5h://{proxy_addr}"
+                  proxies = {
+                      'http': proxy_url,
+                      'https': proxy_url
+                  }
+                  
+                  time.sleep(random.uniform(0.1, 0.5))
+                  
+                  # 1. Tentativo curl-cffi stealth
+                  try:
+                      impersonate_target = "chrome120"
+                      headers_cffi = {
+                          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                          "accept-language": "en-US,en;q=0.9",
+                          "cache-control": "max-age=0",
+                          "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                          "sec-ch-ua-mobile": "?0",
+                          "sec-ch-ua-platform": '"Windows"',
+                          "sec-fetch-dest": "document",
+                          "sec-fetch-mode": "navigate",
+                          "sec-fetch-site": "none",
+                          "sec-fetch-user": "?1",
+                          "upgrade-insecure-requests": "1",
+                          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                      }
+                      response = requests_cffi.get(
+                          url,
+                          headers=headers_cffi,
+                          proxies=proxies,
+                          impersonate=impersonate_target,
+                          timeout=8
+                      )
+                      if response.status_code == 200:
+                          markdown_content = clean_html_and_to_markdown(response.text)
+                          is_valid, reason = validate_markdown(markdown_content, url)
+                          if is_valid:
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              return True, f"[✅ STEALTH {index}] {url} -> Scaricato via curl-cffi (Proxy: {proxy_addr})", None
+                  except Exception:
+                      pass
+
+                  # 2. Fallback Jina AI
+                  try:
+                      jina_headers = {
+                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                          'X-Return-Format': 'markdown'
+                      }
+                      jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=10)
+                      if jina_response.status_code == 200:
+                          markdown_content = jina_response.text
+                          is_valid, reason = validate_markdown(markdown_content, url)
+                          if is_valid:
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              return True, f"[✅ JINA {index}] {url} -> Salvato via Jina (Proxy: {proxy_addr})", None
+                  except Exception:
+                      pass
+
+              return False, f"[⚠️ FAIL {index}] {url} -> Richiede step successivo.", (index, url, filepath)
+
+          def cloakbrowser_worker_thread(worker_id, warp_proxy_addr, active_warp_proxies, public_proxies, jobs_queue):
+              print(f"  [🕵️ Worker CB {worker_id}] Avvio thread CloakBrowser...", flush=True)
+              
+              async def worker_async():
+                  home_dir = os.path.expanduser("~")
+                  profile_dir = os.path.join(home_dir, f".cloak_profiles/worker_{worker_id}")
+                  windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
+                  
+                  # Configurazione del fingerprint coerente e allineata per emulare sessione persistente
+                  base_args = [
+                      "--no-sandbox",
+                      "--disable-dev-shm-usage",
+                      f"--fingerprint={random.randint(100000, 999999)}",
+                      f"--fingerprint-fonts-dir={windows_fonts_dir}"
+                  ]
+                  
+                  print(f"  [🕵️ Worker CB {worker_id}] Avvio sessione persistente con proxy {warp_proxy_addr}...", flush=True)
+                  try:
+                      # Usiamo launch_persistent_context_async per consolidare cookie, cache e reputazione
+                      context = await launch_persistent_context_async(
+                          profile_dir,
+                          headless=False,
+                          humanize=True,
+                          human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
+                          proxy=f"socks5://{warp_proxy_addr}",
+                          geoip=True,
+                          viewport={"width": 1920, "height": 1080},
+                          args=base_args
+                      )
+                      page = await context.new_page()
+                      
+                      # Warmup integrato identico al codice del test per generare una cronologia credibile
+                      print(f"  [🕵️ Worker CB {worker_id}] Esecuzione warmup sul proxy...", flush=True)
+                      try:
+                          await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
+                          await asyncio.sleep(2)
+                          await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
+                          await asyncio.sleep(2)
+                      except Exception as e:
+                          print(f"  [🕵️ Worker CB {worker_id}] Warmup warning: {e}", flush=True)
+                          
+                  except Exception as e:
+                      print(f"  [❌ Worker CB {worker_id}] Errore critico di avvio browser: {e}", flush=True)
+                      return
+                  
+                  while True:
+                      try:
+                          item = jobs_queue.get_nowait()
+                      except Empty:
+                          break
+                      
+                      index, url, filepath = item
+                      print(f"  [🕵️ Worker CB {worker_id}] Scaricamento: {url}", flush=True)
+                      
+                      success = False
+                      error_msg = ""
                       query_to_search = get_query_from_url(url)
                       
-                      # RICERCHE NATIVE con `.fill()` nativo di cloakbrowser (evita lo shadowban)
-                      if "bing.com" in url:
-                          await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.5, 4.0))
+                      # --- TENTATIVO 1: Tramite IP WARP assegnato ---
+                      try:
+                          if "bing.com" in url:
+                              await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.5, 4.0))
+                              try:
+                                  search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                  await search_box.fill(query_to_search) 
+                                  await page.keyboard.press("Enter")
+                              except Exception:
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                          elif "startpage.com" in url:
+                              await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                              await asyncio.sleep(random.uniform(2.0, 3.5))
+                              try:
+                                  search_box = page.locator("input#q").first
+                                  await search_box.fill(query_to_search)
+                                  await page.keyboard.press("Enter")
+                              except Exception:
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                          else:
+                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
                           try:
-                              search_box = page.locator("textarea[name='q'], input[name='q']").first
-                              await search_box.fill(query_to_search) 
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              await page.wait_for_load_state("networkidle", timeout=12000)
+                          except Exception:
+                              pass
+                          
+                          await asyncio.sleep(6.0)
+                          
+                          try:
+                              await page.keyboard.press("PageDown")
+                              await asyncio.sleep(1.0)
+                              await page.keyboard.press("PageDown")
+                              await asyncio.sleep(2.0)
+                          except Exception:
+                              pass
+                                      
+                          html_content = await page.content()
+                          markdown_content = clean_html_and_to_markdown(html_content)
+                          
+                          is_valid, reason = validate_markdown(markdown_content, url)
+                          if is_valid:
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              print(f"[✅ CLOAKBROWSER SUCCESS {index}] {url} -> Estratto con successo via WARP!", flush=True)
+                              success = True
+                          else:
+                              error_msg = f"Validazione fallita su WARP: {reason}"
+                      except Exception as e:
+                          error_msg = f"Errore su WARP: {e}"
+                          
+                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici veloci ---
+                      if not success and public_proxies:
+                          fast_public_proxies = public_proxies[:30]
+                          fallback_attempts = min(5, len(fast_public_proxies))
+                          for f_idx in range(fallback_attempts):
+                              fallback_proxy = random.choice(fast_public_proxies)
+                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy pubblico rapido: {fallback_proxy}...", flush=True)
                               
-                      elif "startpage.com" in url:
-                          await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.0, 3.5))
-                          try:
-                              search_box = page.locator("input#q").first
-                              await search_box.fill(query_to_search)
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
-                      elif "html.duckduckgo.com" in url:
-                          await page.goto("https://html.duckduckgo.com/", wait_until="domcontentloaded", timeout=35000)
-                          await asyncio.sleep(random.uniform(2.0, 3.5))
-                          try:
-                              search_box = page.locator("input[name=q]").first
-                              await search_box.fill(query_to_search)
-                              await page.keyboard.press("Enter")
-                          except: await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
-                      else:
-                          await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                      
-                      # --- SILENZIO RADIO ---
-                      # Zero esecuzioni JS per bypassare l'anti-bot
-                      try: await page.wait_for_load_state("networkidle", timeout=12000)
-                      except: pass
-                          
-                      await asyncio.sleep(6) 
-                      
-                      # Scorrimento Lazy Load NATIVO (simula tastiera hardware)
-                      await page.keyboard.press("PageDown")
-                      await asyncio.sleep(1)
-                      await page.keyboard.press("PageDown")
-                      await asyncio.sleep(2)
-                      
-                      # Scarica l'HTML in memoria una singola volta
-                      raw_html = await page.content()
-                      soup = BeautifulSoup(raw_html, 'html.parser')
-                      text = soup.get_text(separator=' ', strip=True)[:5000]
-                      text_lower = text.lower()
-                      
-                      # Rilevamento passivo WAF/Captcha
-                      blocking_indicators = [
-                          "just a moment", "are you a robot", "prove your humanity",
-                          "captcha verification", "please enter in the characters you see below",
-                          "access is forbidden", "access to this page is forbidden", "challenge-platform",
-                          "we've detected unusual activity"
-                      ]
-                      is_blocked = any(b in text_lower for b in blocking_indicators)
-                      
-                      if len(text) > 150 and not is_blocked:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nTESTO ESTRATTO:\n{text}\n"
-                          print(f"[NODO {node_id}] -> Recuperato con Successo!", flush=True)
-                      else:
-                          results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nFALLITO (Blocco WAF/Captcha)\n"
-                          print(f"[NODO {node_id}] -> Fallito.", flush=True)
-
-                  except Exception as e:
-                      print(f"[NODO {node_id}] -> Errore esecuzione: {e}", flush=True)
-                      results += f"\n{'='*50}\nTARGET: {url}\n{'='*50}\nERRORE: {e}\n"
+                              try:
+                                  fallback_context = await browser.new_context(
+                                      proxy={"server": f"socks5://{fallback_proxy}"},
+                                      ignore_https_errors=True
+                                  )
+                                  f_page = await fallback_context.new_page()
+                                  
+                                  if "bing.com" in url:
+                                      await f_page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                                      await asyncio.sleep(random.uniform(2.5, 4.0))
+                                      try:
+                                          search_box = f_page.locator("textarea[name='q'], input[name='q']").first
+                                          await search_box.fill(query_to_search) 
+                                          await f_page.keyboard.press("Enter")
+                                      except Exception:
+                                          await f_page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          
+                                  elif "startpage.com" in url:
+                                      await f_page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                                      await asyncio.sleep(random.uniform(2.0, 3.5))
+                                      try:
+                                          search_box = f_page.locator("input#q").first
+                                          await search_box.fill(query_to_search)
+                                          await f_page.keyboard.press("Enter")
+                                      except Exception:
+                                          await f_page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          
+                                  else:
+                                      await f_page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                                  try:
+                                      await f_page.wait_for_load_state("networkidle", timeout=12000)
+                                  except Exception:
+                                      pass
+                                  
+                                  await asyncio.sleep(6.0)
+                                  
+                                  try:
+                                      await f_page.keyboard.press("PageDown")
+                                      await asyncio.sleep(1.0)
+                                      await f_page.keyboard.press("PageDown")
+                                      await asyncio.sleep(2.0)
+                                  except Exception:
+                                      pass
+                                              
+                                  html_content = await f_page.content()
+                                  markdown_content = clean_html_and_to_markdown(html_content)
+                                  
+                                  is_valid, reason = validate_markdown(markdown_content, url)
+                                  await fallback_context.close()
+                                  
+                                  if is_valid:
+                                      with open(filepath, 'w', encoding='utf-8') as f:
+                                          f.write(markdown_content)
+                                      print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
+                                      success = True
+                                      break
+                                  else:
+                                      error_msg = f"Validazione fallita su fallback: {reason}"
+                              except Exception as fe:
+                                  error_msg = f"Errore su fallback: {fe}"
+                                  
+                          if not success:
+                              print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
+                              
+                      jobs_queue.task_done()
                   
-                  await asyncio.sleep(random.uniform(4.0, 7.0))
+                  try:
+                      await context.close()
+                  except Exception:
+                      pass
 
-              try: await context.close()
-              except: pass
+              asyncio.run(worker_async())
 
-              with open(f"output_node_{node_id}_step2.txt", "w", encoding="utf-8") as f:
-                  f.write(results)
+          if __name__ == '__main__':
+              # DOWNLOAD LISTA PROXY
+              print("==========================================", flush=True)
+              print("🔄 Scaricamento liste proxy candidati...", flush=True)
+              proxy_urls = [
+                  "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                  "https://raw.githubusercontent.com/Hookzof/socks5_list/master/socks5.txt",
+                  "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"
+              ]
+              raw_proxies_set = set()
+              for p_url in proxy_urls:
+                  try:
+                      r = requests.get(p_url, timeout=10)
+                      if r.status_code == 200:
+                          for line in r.text.split('\n'):
+                              line = line.strip()
+                              if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
+                                  raw_proxies_set.add(line)
+                  except Exception:
+                      pass
+                      
+              raw_proxies = list(raw_proxies_set)
+              random.shuffle(raw_proxies)
+              print(f"✅ Recuperati {len(raw_proxies)} proxy candidati totali.", flush=True)
 
-          if __name__ == "__main__":
-              asyncio.run(main())
+              # AVVIO DELLO SCANNER
+              print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 100 funzionanti)...", flush=True)
+              with concurrent.futures.ThreadPoolExecutor(max_workers=300) as scanner_executor:
+                  futures = {scanner_executor.submit(scan_worker, p): p for p in raw_proxies[:2000]}
+                  concurrent.futures.wait(futures)
+
+              working_proxies.sort(key=lambda x: x[1])
+              sorted_proxy_addrs = [p[0] for p in working_proxies]
+              
+              if not sorted_proxy_addrs:
+                  print("⚠️ Nessun proxy pubblico valido trovato. Fallback su connessione diretta per la Fase 1.", flush=True)
+
+              # FASE 1: curl-cffi E Jina con i proxy pubblici
+              print("\n==========================================", flush=True)
+              print(f"🚀 FASE 1: Estrazione con {len(sorted_proxy_addrs)} proxy pubblici...", flush=True)
+              print("==========================================\n", flush=True)
+              
+              failed_phase1 = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=min(50, total_urls)) as executor:
+                  items = list(enumerate(URLS_TO_TEST, start=1))
+                  future_to_url = {executor.submit(fetch_url_lightweight, item, sorted_proxy_addrs): item for item in items}
+                  for future in concurrent.futures.as_completed(future_to_url):
+                      success, message, failed_item = future.result()
+                      print(message, flush=True)
+                      if not success:
+                          failed_phase1.append(failed_item)
+
+              # FASE 2: Registrazione concorrente WARP
+              if failed_phase1:
+                  print("\n==========================================", flush=True)
+                  print(f"🌀 FASE 2: Registrazione ultra-concorrente di 20 IP WARP tramite i proxy funzionanti...", flush=True)
+                  print("==========================================\n", flush=True)
+                  
+                  stop_registration.clear()
+                  active_warp_proxies = []
+                  warp_processes = []
+                  warp_counter = 0
+
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=40) as register_executor:
+                      futures = [register_executor.submit(register_single_warp, p) for p in sorted_proxy_addrs[:100]]
+                      concurrent.futures.wait(futures)
+                      
+                  if not active_warp_proxies:
+                      print("⚠️ Registrazione WARP non riuscita. Fallback sui proxy pubblici originali.", flush=True)
+                      active_warp_proxies = sorted_proxy_addrs
+                  else:
+                      print(f"\n🎉 Totale tunnel WARP locali attivati: {len(active_warp_proxies)}", flush=True)
+
+                  # FASE 2a: Retest degli URL falliti con curl-cffi usando i proxy WARP
+                  print("\n==========================================", flush=True)
+                  print(f"🚀 FASE 2a: Retest di {len(failed_phase1)} URL falliti tramite IP WARP con curl-cffi/Jina...", flush=True)
+                  print("==========================================\n", flush=True)
+                  
+                  failed_phase2a = []
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(failed_phase1))) as executor:
+                      future_to_url = {executor.submit(fetch_url_lightweight, (item[0], item[1]), active_warp_proxies): item for item in failed_phase1}
+                      for future in concurrent.futures.as_completed(future_to_url):
+                          success, message, failed_item = future.result()
+                          print(message, flush=True)
+                          if not success:
+                              failed_phase2a.append(failed_item)
+
+                  # FASE 2b: Avvio CloakBrowser con 20 browser paralleli su WARP per i rimanenti fallimenti
+                  if failed_phase2a:
+                      print("\n==========================================", flush=True)
+                      print(f"🔥 FASE 2b: Avvio di {min(20, len(active_warp_proxies))} browser paralleli CloakBrowser per risolvere {len(failed_phase2a)} URL rimanenti...", flush=True)
+                      print("==========================================\n", flush=True)
+                      
+                      jobs_queue = Queue()
+                      for item in failed_phase2a:
+                          jobs_queue.put(item)
+                          
+                      cf_threads = []
+                      num_cf_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
+                      
+                      for w_id in range(1, num_cf_workers + 1):
+                          proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
+                          t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, active_warp_proxies, sorted_proxy_addrs, jobs_queue))
+                          t.start()
+                          cf_threads.append(t)
+                          
+                      for t in cf_threads:
+                          t.join()
+                  else:
+                      print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
+              else:
+                  print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1!", flush=True)
+                  
+              # SPEGNIMENTO DEI PROCESSI WIREPROXY IN BACKGROUND
+              if warp_processes:
+                  print("\n🧹 Spegnimento dei processi WARP locali in background...", flush=True)
+                  for proc in warp_processes:
+                      try:
+                          proc.terminate()
+                          proc.wait(timeout=2)
+                      except Exception:
+                          pass
+              print("👋 Fine elaborazione.", flush=True)
           EOF
+          export PYTHONUNBUFFERED=1
+          python extract.py
 
-      - name: Esecuzione Scraping Parallelo - STEP 2 (Fallback CloakBrowser)
-        run: |
-          echo 'Avvio processi paralleli per STEP 2 sui target falliti...'
-          touch node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log
-          tail -q -f node1_step2.log node2_step2.log node3_step2.log node4_step2.log node5_step2.log node6_step2.log &
-          TAIL_PID=$!
-          
-          PIDS=()
-          for i in {1..6}; do
-            python -u m2_step2.py $i > node${i}_step2.log 2>&1 &
-            PIDS+=($!)
-            sleep 1.5
-          done
-
-          wait "${PIDS[@]}"
-          kill $TAIL_PID || true
-          
-          for i in {1..6}; do
-            docker stop warproxy-$i || true
-            docker rm warproxy-$i || true
-          done
-
-          touch output_node_1_step1.txt output_node_1_step2.txt \
-                output_node_2_step1.txt output_node_2_step2.txt \
-                output_node_3_step1.txt output_node_3_step2.txt \
-                output_node_4_step1.txt output_node_4_step2.txt \
-                output_node_5_step1.txt output_node_5_step2.txt \
-                output_node_6_step1.txt output_node_6_step2.txt
-
-          cat output_node_1_step1.txt output_node_1_step2.txt \
-              output_node_2_step1.txt output_node_2_step2.txt \
-              output_node_3_step1.txt output_node_3_step2.txt \
-              output_node_4_step1.txt output_node_4_step2.txt \
-              output_node_5_step1.txt output_node_5_step2.txt \
-              output_node_6_step1.txt output_node_6_step2.txt > output_macchina2_cdp.txt
-
-      - name: Upload Artifact Macchina 2
+      # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
+      - name: Carica i file estratti come Artefatto ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Risultati_Macchina2
-          path: output_macchina2_cdp.txt
+          name: jina-markdown-outputs
+          path: output/
+          retention-days: 7
