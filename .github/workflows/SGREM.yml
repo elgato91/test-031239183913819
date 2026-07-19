@@ -146,7 +146,7 @@ jobs:
                                   addresses.extend(parts)
                               elif key == "dns":
                                   parts = [p.strip() for p in val.split(",") if p.strip()]
-                                  dns_servers.append(parts)
+                                  dns_servers.extend(parts)
                               elif key == "publickey":
                                   public_key = val
                               elif key == "endpoint":
@@ -184,6 +184,9 @@ jobs:
                   "unusual traffic from your computer network", "checking your browser", 
                   "prove your humanity", "captcha verification", "robot challenge screen",
                   "one moment, please...", "pardon our interruption",
+                  "you've been blocked by network security",
+                  "blocked by network security",
+                  "use your developer token",
                   # Indicatori specifici per bloccare gli avvisi testuali di Jina Reader
                   "warning: this page maybe requiring captcha",
                   "please make sure you are authorized to access this page",
@@ -422,8 +425,9 @@ jobs:
               print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
               
               try:
-                  # Avvio Chromium globale condiviso sul display virtuale Xvfb
+                  # Configurazione avanzata dei parametri stealth di avvio (allineata a CloakBrowser)
                   browser = launch(
+                      proxy=f"socks5://{warp_proxy_addr}",
                       headless=False,
                       geoip=True, 
                       humanize=True,
@@ -431,28 +435,10 @@ jobs:
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
                           f"--fingerprint={random.randint(100000, 999999)}",
-                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"
+                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"  # Cartella dei font reali caricata sul runner Linux
                       ]
                   )
-                  
-                  # Creazione contesto primario (WARP) con viewport fisso desktop
-                  context = browser.new_context(
-                      proxy={"server": f"socks5://{warp_proxy_addr}"},
-                      viewport={"width": 1920, "height": 1080},
-                      ignore_https_errors=True
-                  )
-                  print(f"  [🕵️ Worker CB {worker_id}] Browser pronto! Eseguo Warmup...", flush=True)
-                  
-                  # --- FASE DI WARMUP SULLA SESSIONE PRINCIPALE ---
-                  try:
-                      warmup_page = context.new_page()
-                      warmup_page.goto("https://www.google.com", wait_until="load", timeout=25000)
-                      time.sleep(2.0)
-                      warmup_page.goto("https://www.reddit.com", wait_until="load", timeout=25000)
-                      time.sleep(2.0)
-                      warmup_page.close()
-                  except Exception:
-                      pass
+                  print(f"  [🕵️ Worker CB {worker_id}] Browser pronto!", flush=True)
                   
                   while True:
                       try:
@@ -465,13 +451,53 @@ jobs:
                       
                       success = False
                       error_msg = ""
+                      query_to_search = get_query_from_url(url)
                       
                       # --- TENTATIVO 1: Tramite IP WARP assegnato ---
                       try:
-                          page = context.new_page()
+                          page = browser.new_page()
                           
                           try:
-                              page.goto(url, wait_until="load", timeout=45000)
+                              # Navigazione simulata ad alto tasso di successo per evitare JS block/unusual traffic
+                              if "bing.com" in url:
+                                  page.goto("https://www.bing.com/", wait_until="load", timeout=35000)
+                                  time.sleep(random.uniform(2.5, 4.0))
+                                  try:
+                                      search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                      search_box.fill(query_to_search) 
+                                      page.keyboard.press("Enter")
+                                  except Exception:
+                                      page.goto(url, wait_until="load", timeout=35000)
+                                      
+                              elif "startpage.com" in url:
+                                  page.goto("https://www.startpage.com/", wait_until="load", timeout=35000)
+                                  time.sleep(random.uniform(2.0, 3.5))
+                                  try:
+                                      search_box = page.locator("input#q").first
+                                      search_box.fill(query_to_search)
+                                      page.keyboard.press("Enter")
+                                  except Exception:
+                                      page.goto(url, wait_until="load", timeout=35000)
+                                      
+                              elif "google.com" in url:
+                                  page.goto("https://www.google.com/", wait_until="load", timeout=35000)
+                                  time.sleep(random.uniform(2.0, 3.5))
+                                  try:
+                                      consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
+                                      if consent_btn.is_visible():
+                                          consent_btn.click()
+                                          time.sleep(1.5)
+                                  except Exception:
+                                      pass
+                                  try:
+                                      search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                      search_box.fill(query_to_search)
+                                      page.keyboard.press("Enter")
+                                  except Exception:
+                                      page.goto(url, wait_until="load", timeout=35000)
+                              else:
+                                  page.goto(url, wait_until="load", timeout=35000)
+                              
                               try:
                                   page.wait_for_load_state("networkidle", timeout=12000)
                               except Exception:
@@ -488,11 +514,7 @@ jobs:
                           except Exception:
                               pass
                                       
-                          try:
-                              html_content = page.content()
-                          except Exception:
-                              html_content = ""
-                              
+                          html_content = page.content()
                           markdown_content = md(html_content, heading_style="ATX")
                           
                           is_valid, reason = validate_markdown(markdown_content, url)
@@ -515,16 +537,52 @@ jobs:
                               print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy: {fallback_proxy}...", flush=True)
                               
                               try:
-                                  # Connessione condivisa sotto lo stesso loop del browser tramite context figlio isolato
                                   fallback_context = browser.new_context(
                                       proxy={"server": f"socks5://{fallback_proxy}"},
-                                      viewport={"width": 1920, "height": 1080},
                                       ignore_https_errors=True
                                   )
                                   page = fallback_context.new_page()
                                   
                                   try:
-                                      page.goto(url, wait_until="load", timeout=45000)
+                                      if "bing.com" in url:
+                                          page.goto("https://www.bing.com/", wait_until="load", timeout=35000)
+                                          time.sleep(random.uniform(2.5, 4.0))
+                                          try:
+                                              search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                              search_box.fill(query_to_search) 
+                                              page.keyboard.press("Enter")
+                                          except Exception:
+                                              page.goto(url, wait_until="load", timeout=35000)
+                                              
+                                      elif "startpage.com" in url:
+                                          page.goto("https://www.startpage.com/", wait_until="load", timeout=35000)
+                                          time.sleep(random.uniform(2.0, 3.5))
+                                          try:
+                                              search_box = page.locator("input#q").first
+                                              search_box.fill(query_to_search)
+                                              page.keyboard.press("Enter")
+                                          except Exception:
+                                              page.goto(url, wait_until="load", timeout=35000)
+                                              
+                                      elif "google.com" in url:
+                                          page.goto("https://www.google.com/", wait_until="load", timeout=35000)
+                                          time.sleep(random.uniform(2.0, 3.5))
+                                          try:
+                                              consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
+                                              if consent_btn.is_visible():
+                                                  consent_btn.click()
+                                                  time.sleep(1.5)
+                                          except Exception:
+                                              pass
+                                          try:
+                                              search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                              search_box.fill(query_to_search)
+                                              page.keyboard.press("Enter")
+                                          except Exception:
+                                              page.goto(url, wait_until="load", timeout=35000)
+                                      else:
+                                          page.goto(url, wait_until="load", timeout=35000)
+                                      
                                       try:
                                           page.wait_for_load_state("networkidle", timeout=12000)
                                       except Exception:
@@ -539,11 +597,7 @@ jobs:
                                   except Exception:
                                       pass
                                               
-                                  try:
-                                      html_content = page.content()
-                                  except Exception:
-                                      html_content = ""
-                                      
+                                  html_content = page.content()
                                   markdown_content = md(html_content, heading_style="ATX")
                                   
                                   is_valid, reason = validate_markdown(markdown_content, url)
