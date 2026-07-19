@@ -373,10 +373,7 @@ jobs:
                   return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
 
               if "google.com" in url:
-                  # Se l'URL di Google contiene "gbv=1", NON viene forzato a CloakBrowser. 
-                  # È una pagina statica non-JS molto leggera che curl-cffi o Jina estraggono velocemente.
-                  if "gbv=1" not in url:
-                      return False, f"[⏭️ FORCED GOOGLE {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
+                  return False, f"[⏭️ FORCED GOOGLE {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
                   
               if not proxies_list:
                   return False, f"[⚠️ NO PROXY {index}/{total_urls}] {url}", (index, url, filepath)
@@ -483,36 +480,27 @@ jobs:
                           page = browser.new_page()
                           
                           if "bing.com" in url:
-                              page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                              page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=20000)
                               time.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
                                   search_box.fill(query_to_search) 
                                   page.keyboard.press("Enter")
                               except Exception:
-                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  page.goto(url, wait_until="domcontentloaded", timeout=20000)
                                   
                           elif "startpage.com" in url:
-                              page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                              page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=20000)
                               time.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input#q").first
                                   search_box.fill(query_to_search)
                                   page.keyboard.press("Enter")
                               except Exception:
-                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  page.goto(url, wait_until="domcontentloaded", timeout=20000)
                                   
                           else:
-                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                          
-                          # Timeout ridotti per velocizzare la rotazione dei proxy lenti/bloccati
-                          try:
-                              page.wait_for_selector("h3", timeout=5000)
-                          except Exception as e:
-                              try:
-                                  page.wait_for_selector("h1, h2", timeout=1000)
-                              except Exception:
-                                  raise Exception("La pagina caricata è vuota o priva di intestazioni di contenuto (timeout h3/h2/h1)") from e
+                              page.goto(url, wait_until="domcontentloaded", timeout=20000)
                           
                           try:
                               page.wait_for_load_state("networkidle", timeout=12000)
@@ -546,8 +534,8 @@ jobs:
                           
                       # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici veloci ---
                       if not success and public_proxies:
-                          # Usiamo solo la top 20 dei proxy pubblici con latenza minore per evitare colli di bottiglia
-                          fast_public_proxies = public_proxies[:20]
+                          # Usiamo la top 30 dei proxy pubblici con latenza minore per garantire massima stabilità e velocità
+                          fast_public_proxies = public_proxies[:30]
                           fallback_attempts = min(4, len(fast_public_proxies))
                           for f_idx in range(fallback_attempts):
                               fallback_proxy = random.choice(fast_public_proxies)
@@ -561,36 +549,27 @@ jobs:
                                   page = fallback_context.new_page()
                                   
                                   if "bing.com" in url:
-                                      page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                                      page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=20000)
                                       time.sleep(random.uniform(2.5, 4.0))
                                       try:
                                           search_box = page.locator("textarea[name='q'], input[name='q']").first
                                           search_box.fill(query_to_search) 
                                           page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=20000)
                                           
                                   elif "startpage.com" in url:
-                                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=20000)
                                       time.sleep(random.uniform(2.0, 3.5))
                                       try:
                                           search_box = page.locator("input#q").first
                                           search_box.fill(query_to_search)
                                           page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=20000)
                                           
                                   else:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                  
-                                  # Timeout di attesa ridotti anche per il fallback
-                                  try:
-                                      page.wait_for_selector("h3", timeout=5000)
-                                  except Exception as e:
-                                      try:
-                                          page.wait_for_selector("h1, h2", timeout=1000)
-                                      except Exception:
-                                          raise Exception("La pagina di fallback è vuota o priva di intestazioni di contenuto (timeout h3/h2/h1)") from e
+                                      page.goto(url, wait_until="domcontentloaded", timeout=20000)
                                   
                                   try:
                                       page.wait_for_load_state("networkidle", timeout=12000)
