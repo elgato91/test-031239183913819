@@ -447,43 +447,60 @@ jobs:
               
               async def worker_async():
                   home_dir = os.path.expanduser("~")
-                  profile_dir = os.path.join(home_dir, f".cloak_profiles/worker_{worker_id}")
                   windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
                   
                   # Configurazione del fingerprint coerente e allineata per emulare sessione persistente
                   base_args = [
                       "--no-sandbox",
                       "--disable-dev-shm-usage",
-                      f"--fingerprint={random.randint(100000, 999999)}",
-                      "--fingerprint-storage-quota=5000",
                       f"--fingerprint-fonts-dir={windows_fonts_dir}"
                   ]
                   
-                  print(f"  [🕵️ Worker CB {worker_id}] Avvio sessione persistente con proxy {warp_proxy_addr}...", flush=True)
-                  try:
-                      # Usiamo launch_persistent_context_async per consolidare cookie, cache e reputazione
+                  context = None
+                  page = None
+                  current_proxy = warp_proxy_addr
+                  
+                  async def init_browser_context(proxy_addr):
+                      nonlocal context, page, current_proxy
+                      if context:
+                          try:
+                              await context.close()
+                          except Exception:
+                              pass
+                      
+                      current_proxy = proxy_addr
+                      proxy_safe_name = proxy_addr.replace(".", "_").replace(":", "_")
+                      profile_dir = os.path.join(home_dir, f".cloak_profiles/worker_{worker_id}_{proxy_safe_name}")
+                      
+                      # Generiamo un sotto-argomento con fingerprint-seed dinamico coerente con il proxy per evitare collisioni di lock
+                      scoped_args = base_args + [f"--fingerprint={random.randint(100000, 999999)}"]
+                      
+                      print(f"  [🕵️ Worker CB {worker_id}] Inizializzazione browser persistente con proxy {proxy_addr}...", flush=True)
                       context = await launch_persistent_context_async(
                           profile_dir,
                           headless=False,
                           humanize=True,
                           human_config={"mistype_chance": 0.05, "typing_delay": 100, "idle_between_actions": True},
-                          proxy=f"socks5://{warp_proxy_addr}",
+                          proxy=f"socks5://{proxy_addr}",
                           geoip=True,
                           viewport={"width": 1920, "height": 1080},
-                          args=base_args
+                          args=scoped_args
                       )
                       page = await context.new_page()
                       
                       # Warmup integrato identico al codice stabile per generare una cronologia credibile
-                      print(f"  [🕵️ Worker CB {worker_id}] Esecuzione warmup sul proxy...", flush=True)
+                      print(f"  [🕵️ Worker CB {worker_id}] Esecuzione warmup sul proxy {proxy_addr}...", flush=True)
                       try:
                           await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
                           await asyncio.sleep(2)
                           await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
                           await asyncio.sleep(2)
                       except Exception as e:
-                          print(f"  [🕵️ Worker CB {worker_id}] Warmup warning: {e}", flush=True)
-                          
+                          print(f"  [🕵️ Worker CB {worker_id}] Warmup warning su {proxy_addr}: {e}", flush=True)
+                  
+                  # Inizializziamo il browser la prima volta sul proxy WARP nativo
+                  try:
+                      await init_browser_context(warp_proxy_addr)
                   except Exception as e:
                       print(f"  [❌ Worker CB {worker_id}] Errore critico di avvio browser: {e}", flush=True)
                       return
@@ -496,6 +513,14 @@ jobs:
                       
                       index, url, filepath = item
                       print(f"  [🕵️ Worker CB {worker_id}] Scaricamento: {url}", flush=True)
+                      
+                      # Se l'iterazione precedente ha cambiato il proxy, ripristiniamo l'IP WARP primario per iniziare puliti
+                      if current_proxy != warp_proxy_addr:
+                          print(f"  [🕵️ Worker CB {worker_id}] Ripristino dell'IP WARP primario ({warp_proxy_addr}) per il nuovo target...", flush=True)
+                          try:
+                              await init_browser_context(warp_proxy_addr)
+                          except Exception as e:
+                              print(f"  [🕵️ Worker CB {worker_id}] Errore nel ripristino del proxy primario: {e}", flush=True)
                       
                       success = False
                       error_msg = ""
@@ -555,8 +580,88 @@ jobs:
                       except Exception as e:
                           error_msg = f"Errore su WARP: {e}"
                           
+                      # --- TENTATIVI DI RISERVA (FALLBACK) ---
+                      # Se fallisce l'IP WARP primario, ruotiamo su 2 IP WARP alternativi e successivamente su 3 SOCKS5 pubblici migliori.
                       if not success:
-                          print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
+                          # 1. Recupero 2 IP WARP alternativi dal pool attivo
+                          warp_alternatives = [p for p in active_warp_proxies if p != warp_proxy_addr]
+                          random.shuffle(warp_alternatives)
+                          warp_fallbacks = warp_alternatives[:2]
+                          
+                          # 2. Recupero 3 proxy pubblici tra i 30 con minor latenza
+                          fast_public_proxies = public_proxies[:30]
+                          random.shuffle(fast_public_proxies)
+                          public_fallbacks = fast_public_proxies[:3]
+                          
+                          # 3. Consolidamento dei fallback in una coda ordinata
+                          fallback_queue = []
+                          for p in warp_fallbacks:
+                              fallback_queue.append((p, "WARP Alternativo"))
+                          for p in public_fallbacks:
+                              fallback_queue.append((p, "SOCKS5 Pubblico"))
+                              
+                          for f_idx, (fallback_proxy, proxy_type) in enumerate(fallback_queue, start=1):
+                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx}/{len(fallback_queue)} con {proxy_type}: {fallback_proxy}...", flush=True)
+                              
+                              try:
+                                  # Re-inizializziamo il browser persistente sul nuovo proxy di fallback con warmup integrato
+                                  await init_browser_context(fallback_proxy)
+                                  
+                                  if "bing.com" in url:
+                                      await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                                      await asyncio.sleep(random.uniform(2.5, 4.0))
+                                      try:
+                                          search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                          await search_box.fill(query_to_search) 
+                                          await page.keyboard.press("Enter")
+                                      except Exception:
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          
+                                  elif "startpage.com" in url:
+                                      await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                                      await asyncio.sleep(random.uniform(2.0, 3.5))
+                                      try:
+                                          search_box = page.locator("input#q").first
+                                          await search_box.fill(query_to_search)
+                                          await page.keyboard.press("Enter")
+                                      except Exception:
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          
+                                  else:
+                                      await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                                  try:
+                                      await page.wait_for_load_state("networkidle", timeout=12000)
+                                  except Exception:
+                                      pass
+                                  
+                                  await asyncio.sleep(6.0)
+                                  
+                                  try:
+                                      await page.keyboard.press("PageDown")
+                                      await asyncio.sleep(1.0)
+                                      await page.keyboard.press("PageDown")
+                                      await asyncio.sleep(2.0)
+                                  except Exception:
+                                      pass
+                                              
+                                  html_content = await page.content()
+                                  markdown_content = clean_html_and_to_markdown(html_content)
+                                  
+                                  is_valid, reason = validate_markdown(markdown_content, url)
+                                  if is_valid:
+                                      with open(filepath, 'w', encoding='utf-8') as f:
+                                          f.write(markdown_content)
+                                      print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via {proxy_type} ({fallback_proxy})!", flush=True)
+                                      success = True
+                                      break
+                                  else:
+                                      error_msg = f"Validazione fallita su {proxy_type}: {reason}"
+                              except Exception as fe:
+                                  error_msg = f"Errore su {proxy_type}: {fe}"
+                                  
+                          if not success:
+                              print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                               
                       jobs_queue.task_done()
                   
