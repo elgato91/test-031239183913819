@@ -375,6 +375,7 @@ jobs:
               safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
               filepath = os.path.join('output', f"{safe_filename}.md")
               jina_url = f"https://r.jina.ai/{url}"
+              markdown_new_url = f"https://markdown.new/{url}"
               
               if "bing.com" in url:
                   return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
@@ -444,6 +445,22 @@ jobs:
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(markdown_content)
                               return True, f"[✅ JINA {index}] {url} -> Salvato via Jina (Proxy: {proxy_addr})", None
+                  except Exception:
+                      pass
+
+                  # 3. Fallback markdown.new
+                  try:
+                      md_new_headers = {
+                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                      }
+                      md_new_response = requests.get(markdown_new_url, headers=md_new_headers, proxies=proxies, timeout=10)
+                      if md_new_response.status_code == 200:
+                          markdown_content = md_new_response.text
+                          is_valid, reason = validate_markdown(markdown_content, url)
+                          if is_valid:
+                              with open(filepath, 'w', encoding='utf-8') as f:
+                                  f.write(markdown_content)
+                              return True, f"[✅ MARKDOWN.NEW {index}] {url} -> Salvato via markdown.new (Proxy: {proxy_addr})", None
                   except Exception:
                       pass
 
@@ -732,9 +749,9 @@ jobs:
               if not sorted_proxy_addrs:
                   print("⚠️ Nessun proxy pubblico valido trovato. Fallback su connessione diretta per la Fase 1.", flush=True)
 
-              # FASE 1: curl-cffi E Jina con i proxy pubblici
+              # FASE 1: curl-cffi, Jina e markdown.new con i proxy pubblici
               print("\n==========================================", flush=True)
-              print(f"🚀 FASE 1: Estrazione con {len(sorted_proxy_addrs)} proxy pubblici...", flush=True)
+              print(f"🚀 FASE 1: Estrazione con {len(sorted_proxy_addrs)} proxy pubblici (curl-cffi -> Jina -> markdown.new)...", flush=True)
               print("==========================================\n", flush=True)
               
               failed_phase1 = []
@@ -768,9 +785,9 @@ jobs:
                   else:
                       print(f"\n🎉 Totale tunnel WARP locali attivati: {len(active_warp_proxies)}", flush=True)
 
-                  # FASE 2a: Retest degli URL falliti con curl-cffi usando i proxy WARP
+                  # FASE 2a: Retest degli URL falliti con curl-cffi usando i proxy WARP (curl-cffi -> Jina -> markdown.new)
                   print("\n==========================================", flush=True)
-                  print(f"🚀 FASE 2a: Retest di {len(failed_phase1)} URL falliti tramite IP WARP con curl-cffi/Jina...", flush=True)
+                  print(f"🚀 FASE 2a: Retest di {len(failed_phase1)} URL falliti tramite IP WARP con curl-cffi/Jina/markdown.new...", flush=True)
                   print("==========================================\n", flush=True)
                   
                   failed_phase2a = []
@@ -804,7 +821,7 @@ jobs:
                       for t in cf_threads:
                           t.join()
                   else:
-                      print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
+                      print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP (curl-cffi/Jina/markdown.new)!", flush=True)
               else:
                   print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1!", flush=True)
                   
