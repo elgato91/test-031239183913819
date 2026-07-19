@@ -153,12 +153,13 @@ jobs:
                               elif key == "endpoint":
                                   endpoint = val
                                   
-              for backup_dns in ["8.8.8.8", "9.9.9.9"]:
-                  if backup_dns not in dns_servers:
-                      dns_servers.append(backup_dns)
+              # Correzione fondamentale: forziamo la risoluzione dei nomi tramite DNS IPv6
+              # di Cloudflare. Questo forza il tunnel di wireproxy a instradare le connessioni
+              # verso Google/Yelp/Reddit direttamente sulla rete IPv6 di WARP (pulita e non bloccata).
+              dns_servers = ["2606:4700:4700::1111", "2606:4700:4700::1001"]
                       
               if not addresses:
-                  addresses = ["172.16.0.2/32"]
+                  addresses = ["172.16.0.2/32", "fd00:53b:43::1/128"]
                   
               return private_key, addresses, dns_servers, public_key, endpoint
 
@@ -446,6 +447,7 @@ jobs:
               print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
               
               try:
+                  # Correzione fondamentale: allineato il fingerprint casuale per evitare conflitti di identità
                   browser = launch(
                       proxy=f"socks5://{warp_proxy_addr}",
                       headless=False,
@@ -454,6 +456,7 @@ jobs:
                       args=[
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
+                          f"--fingerprint={random.randint(100000, 999999)}",
                           "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"
                       ]
                   )
@@ -599,7 +602,50 @@ jobs:
                                       error_msg = f"Validazione fallita su fallback: {reason}"
                               except Exception as fe:
                                   error_msg = f"Errore su fallback: {fe}"
-                                  
+
+                      # --- TENTATIVO 3 (ULTIMATE FALLBACK): Connessione diretta (No Proxy) ---
+                      # Ideale per superare geoblock e blacklist aggressive di enti pubblici locali 
+                      # (es. comune.orvieto.tr.it) che bloccano sistematicamente l'intera rete Cloudflare e i proxy esteri.
+                      if not success:
+                          print(f"  [🕵️ Worker CB {worker_id}] ⚠️ Tutti i proxy hanno fallito per {url}. Tentativo finale con connessione DIRETTA (No Proxy)...", flush=True)
+                          try:
+                              fallback_context = browser.new_context(
+                                  ignore_https_errors=True
+                              )
+                              page = fallback_context.new_page()
+                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              
+                              try:
+                                  page.wait_for_load_state("networkidle", timeout=12000)
+                              except Exception:
+                                  pass
+                              
+                              time.sleep(6.0)
+                              
+                              try:
+                                  page.keyboard.press("PageDown")
+                                  time.sleep(1.0)
+                                  page.keyboard.press("PageDown")
+                                  time.sleep(2.0)
+                              except Exception:
+                                  pass
+                                          
+                              html_content = page.content()
+                              markdown_content = clean_html_and_to_markdown(html_content)
+                              
+                              is_valid, reason = validate_markdown(markdown_content, url)
+                              fallback_context.close()
+                              
+                              if is_valid:
+                                  with open(filepath, 'w', encoding='utf-8') as f:
+                                      f.write(markdown_content)
+                                  print(f"[✅ CLOAKBROWSER DIRECT SUCCESS {index}] {url} -> Estratto con successo via Connessione Diretta!", flush=True)
+                                  success = True
+                              else:
+                                  error_msg = f"Validazione fallita su connessione diretta: {reason}"
+                          except Exception as fe:
+                              error_msg = f"Errore su connessione diretta: {fe}"
+
                           if not success:
                               print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                               
