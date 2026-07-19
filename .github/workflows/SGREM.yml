@@ -373,7 +373,10 @@ jobs:
                   return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
 
               if "google.com" in url:
-                  return False, f"[⏭️ FORCED GOOGLE {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
+                  # Se l'URL di Google contiene "gbv=1", NON viene forzato a CloakBrowser. 
+                  # È una pagina statica non-JS molto leggera che curl-cffi o Jina estraggono velocemente.
+                  if "gbv=1" not in url:
+                      return False, f"[⏭️ FORCED GOOGLE {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
                   
               if not proxies_list:
                   return False, f"[⚠️ NO PROXY {index}/{total_urls}] {url}", (index, url, filepath)
@@ -456,7 +459,7 @@ jobs:
                           "--disable-dev-shm-usage",
                           "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows",
                           "--disable-dns-prefetch",
-                          "--disable-blink-features=AutomationControlled", # Disattiva i parametri nativi di automazione (es. navigator.webdriver)
+                          "--disable-blink-features=AutomationControlled",
                           "--disable-infobars"
                       ]
                   )
@@ -502,12 +505,12 @@ jobs:
                           else:
                               page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
-                          # Attesa bloccante del contenuto reale: se Yelp/Google mostrano una pagina bianca, andrà in timeout innescando il fallback
+                          # Timeout ridotti per velocizzare la rotazione dei proxy lenti/bloccati
                           try:
-                              page.wait_for_selector("h3", timeout=15000)
+                              page.wait_for_selector("h3", timeout=5000)
                           except Exception as e:
                               try:
-                                  page.wait_for_selector("h1, h2", timeout=2000)
+                                  page.wait_for_selector("h1, h2", timeout=1000)
                               except Exception:
                                   raise Exception("La pagina caricata è vuota o priva di intestazioni di contenuto (timeout h3/h2/h1)") from e
                           
@@ -541,12 +544,14 @@ jobs:
                       except Exception as e:
                           error_msg = f"Errore su WARP: {e}"
                           
-                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
+                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici veloci ---
                       if not success and public_proxies:
-                          fallback_attempts = min(4, len(public_proxies))
+                          # Usiamo solo la top 20 dei proxy pubblici con latenza minore per evitare colli di bottiglia
+                          fast_public_proxies = public_proxies[:20]
+                          fallback_attempts = min(4, len(fast_public_proxies))
                           for f_idx in range(fallback_attempts):
-                              fallback_proxy = random.choice(public_proxies)
-                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy pubblico: {fallback_proxy}...", flush=True)
+                              fallback_proxy = random.choice(fast_public_proxies)
+                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy pubblico rapido: {fallback_proxy}...", flush=True)
                               
                               try:
                                   fallback_context = browser.new_context(
@@ -578,12 +583,12 @@ jobs:
                                   else:
                                       page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
-                                  # Attesa del contenuto anche sul contesto di fallback
+                                  # Timeout di attesa ridotti anche per il fallback
                                   try:
-                                      page.wait_for_selector("h3", timeout=15000)
+                                      page.wait_for_selector("h3", timeout=5000)
                                   except Exception as e:
                                       try:
-                                          page.wait_for_selector("h1, h2", timeout=2000)
+                                          page.wait_for_selector("h1, h2", timeout=1000)
                                       except Exception:
                                           raise Exception("La pagina di fallback è vuota o priva di intestazioni di contenuto (timeout h3/h2/h1)") from e
                                   
