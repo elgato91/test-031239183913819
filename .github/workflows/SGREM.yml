@@ -362,6 +362,9 @@ jobs:
               # Forza l'instradamento di Bing direttamente verso la Fase 2b con CloakBrowser
               if "bing.com" in url:
                   return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
+
+              if "google.com" in url:
+                  return False, f"[⏭️ FORCED GOOGLE {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
                   
               if not proxies_list:
                   return False, f"[⚠️ NO PROXY {index}/{total_urls}] {url}", (index, url, filepath)
