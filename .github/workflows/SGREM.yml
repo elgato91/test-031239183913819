@@ -389,7 +389,7 @@ jobs:
                   
                   time.sleep(random.uniform(0.1, 0.5))
                   
-                  # 1. Tentativo curl-cffi stealth (Impersonate Chrome 120 allineato ai relativi header)
+                  # 1. Tentativo curl-cffi stealth
                   try:
                       impersonate_target = "chrome120"
                       headers_cffi = {
@@ -454,10 +454,7 @@ jobs:
                       args=[
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
-                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows",
-                          "--disable-dns-prefetch",
-                          "--disable-blink-features=AutomationControlled",
-                          "--disable-infobars"
+                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"
                       ]
                   )
                   print(f"  [🕵️ Worker CB {worker_id}] Browser pronto!", flush=True)
@@ -480,27 +477,27 @@ jobs:
                           page = browser.new_page()
                           
                           if "bing.com" in url:
-                              page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=20000)
+                              page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                               time.sleep(random.uniform(2.5, 4.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
                                   search_box.fill(query_to_search) 
                                   page.keyboard.press("Enter")
                               except Exception:
-                                  page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                           elif "startpage.com" in url:
-                              page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=20000)
+                              page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                               time.sleep(random.uniform(2.0, 3.5))
                               try:
                                   search_box = page.locator("input#q").first
                                   search_box.fill(query_to_search)
                                   page.keyboard.press("Enter")
                               except Exception:
-                                  page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                           else:
-                              page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                           try:
                               page.wait_for_load_state("networkidle", timeout=12000)
@@ -549,27 +546,27 @@ jobs:
                                   page = fallback_context.new_page()
                                   
                                   if "bing.com" in url:
-                                      page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=20000)
+                                      page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                                       time.sleep(random.uniform(2.5, 4.0))
                                       try:
                                           search_box = page.locator("textarea[name='q'], input[name='q']").first
                                           search_box.fill(query_to_search) 
                                           page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   elif "startpage.com" in url:
-                                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=20000)
+                                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
                                       time.sleep(random.uniform(2.0, 3.5))
                                       try:
                                           search_box = page.locator("input#q").first
                                           search_box.fill(query_to_search)
                                           page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   else:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                                   try:
                                       page.wait_for_load_state("networkidle", timeout=12000)
