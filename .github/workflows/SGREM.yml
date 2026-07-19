@@ -473,7 +473,7 @@ jobs:
                       )
                       page = await context.new_page()
                       
-                      # Warmup integrato identico al codice del test per generare una cronologia credibile
+                      # Warmup integrato identico al codice stabile per generare una cronologia credibile
                       print(f"  [🕵️ Worker CB {worker_id}] Esecuzione warmup sul proxy...", flush=True)
                       try:
                           await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
@@ -554,78 +554,8 @@ jobs:
                       except Exception as e:
                           error_msg = f"Errore su WARP: {e}"
                           
-                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici veloci ---
-                      if not success and public_proxies:
-                          fast_public_proxies = public_proxies[:30]
-                          fallback_attempts = min(5, len(fast_public_proxies))
-                          for f_idx in range(fallback_attempts):
-                              fallback_proxy = random.choice(fast_public_proxies)
-                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy pubblico rapido: {fallback_proxy}...", flush=True)
-                              
-                              try:
-                                  fallback_context = await browser.new_context(
-                                      proxy={"server": f"socks5://{fallback_proxy}"},
-                                      ignore_https_errors=True
-                                  )
-                                  f_page = await fallback_context.new_page()
-                                  
-                                  if "bing.com" in url:
-                                      await f_page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                      await asyncio.sleep(random.uniform(2.5, 4.0))
-                                      try:
-                                          search_box = f_page.locator("textarea[name='q'], input[name='q']").first
-                                          await search_box.fill(query_to_search) 
-                                          await f_page.keyboard.press("Enter")
-                                      except Exception:
-                                          await f_page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                          
-                                  elif "startpage.com" in url:
-                                      await f_page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                                      await asyncio.sleep(random.uniform(2.0, 3.5))
-                                      try:
-                                          search_box = f_page.locator("input#q").first
-                                          await search_box.fill(query_to_search)
-                                          await f_page.keyboard.press("Enter")
-                                      except Exception:
-                                          await f_page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                          
-                                  else:
-                                      await f_page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                  
-                                  try:
-                                      await f_page.wait_for_load_state("networkidle", timeout=12000)
-                                  except Exception:
-                                      pass
-                                  
-                                  await asyncio.sleep(6.0)
-                                  
-                                  try:
-                                      await f_page.keyboard.press("PageDown")
-                                      await asyncio.sleep(1.0)
-                                      await f_page.keyboard.press("PageDown")
-                                      await asyncio.sleep(2.0)
-                                  except Exception:
-                                      pass
-                                              
-                                  html_content = await f_page.content()
-                                  markdown_content = clean_html_and_to_markdown(html_content)
-                                  
-                                  is_valid, reason = validate_markdown(markdown_content, url)
-                                  await fallback_context.close()
-                                  
-                                  if is_valid:
-                                      with open(filepath, 'w', encoding='utf-8') as f:
-                                          f.write(markdown_content)
-                                      print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
-                                      success = True
-                                      break
-                                  else:
-                                      error_msg = f"Validazione fallita su fallback: {reason}"
-                              except Exception as fe:
-                                  error_msg = f"Errore su fallback: {fe}"
-                                  
-                          if not success:
-                              print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
+                      if not success:
+                          print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                               
                       jobs_queue.task_done()
                   
