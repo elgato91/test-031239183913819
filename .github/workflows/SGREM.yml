@@ -582,18 +582,15 @@ jobs:
                           
                       # --- TENTATIVI DI RISERVA (FALLBACK) ---
                       # Se fallisce l'IP WARP primario, ruotiamo su 2 IP WARP alternativi e successivamente su 3 SOCKS5 pubblici migliori.
-                      if not success:
-                          # 1. Recupero 2 IP WARP alternativi dal pool attivo
+                      if not success and public_proxies:
                           warp_alternatives = [p for p in active_warp_proxies if p != warp_proxy_addr]
                           random.shuffle(warp_alternatives)
                           warp_fallbacks = warp_alternatives[:2]
                           
-                          # 2. Recupero 3 proxy pubblici tra i 30 con minor latenza
                           fast_public_proxies = public_proxies[:30]
                           random.shuffle(fast_public_proxies)
                           public_fallbacks = fast_public_proxies[:3]
                           
-                          # 3. Consolidamento dei fallback in una coda ordinata
                           fallback_queue = []
                           for p in warp_fallbacks:
                               fallback_queue.append((p, "WARP Alternativo"))
@@ -604,7 +601,6 @@ jobs:
                               print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx}/{len(fallback_queue)} con {proxy_type}: {fallback_proxy}...", flush=True)
                               
                               try:
-                                  # Re-inizializziamo il browser persistente sul nuovo proxy di fallback con warmup integrato
                                   await init_browser_context(fallback_proxy)
                                   
                                   if "bing.com" in url:
@@ -785,6 +781,144 @@ jobs:
               else:
                   print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1!", flush=True)
                   
+              # FASE 2c: Recupero finale .it tramite proxy italiani pubblici (solo per domini .it rimasti insoluti)
+              missing_urls = []
+              for idx, url in enumerate(URLS_TO_TEST, start=1):
+                  clean_name = re.sub(r'^https?://', '', url)
+                  safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
+                  filepath = os.path.join('output', f"{safe_filename}.md")
+                  if not os.path.exists(filepath):
+                      missing_urls.append(url)
+                      
+              failed_it_urls = []
+              for url in missing_urls:
+                  try:
+                      parsed = urlparse(url)
+                      domain = parsed.netloc.lower()
+                      if domain.endswith('.it') or domain.split('.')[-1] == 'it':
+                          failed_it_urls.append(url)
+                  except Exception:
+                      pass
+                      
+              if failed_it_urls:
+                  print("\n==========================================", flush=True)
+                  print(f"🚀 FASE 2c: Recupero finale di {len(failed_it_urls)} URL .it tramite proxy italiani...", flush=True)
+                  print("==========================================\n", flush=True)
+                  
+                  # Scaricamento proxy italiani da sorgenti ProxyScrape (v4 e v2)
+                  it_raw_proxies = []
+                  urls_api_it = [
+                      "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&timeout=10000&country=it&format=text",
+                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=it"
+                  ]
+                  raw_it_set = set()
+                  for api_url in urls_api_it:
+                      try:
+                          r = requests.get(api_url, timeout=10)
+                          if r.status_code == 200:
+                              for line in r.text.split('\n'):
+                                  line = line.strip()
+                                  if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
+                                      raw_it_set.add(line)
+                      except Exception:
+                          pass
+                  it_raw_proxies = list(raw_it_set)
+                  random.shuffle(it_raw_proxies)
+                  
+                  if it_raw_proxies:
+                      print(f"🔄 Trovati {len(it_raw_proxies)} proxy IT candidati. Avvio scansione rapida...", flush=True)
+                      it_working_proxies = []
+                      it_lock = threading.Lock()
+                      it_stop_scanner = threading.Event()
+                      
+                      def scan_italian_worker(proxy_addr):
+                          if it_stop_scanner.is_set():
+                              return
+                          proxies_dict = {
+                              'http': f'socks5h://{proxy_addr}',
+                              'https': f'socks5h://{proxy_addr}'
+                          }
+                          try:
+                              start_time = time.time()
+                              r = requests.get("https://example.com", proxies=proxies_dict, timeout=3.0)
+                              latency = time.time() - start_time
+                              if r.status_code == 200:
+                                  with it_lock:
+                                      if len(it_working_proxies) < 5 and not it_stop_scanner.is_set():
+                                          it_working_proxies.append((proxy_addr, latency))
+                                          print(f"  [+] Proxy IT valido: {proxy_addr} | Latenza: {latency:.2f}s ({len(it_working_proxies)}/5)", flush=True)
+                                          if len(it_working_proxies) >= 5:
+                                              it_stop_scanner.set()
+                          except Exception:
+                              pass
+                              
+                      with concurrent.futures.ThreadPoolExecutor(max_workers=50) as scanner_executor:
+                          futures = {scanner_executor.submit(scan_italian_worker, p): p for p in it_raw_proxies[:150]}
+                          concurrent.futures.wait(futures)
+                          
+                      it_working_proxies.sort(key=lambda x: x[1])
+                      it_sorted_proxies = [p[0] for p in it_working_proxies]
+                      
+                      if it_sorted_proxies:
+                          print(f"\n🎉 Selezionati {len(it_sorted_proxies)} proxy IT attivi per il tentativo finale.", flush=True)
+                          for url in failed_it_urls:
+                              print(f"🔄 Tentativo di recupero italiano per: {url}", flush=True)
+                              success_it = False
+                              for f_idx, proxy_addr in enumerate(it_sorted_proxies[:5]):
+                                  proxy_url = f"socks5h://{proxy_addr}"
+                                  proxies = {
+                                      'http': proxy_url,
+                                      'https': proxy_url
+                                  }
+                                  print(f"  [Tentativo {f_idx+1}/5] Esecuzione curl-cffi tramite proxy IT: {proxy_addr}...", flush=True)
+                                  try:
+                                      impersonate_target = "chrome120"
+                                      headers_cffi = {
+                                          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                                          "accept-language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                                          "cache-control": "max-age=0",
+                                          "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                                          "sec-ch-ua-mobile": "?0",
+                                          "sec-ch-ua-platform": '"Windows"',
+                                          "sec-fetch-dest": "document",
+                                          "sec-fetch-mode": "navigate",
+                                          "sec-fetch-site": "none",
+                                          "sec-fetch-user": "?1",
+                                          "upgrade-insecure-requests": "1",
+                                          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                                      }
+                                      response = requests_cffi.get(
+                                          url,
+                                          headers=headers_cffi,
+                                          proxies=proxies,
+                                          impersonate=impersonate_target,
+                                          timeout=12
+                                      )
+                                      if response.status_code == 200:
+                                          markdown_content = clean_html_and_to_markdown(response.text)
+                                          is_valid, reason = validate_markdown(markdown_content, url)
+                                          if is_valid:
+                                              clean_name = re.sub(r'^https?://', '', url)
+                                              safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
+                                              filepath = os.path.join('output', f"{safe_filename}.md")
+                                              with open(filepath, 'w', encoding='utf-8') as f:
+                                                  f.write(markdown_content)
+                                              print(f"  [✅ IT RECOVERY SUCCESS] {url} -> Salvato via curl-cffi + Proxy IT!", flush=True)
+                                              success_it = True
+                                              break
+                                          else:
+                                              print(f"  [⚠️ IT RECOVERY FAILED] Validazione fallita: {reason}", flush=True)
+                                      else:
+                                          print(f"  [⚠️ IT RECOVERY FAILED] Codice di stato HTTP: {response.status_code}", flush=True)
+                                  except Exception as e:
+                                      print(f"  [⚠️ IT RECOVERY ERROR] {e}", flush=True)
+                              if not success_it:
+                                  print(f"[❌ IT RECOVERY DEF FAIL] {url} non recuperato tramite i proxy italiani.", flush=True)
+                      else:
+                          print("⚠️ Nessun proxy pubblico italiano valido o attivo trovato nello scanner.", flush=True)
+                  else:
+                      print("⚠️ Nessun IP pubblico localizzato in Italia recuperato dalle API dei proxy.", flush=True)
+
               # SPEGNIMENTO DEI PROCESSI WIREPROXY IN BACKGROUND
               if warp_processes:
                   print("\n🧹 Spegnimento dei processi WARP locali in background...", flush=True)
