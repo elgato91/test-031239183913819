@@ -479,22 +479,6 @@ jobs:
                                   except Exception:
                                       page.goto(url, wait_until="load", timeout=35000)
                                       
-                              elif "google.com" in url:
-                                  page.goto("https://www.google.com/", wait_until="load", timeout=35000)
-                                  time.sleep(random.uniform(2.0, 3.5))
-                                  try:
-                                      consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                                      if consent_btn.is_visible():
-                                          consent_btn.click()
-                                          time.sleep(1.5)
-                                  except Exception:
-                                      pass
-                                  try:
-                                      search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                      search_box.fill(query_to_search)
-                                      page.keyboard.press("Enter")
-                                  except Exception:
-                                      page.goto(url, wait_until="load", timeout=35000)
                               else:
                                   page.goto(url, wait_until="load", timeout=35000)
                               
