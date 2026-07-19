@@ -72,7 +72,7 @@ jobs:
           from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
-          from cloakbrowser import launch_persistent_context
+          from cloakbrowser import launch
 
           URLS_TO_TEST = [
               "https://www.facebook.com/groups/expatsinparaguay/",
@@ -423,17 +423,13 @@ jobs:
 
           def cloakbrowser_worker_thread(worker_id, warp_proxy_addr, public_proxies, jobs_queue):
               print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
-              profile_dir = f"./cloak_profile_worker_{worker_id}"
               
               try:
-                  # Utilizziamo launch_persistent_context con un profilo su disco (allineato allo scraper di successo)
-                  context = launch_persistent_context(
-                      profile_dir,
+                  # Avvio Chromium globale condiviso sul display virtuale Xvfb
+                  browser = launch(
                       headless=False,
+                      geoip=True, 
                       humanize=True,
-                      proxy=f"socks5://{warp_proxy_addr}",
-                      geoip=True,
-                      viewport={"width": 1920, "height": 1080},
                       args=[
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
@@ -441,9 +437,16 @@ jobs:
                           "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"
                       ]
                   )
+                  
+                  # Creazione contesto primario (WARP) con viewport fisso desktop
+                  context = browser.new_context(
+                      proxy={"server": f"socks5://{warp_proxy_addr}"},
+                      viewport={"width": 1920, "height": 1080},
+                      ignore_https_errors=True
+                  )
                   print(f"  [🕵️ Worker CB {worker_id}] Browser pronto! Eseguo Warmup...", flush=True)
                   
-                  # --- FASE DI WARMUP SULLA SESSIONE PERSISTENTE ---
+                  # --- FASE DI WARMUP SULLA SESSIONE PRINCIPALE ---
                   try:
                       warmup_page = context.new_page()
                       warmup_page.goto("https://www.google.com", wait_until="load", timeout=25000)
@@ -488,7 +491,11 @@ jobs:
                           except Exception:
                               pass
                                       
-                          html_content = page.content()
+                          try:
+                              html_content = page.content()
+                          except Exception:
+                              html_content = ""
+                              
                           markdown_content = md(html_content, heading_style="ATX")
                           
                           is_valid, reason = validate_markdown(markdown_content, url)
@@ -510,21 +517,12 @@ jobs:
                               fallback_proxy = random.choice(public_proxies)
                               print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy: {fallback_proxy}...", flush=True)
                               
-                              fallback_profile_dir = f"./cloak_profile_fallback_{worker_id}_{f_idx}"
                               try:
-                                  fallback_context = launch_persistent_context(
-                                      fallback_profile_dir,
-                                      headless=False,
-                                      humanize=True,
-                                      proxy=f"socks5://{fallback_proxy}",
-                                      geoip=True,
+                                  # Connessione condivisa sotto lo stesso loop del browser tramite context figlio isolato
+                                  fallback_context = browser.new_context(
+                                      proxy={"server": f"socks5://{fallback_proxy}"},
                                       viewport={"width": 1920, "height": 1080},
-                                      args=[
-                                          "--no-sandbox",
-                                          "--disable-dev-shm-usage",
-                                          f"--fingerprint={random.randint(100000, 999999)}",
-                                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"
-                                      ]
+                                      ignore_https_errors=True
                                   )
                                   page = fallback_context.new_page()
                                   
@@ -544,7 +542,11 @@ jobs:
                                   except Exception:
                                       pass
                                               
-                                  html_content = page.content()
+                                  try:
+                                      html_content = page.content()
+                                  except Exception:
+                                      html_content = ""
+                                      
                                   markdown_content = md(html_content, heading_style="ATX")
                                   
                                   is_valid, reason = validate_markdown(markdown_content, url)
@@ -565,7 +567,7 @@ jobs:
                               print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                               
                       jobs_queue.task_done()
-                  context.close()
+                  browser.close()
               except Exception as e:
                   print(f"  [❌ CLOAKBROWSER Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
 
@@ -697,7 +699,7 @@ jobs:
           export PYTHONUNBUFFERED=1
           python extract.py
 
-      # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFACT (ZIP)
+      # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
       - name: Carica i file estratti come Artefatto ZIP
         uses: actions/upload-artifact@v4
         with:
