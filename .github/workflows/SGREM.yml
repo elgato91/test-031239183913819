@@ -556,6 +556,7 @@ jobs:
                                   await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                           else:
+                              # Corretto con l'istruzione obbligatoria 'await' per eseguire l'effettiva navigazione
                               await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                           
                           try:
@@ -627,6 +628,7 @@ jobs:
                                           await search_box.fill(query_to_search) 
                                           await page.keyboard.press("Enter")
                                       except Exception:
+                                          # Corretto con l'istruzione obbligatoria 'await' per eseguire la navigazione
                                           await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   elif "startpage.com" in url:
@@ -637,10 +639,12 @@ jobs:
                                           await search_box.fill(query_to_search)
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          # Corretto con l'istruzione obbligatoria 'await' per eseguire la navigazione
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   else:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                      # Corretto con l'istruzione obbligatoria 'await' per eseguire la navigazione
+                                      await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                                   try:
                                       await page.wait_for_load_state("networkidle", timeout=12000)
@@ -939,7 +943,7 @@ jobs:
                                       impersonate_target = "chrome120"
                                       headers_cffi = {
                                           "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                                          "accept-language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                                          "accept-language": "en-US,en;q=0.9",
                                           "cache-control": "max-age=0",
                                           "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
                                           "sec-ch-ua-mobile": "?0",
