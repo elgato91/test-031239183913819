@@ -113,6 +113,13 @@ jobs:
           warp_counter = 0
           stop_registration = threading.Event()
 
+          # Helper per estrarre in modo sicuro il formato IP:PORTA da qualsiasi stringa (raw, JSON, ecc.)
+          def extract_ip_port(text):
+              match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})', text)
+              if match:
+                  return f"{match.group(1)}:{match.group(2)}"
+              return None
+
           def get_query_from_url(url, default="migliore carbonara roma"):
               try:
                   parsed = urlparse(url)
@@ -594,7 +601,8 @@ jobs:
                           
                           try:
                               parsed = urlparse(url)
-                              is_it_domain = parsed.netloc.lower().endswith('.it')
+                              domain = parsed.netloc.lower()
+                              is_it_domain = domain.endswith('.it')
                           except Exception:
                               is_it_domain = False
                               
@@ -629,10 +637,10 @@ jobs:
                                           await search_box.fill(query_to_search)
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   else:
-                                      await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                                   try:
                                       await page.wait_for_load_state("networkidle", timeout=12000)
@@ -677,13 +685,18 @@ jobs:
               asyncio.run(worker_async())
 
           if __name__ == '__main__':
-              # DOWNLOAD LISTA PROXY
+              # DOWNLOAD LISTA PROXY (Sorgenti multiple aggregate ad alta capienza per massimizzare la freschezza globale)
               print("==========================================", flush=True)
               print("🔄 Scaricamento liste proxy candidati...", flush=True)
               proxy_urls = [
                   "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                  "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
                   "https://raw.githubusercontent.com/Hookzof/socks5_list/master/socks5.txt",
-                  "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"
+                  "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
+                  "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt",
+                  "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/socks5.txt",
+                  "https://raw.githubusercontent.com/Jakee8718/Free-Proxies/main/socks5.txt",
+                  "https://raw.githubusercontent.com/proxyscrape/free-proxy-list/main/socks5.txt"
               ]
               raw_proxies_set = set()
               for p_url in proxy_urls:
@@ -692,8 +705,10 @@ jobs:
                       if r.status_code == 200:
                           for line in r.text.split('\n'):
                               line = line.strip()
-                              if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
-                                  raw_proxies_set.add(line)
+                              if line:
+                                  candidate = extract_ip_port(line)
+                                  if candidate:
+                                      raw_proxies_set.add(candidate)
                   except Exception:
                       pass
                       
@@ -813,34 +828,60 @@ jobs:
                   print(f"🚀 FASE 2c: Recupero finale di {len(failed_it_urls)} URL .it tramite proxy italiani...", flush=True)
                   print("==========================================\n", flush=True)
                   
-                  # Scaricamento proxy italiani da sorgenti multiple ad alta densità (ProxyScrape e Geonode)
+                  # Scaricamento proxy italiani da sorgenti multiple ad alta densità (ProxyScrape, Geonode, Proxifly)
                   it_raw_proxies = []
                   urls_api_it = [
                       "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&timeout=10000&country=it&format=text",
+                      "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&timeout=10000&country=it&format=text",
+                      "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&timeout=10000&country=it&format=text",
                       "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=it",
-                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks5&timeout=10000&country=it"
+                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=it",
+                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=it",
+                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks5&timeout=10000&country=it",
+                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks4&timeout=10000&country=it",
+                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=http&timeout=10000&country=it"
                   ]
                   raw_it_set = set()
+                  
+                  # 1. Chiamate API testuali di ProxyScrape
                   for api_url in urls_api_it:
                       try:
                           r = requests.get(api_url, timeout=10)
                           if r.status_code == 200:
                               for line in r.text.split('\n'):
                                   line = line.strip()
-                                  if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
-                                      raw_it_set.add(line)
+                                  if line:
+                                      candidate = extract_ip_port(line)
+                                      if candidate:
+                                          raw_it_set.add(candidate)
                       except Exception:
                           pass
                           
-                  # Interrogazione del database strutturato di Geonode (fino a 100 proxy recenti localizzati in Italia)
+                  # 2. Interrogazione del database strutturato di Geonode (fino a 150 proxy recenti localizzati in Italia, filtrati in Python)
                   try:
-                      r = requests.get("https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&country=IT&protocols=socks5", timeout=10)
+                      r = requests.get("https://proxylist.geonode.com/api/proxy-list?limit=150&page=1&sort_by=lastChecked&sort_type=desc&country=IT", timeout=10)
                       if r.status_code == 200:
                           data = r.json()
                           for item in data.get("data", []):
                               ip = item.get("ip")
                               port = item.get("port")
+                              protocols = item.get("protocols", [])
                               if ip and port:
+                                  if any(proto in ["socks5", "socks4", "http", "https"] for proto in protocols):
+                                      raw_it_set.add(f"{ip}:{port}")
+                  except Exception:
+                      pass
+                      
+                  # 3. Chiamata alla lista geolocalizzata per l'Italia di Proxifly (SOCKS5/SOCKS4/HTTP)
+                  try:
+                      r = requests.get("https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/IT/data.json", timeout=10)
+                      if r.status_code == 200:
+                          data = r.json()
+                          for item in data:
+                              ip = item.get("ip")
+                              port = item.get("port")
+                              protocol = item.get("protocol", "")
+                              if ip and port and protocol in ["socks5", "socks4", "http", "https"]:
                                   raw_it_set.add(f"{ip}:{port}")
                   except Exception:
                       pass
@@ -882,12 +923,12 @@ jobs:
                       it_working_proxies.sort(key=lambda x: x[1])
                       it_sorted_proxies = [p[0] for p in it_working_proxies]
                       
-                      if it_sorted_proxies:
-                          print(f"\n🎉 Selezionati {len(it_sorted_proxies)} proxy IT attivi per il tentativo finale.", flush=True)
+                      if f_sorted := it_sorted_proxies:
+                          print(f"\n🎉 Selezionati {len(f_sorted)} proxy IT attivi per il tentativo finale.", flush=True)
                           for url in failed_it_urls:
                               print(f"🔄 Tentativo di recupero italiano per: {url}", flush=True)
                               success_it = False
-                              for f_idx, proxy_addr in enumerate(it_sorted_proxies[:5]):
+                              for f_idx, proxy_addr in enumerate(f_sorted[:5]):
                                   proxy_url = f"socks5h://{proxy_addr}"
                                   proxies = {
                                       'http': proxy_url,
@@ -898,7 +939,7 @@ jobs:
                                       impersonate_target = "chrome120"
                                       headers_cffi = {
                                           "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                                          "accept-language": "en-US,en;q=0.9",
+                                          "accept-language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                                           "cache-control": "max-age=0",
                                           "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
                                           "sec-ch-ua-mobile": "?0",
