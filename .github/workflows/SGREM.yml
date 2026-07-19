@@ -42,9 +42,6 @@ jobs:
           curl -fsSL https://github.com/pufferffish/wireproxy/releases/download/v1.0.9/wireproxy_linux_amd64.tar.gz -o wireproxy.tar.gz
           tar -xzf wireproxy.tar.gz
           sudo mv wireproxy /usr/local/bin/wireproxy
-          sudo chmod +x /wireproxy
-          sudo mv /usr/local/bin/wireproxy /usr/local/bin/wireproxy_old || true
-          sudo mv wireproxy /usr/local/bin/wireproxy
           sudo chmod +x /usr/local/bin/wireproxy
           
           # Installa le dipendenze Python e CloakBrowser
@@ -622,7 +619,7 @@ jobs:
                                           await search_box.fill(query_to_search) 
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   elif "startpage.com" in url:
                                       await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
@@ -632,10 +629,10 @@ jobs:
                                           await search_box.fill(query_to_search)
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   else:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                      await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                                   try:
                                       await page.wait_for_load_state("networkidle", timeout=12000)
@@ -901,7 +898,7 @@ jobs:
                                       impersonate_target = "chrome120"
                                       headers_cffi = {
                                           "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                                          "accept-language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                                          "accept-language": "en-US,en;q=0.9",
                                           "cache-control": "max-age=0",
                                           "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
                                           "sec-ch-ua-mobile": "?0",
