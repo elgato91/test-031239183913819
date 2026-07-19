@@ -561,3 +561,145 @@ jobs:
                                   error_msg = f"Errore su fallback: {fe}"
                                   
                           if not success:
+                              print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
+                              
+                      jobs_queue.task_done()
+                  browser.close()
+              except Exception as e:
+                  print(f"  [❌ CLOAKBROWSER Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
+
+          if __name__ == '__main__':
+              # DOWNLOAD LISTA PROXY (Sorgenti multiple per massimizzare la freschezza e disponibilità dei SOCKS5 globali)
+              print("==========================================", flush=True)
+              print("🔄 Scaricamento liste proxy candidati...", flush=True)
+              proxy_urls = [
+                  "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                  "https://raw.githubusercontent.com/Hookzof/socks5_list/master/socks5.txt",
+                  "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"
+              ]
+              raw_proxies_set = set()
+              for p_url in proxy_urls:
+                  try:
+                      r = requests.get(p_url, timeout=10)
+                      if r.status_code == 200:
+                          for line in r.text.split('\n'):
+                              line = line.strip()
+                              if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
+                                  raw_proxies_set.add(line)
+                  except Exception:
+                      pass
+                      
+              raw_proxies = list(raw_proxies_set)
+              random.shuffle(raw_proxies)
+              print(f"✅ Recuperati {len(raw_proxies)} proxy candidati totali.", flush=True)
+
+              # AVVIO DELLO SCANNER (Trova fino a 100 proxy sicuri in parallelo)
+              print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 100 funzionanti)...", flush=True)
+              with concurrent.futures.ThreadPoolExecutor(max_workers=300) as scanner_executor:
+                  futures = {scanner_executor.submit(scan_worker, p): p for p in raw_proxies[:2000]}
+                  concurrent.futures.wait(futures)
+
+              working_proxies.sort(key=lambda x: x[1])
+              sorted_proxy_addrs = [p[0] for p in working_proxies]
+              
+              if not sorted_proxy_addrs:
+                  print("⚠️ Nessun proxy pubblico valido trovato. Fallback su connessione diretta per la Fase 1.", flush=True)
+
+              # FASE 1: curl-cffi E Jina con i proxy pubblici
+              print("\n==========================================", flush=True)
+              print(f"🚀 FASE 1: Estrazione con {len(sorted_proxy_addrs)} proxy pubblici...", flush=True)
+              print("==========================================\n", flush=True)
+              
+              failed_phase1 = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=min(50, total_urls)) as executor:
+                  items = list(enumerate(URLS_TO_TEST, start=1))
+                  future_to_url = {executor.submit(fetch_url_lightweight, item, sorted_proxy_addrs): item for item in items}
+                  for future in concurrent.futures.as_completed(future_to_url):
+                      success, message, failed_item = future.result()
+                      print(message, flush=True)
+                      if not success:
+                          failed_phase1.append(failed_item)
+
+              # FASE 2: Registrazione concorrente WARP (solo per gli URL non estratti)
+              if failed_phase1:
+                  print("\n==========================================", flush=True)
+                  print(f"🌀 FASE 2: Registrazione ultra-concorrente di 20 IP WARP tramite i proxy funzionanti...", flush=True)
+                  print("==========================================\n", flush=True)
+                  
+                  stop_registration.clear()
+                  active_warp_proxies = []
+                  warp_processes = []
+                  warp_counter = 0
+
+                  # Lancio ultra-veloce della registrazione in parallelo sui proxy preventivamente validati
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=40) as register_executor:
+                      futures = [register_executor.submit(register_single_warp, p) for p in sorted_proxy_addrs[:100]]
+                      concurrent.futures.wait(futures)
+                      
+                  if not active_warp_proxies:
+                      print("⚠️ Registrazione WARP non riuscita. Fallback sui proxy pubblici originali.", flush=True)
+                      active_warp_proxies = sorted_proxy_addrs
+                  else:
+                      print(f"\n🎉 Totale tunnel WARP locali attivati: {len(active_warp_proxies)}", flush=True)
+
+                  # FASE 2a: Retest degli URL falliti con curl-cffi usando i proxy WARP
+                  print("\n==========================================", flush=True)
+                  print(f"🚀 FASE 2a: Retest di {len(failed_phase1)} URL falliti tramite IP WARP con curl-cffi/Jina...", flush=True)
+                  print("==========================================\n", flush=True)
+                  
+                  failed_phase2a = []
+                  with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(failed_phase1))) as executor:
+                      future_to_url = {executor.submit(fetch_url_lightweight, (item[0], item[1]), active_warp_proxies): item for item in failed_phase1}
+                      for future in concurrent.futures.as_completed(future_to_url):
+                          success, message, failed_item = future.result()
+                          print(message, flush=True)
+                          if not success:
+                              failed_phase2a.append(failed_item)
+
+                  # FASE 2b: Avvio CloakBrowser con 20 browser paralleli su WARP per i rimanenti fallimenti
+                  if failed_phase2a:
+                      print("\n==========================================", flush=True)
+                      print(f"🔥 FASE 2b: Avvio di {min(20, len(active_warp_proxies))} browser paralleli CloakBrowser per risolvere {len(failed_phase2a)} URL rimanenti...", flush=True)
+                      print("==========================================\n", flush=True)
+                      
+                      jobs_queue = Queue()
+                      for item in failed_phase2a:
+                          jobs_queue.put(item)
+                          
+                      cf_threads = []
+                      num_cf_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
+                      
+                      for w_id in range(1, num_cf_workers + 1):
+                          proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
+                          t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
+                          t.start()
+                          cf_threads.append(t)
+                          
+                      for t in cf_threads:
+                          t.join()
+                  else:
+                      print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
+              else:
+                  print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1!", flush=True)
+                  
+              # SPEGNIMENTO DEI PROCESSI WIREPROXY IN BACKGROUND
+              if warp_processes:
+                  print("\n🧹 Spegnimento dei processi WARP locali in background...", flush=True)
+                  for proc in warp_processes:
+                      try:
+                          proc.terminate()
+                          proc.wait(timeout=2)
+                      except Exception:
+                          pass
+              print("👋 Fine elaborazione.", flush=True)
+          EOF
+          export PYTHONUNBUFFERED=1
+          python extract.py
+
+      # FASE 3: IMPACCHETTAMENTO E CARICAMENTO COME ARTEFATTO (ZIP)
+      - name: Carica i file estratti come Artefatto ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: jina-markdown-outputs
+          path: output/
+          retention-days: 7
