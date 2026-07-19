@@ -456,7 +456,6 @@ jobs:
                       args=[
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
-                          f"--fingerprint={random.randint(100000, 999999)}",
                           "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"
                       ]
                   )
