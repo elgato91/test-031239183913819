@@ -163,11 +163,6 @@ jobs:
               return private_key, addresses, dns_servers, public_key, endpoint
 
           def clean_html_and_to_markdown(html_content):
-              """
-              Rimuove i blocchi noscript, script e style dall'HTML prima della conversione.
-              Questo evita che la presenza di messaggi standard di avvertimento non visualizzati
-              (es. "Please enable Javascript") all'interno di tag <noscript> inneschi falsi positivi.
-              """
               try:
                   soup = BeautifulSoup(html_content, 'html.parser')
                   for element in soup(["noscript", "script", "style", "iframe", "meta", "head"]):
@@ -181,7 +176,6 @@ jobs:
               if not markdown_text:
                   return False, "Markdown vuoto"
                   
-              # Estrazione del solo testo per evitare falsi positivi su markup vuoti o SPA non idratate
               text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text)
               text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only)
               text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only)
@@ -214,13 +208,19 @@ jobs:
                   "accept the risk and continue",
                   "network security settings might be causing this",
                   "accept the risk",
-                  "connection is untrusted"
+                  "connection is untrusted",
+                  # Nuovi indicatori specifici per blocchi di Bing e Yelp
+                  "one last step",
+                  "please solve the challenge below",
+                  "solve the challenge below to continue",
+                  "sending automated queries",
+                  "not allowed to access yelp",
+                  "yelp.com/captcha"
               ]
               for ind in blocking_indicators:
                   if ind in low_text:
                       return False, f"Rilevato blocco, captcha o errore nel testo: '{ind}'"
                       
-              # Rilevamento delle pagine guscio vuote
               domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
               if domain_match:
                   domain = domain_match.group(1).lower().split('.')[0]
@@ -406,7 +406,6 @@ jobs:
                           timeout=6
                       )
                       if response.status_code == 200:
-                          # Pulisce l'HTML per evitare avvisi fasulli di noscript
                           markdown_content = clean_html_and_to_markdown(response.text)
                           is_valid, reason = validate_markdown(markdown_content, url)
                           if is_valid:
@@ -470,37 +469,39 @@ jobs:
                       try:
                           page = browser.new_page()
                           
-                          try:
-                              if "bing.com" in url:
-                                  page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                  time.sleep(random.uniform(2.5, 4.0))
-                                  try:
-                                      search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                      search_box.fill(query_to_search) 
-                                      page.keyboard.press("Enter")
-                                  except Exception:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                      
-                              elif "startpage.com" in url:
-                                  page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                                  time.sleep(random.uniform(2.0, 3.5))
-                                  try:
-                                      search_box = page.locator("input#q").first
-                                      search_box.fill(query_to_search)
-                                      page.keyboard.press("Enter")
-                                  except Exception:
-                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                      
-                              else:
-                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                              
+                          # La navigazione principale propaga gli errori in caso di fallimento o proxy offline
+                          if "bing.com" in url:
+                              page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                              time.sleep(random.uniform(2.5, 4.0))
                               try:
-                                  page.wait_for_load_state("networkidle", timeout=12000)
+                                  search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                  search_box.fill(query_to_search) 
+                                  page.keyboard.press("Enter")
                               except Exception:
-                                  pass
-                              
-                              time.sleep(6.0)
-                              
+                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                          elif "startpage.com" in url:
+                              page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                              time.sleep(random.uniform(2.0, 3.5))
+                              try:
+                                  search_box = page.locator("input#q").first
+                                  search_box.fill(query_to_search)
+                                  page.keyboard.press("Enter")
+                              except Exception:
+                                  page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                          else:
+                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                          
+                          # Operazioni accessorie e non bloccanti gestite localmente per evitare falsi KO
+                          try:
+                              page.wait_for_load_state("networkidle", timeout=12000)
+                          except Exception:
+                              pass
+                          
+                          time.sleep(6.0)
+                          
+                          try:
                               page.keyboard.press("PageDown")
                               time.sleep(1.0)
                               page.keyboard.press("PageDown")
@@ -524,8 +525,6 @@ jobs:
                           error_msg = f"Errore su WARP: {e}"
                           
                       # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
-                      # Correzione: usiamo i proxy SOCKS5 pubblici (non Cloudflare) come fallback
-                      # se l'IP WARP locale subisce blocchi di "unusual traffic" dovuti ad ASN bloccati da Google.
                       if not success and public_proxies:
                           fallback_attempts = min(4, len(public_proxies))
                           for f_idx in range(fallback_attempts):
@@ -539,37 +538,38 @@ jobs:
                                   )
                                   page = fallback_context.new_page()
                                   
-                                  try:
-                                      if "bing.com" in url:
-                                          page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                          time.sleep(random.uniform(2.5, 4.0))
-                                          try:
-                                              search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                              search_box.fill(query_to_search) 
-                                              page.keyboard.press("Enter")
-                                          except Exception:
-                                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                              
-                                      elif "startpage.com" in url:
-                                          page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                                          time.sleep(random.uniform(2.0, 3.5))
-                                          try:
-                                              search_box = page.locator("input#q").first
-                                              search_box.fill(query_to_search)
-                                              page.keyboard.press("Enter")
-                                          except Exception:
-                                              page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                              
-                                      else:
-                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                                      
+                                  # Navigazione principale propaga gli errori in caso di KO del proxy pubblico
+                                  if "bing.com" in url:
+                                      page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                                      time.sleep(random.uniform(2.5, 4.0))
                                       try:
-                                          page.wait_for_load_state("networkidle", timeout=12000)
+                                          search_box = page.locator("textarea[name='q'], input[name='q']").first
+                                          search_box.fill(query_to_search) 
+                                          page.keyboard.press("Enter")
                                       except Exception:
-                                          pass
-                                      
-                                      time.sleep(6.0)
-                                      
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          
+                                  elif "startpage.com" in url:
+                                      page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
+                                      time.sleep(random.uniform(2.0, 3.5))
+                                      try:
+                                          search_box = page.locator("input#q").first
+                                          search_box.fill(query_to_search)
+                                          page.keyboard.press("Enter")
+                                      except Exception:
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          
+                                  else:
+                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  
+                                  try:
+                                      page.wait_for_load_state("networkidle", timeout=12000)
+                                  except Exception:
+                                      pass
+                                  
+                                  time.sleep(6.0)
+                                  
+                                  try:
                                       page.keyboard.press("PageDown")
                                       time.sleep(1.0)
                                       page.keyboard.press("PageDown")
@@ -704,7 +704,6 @@ jobs:
                       
                       for w_id in range(1, num_cf_workers + 1):
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
-                          # Ripristinata la combinazione: IP WARP iniziale con fallback su SOCKS5 pubblici (sorted_proxy_addrs)
                           t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, active_warp_proxies, sorted_proxy_addrs, jobs_queue))
                           t.start()
                           cf_threads.append(t)
