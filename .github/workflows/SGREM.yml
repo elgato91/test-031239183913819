@@ -42,6 +42,9 @@ jobs:
           curl -fsSL https://github.com/pufferffish/wireproxy/releases/download/v1.0.9/wireproxy_linux_amd64.tar.gz -o wireproxy.tar.gz
           tar -xzf wireproxy.tar.gz
           sudo mv wireproxy /usr/local/bin/wireproxy
+          sudo chmod +x /wireproxy
+          sudo mv /usr/local/bin/wireproxy /usr/local/bin/wireproxy_old || true
+          sudo mv wireproxy /usr/local/bin/wireproxy
           sudo chmod +x /usr/local/bin/wireproxy
           
           # Installa le dipendenze Python e CloakBrowser
@@ -581,21 +584,29 @@ jobs:
                           error_msg = f"Errore su WARP: {e}"
                           
                       # --- TENTATIVI DI RISERVA (FALLBACK) ---
-                      # Se fallisce l'IP WARP primario, ruotiamo su 2 IP WARP alternativi e successivamente su 3 SOCKS5 pubblici migliori.
-                      if not success and public_proxies:
+                      # Se fallisce l'IP WARP primario, ruotiamo su 2 IP WARP alternativi.
+                      # Se l'URL fa parte di un dominio .it, limitiamo i fallback ai soli IP WARP alternativi senza usare proxy pubblici generici internazionali.
+                      if not success:
                           warp_alternatives = [p for p in active_warp_proxies if p != warp_proxy_addr]
                           random.shuffle(warp_alternatives)
                           warp_fallbacks = warp_alternatives[:2]
                           
-                          fast_public_proxies = public_proxies[:30]
-                          random.shuffle(fast_public_proxies)
-                          public_fallbacks = fast_public_proxies[:3]
-                          
                           fallback_queue = []
                           for p in warp_fallbacks:
                               fallback_queue.append((p, "WARP Alternativo"))
-                          for p in public_fallbacks:
-                              fallback_queue.append((p, "SOCKS5 Pubblico"))
+                          
+                          try:
+                              parsed = urlparse(url)
+                              is_it_domain = parsed.netloc.lower().endswith('.it')
+                          except Exception:
+                              is_it_domain = False
+                              
+                          if not is_it_domain and public_proxies:
+                              fast_public_proxies = public_proxies[:30]
+                              random.shuffle(fast_public_proxies)
+                              public_fallbacks = fast_public_proxies[:3]
+                              for p in public_fallbacks:
+                                  fallback_queue.append((p, "SOCKS5 Pubblico"))
                               
                           for f_idx, (fallback_proxy, proxy_type) in enumerate(fallback_queue, start=1):
                               print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx}/{len(fallback_queue)} con {proxy_type}: {fallback_proxy}...", flush=True)
@@ -611,7 +622,7 @@ jobs:
                                           await search_box.fill(query_to_search) 
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   elif "startpage.com" in url:
                                       await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
@@ -621,10 +632,10 @@ jobs:
                                           await search_box.fill(query_to_search)
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                           
                                   else:
-                                      await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                      page.goto(url, wait_until="domcontentloaded", timeout=35000)
                                   
                                   try:
                                       await page.wait_for_load_state("networkidle", timeout=12000)
@@ -795,7 +806,7 @@ jobs:
                   try:
                       parsed = urlparse(url)
                       domain = parsed.netloc.lower()
-                      if domain.endswith('.it') or domain.split('.')[-1] == 'it':
+                      if domain.endswith('.it'):
                           failed_it_urls.append(url)
                   except Exception:
                       pass
@@ -805,11 +816,12 @@ jobs:
                   print(f"🚀 FASE 2c: Recupero finale di {len(failed_it_urls)} URL .it tramite proxy italiani...", flush=True)
                   print("==========================================\n", flush=True)
                   
-                  # Scaricamento proxy italiani da sorgenti ProxyScrape (v4 e v2)
+                  # Scaricamento proxy italiani da sorgenti multiple ad alta densità (ProxyScrape e Geonode)
                   it_raw_proxies = []
                   urls_api_it = [
                       "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&timeout=10000&country=it&format=text",
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=it"
+                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=it",
+                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks5&timeout=10000&country=it"
                   ]
                   raw_it_set = set()
                   for api_url in urls_api_it:
@@ -822,6 +834,20 @@ jobs:
                                       raw_it_set.add(line)
                       except Exception:
                           pass
+                          
+                  # Interrogazione del database strutturato di Geonode (fino a 100 proxy recenti localizzati in Italia)
+                  try:
+                      r = requests.get("https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&country=IT&protocols=socks5", timeout=10)
+                      if r.status_code == 200:
+                          data = r.json()
+                          for item in data.get("data", []):
+                              ip = item.get("ip")
+                              port = item.get("port")
+                              if ip and port:
+                                  raw_it_set.add(f"{ip}:{port}")
+                  except Exception:
+                      pass
+                      
                   it_raw_proxies = list(raw_it_set)
                   random.shuffle(it_raw_proxies)
                   
