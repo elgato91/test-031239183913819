@@ -74,7 +74,7 @@ jobs:
           from cloakbrowser import launch
 
           URLS_TO_TEST = [
-              "https://www.facebook.com/groups/expatsinparaguay/",
+              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
               "https://www.google.com/search?q=cosa+vedere+roma",
               "https://www.bing.com/search?q=cosa+vedere+roma",
               "https://www.bloomberg.com/markets/stocks",
