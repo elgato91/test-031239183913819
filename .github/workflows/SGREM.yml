@@ -833,22 +833,23 @@ jobs:
                   print("==========================================\n", flush=True)
                   
                   # Scaricamento proxy italiani da sorgenti multiple ad alta densità (ProxyScrape, Geonode, Proxifly)
+                  # Memorizziamo le tuple (IP:PORTA, protocollo_schema) per testare ciascun proxy con il suo protocollo nativo
                   it_raw_proxies = []
                   urls_api_it = [
-                      "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&timeout=10000&country=it&format=text",
-                      "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&timeout=10000&country=it&format=text",
-                      "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&timeout=10000&country=it&format=text",
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=it",
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=it",
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=it",
-                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks5&timeout=10000&country=it",
-                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks4&timeout=10000&country=it",
-                      "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=http&timeout=10000&country=it"
+                      ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&timeout=10000&country=it&format=text", "socks5h"),
+                      ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&timeout=10000&country=it&format=text", "socks4"),
+                      ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&timeout=10000&country=it&format=text", "http"),
+                      ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=it", "socks5h"),
+                      ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=it", "socks4"),
+                      ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=it", "http"),
+                      ("https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks5&timeout=10000&country=it", "socks5h"),
+                      ("https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=socks4&timeout=10000&country=it", "socks4"),
+                      ("https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&proxytype=http&timeout=10000&country=it", "http")
                   ]
                   raw_it_set = set()
                   
                   # 1. Chiamate API testuali di ProxyScrape
-                  for api_url in urls_api_it:
+                  for api_url, scheme in urls_api_it:
                       try:
                           r = requests.get(api_url, timeout=10)
                           if r.status_code == 200:
@@ -857,7 +858,7 @@ jobs:
                                   if line:
                                       candidate = extract_ip_port(line)
                                       if candidate:
-                                          raw_it_set.add(candidate)
+                                          raw_it_set.add((candidate, scheme))
                       except Exception:
                           pass
                           
@@ -870,9 +871,13 @@ jobs:
                               ip = item.get("ip")
                               port = item.get("port")
                               protocols = item.get("protocols", [])
-                              if ip and port:
-                                  if any(proto in ["socks5", "socks4", "http", "https"] for proto in protocols):
-                                      raw_it_set.add(f"{ip}:{port}")
+                              if ip and port and protocols:
+                                  if "socks5" in protocols:
+                                      raw_it_set.add((f"{ip}:{port}", "socks5h"))
+                                  elif "socks4" in protocols:
+                                      raw_it_set.add((f"{ip}:{port}", "socks4"))
+                                  elif "http" in protocols or "https" in protocols:
+                                      raw_it_set.add((f"{ip}:{port}", "http"))
                   except Exception:
                       pass
                       
@@ -884,9 +889,14 @@ jobs:
                           for item in data:
                               ip = item.get("ip")
                               port = item.get("port")
-                              protocol = item.get("protocol", "")
-                              if ip and port and protocol in ["socks5", "socks4", "http", "https"]:
-                                  raw_it_set.add(f"{ip}:{port}")
+                              protocol = item.get("protocol", "").lower()
+                              if ip and port:
+                                  if protocol == "socks5":
+                                      raw_it_set.add((f"{ip}:{port}", "socks5h"))
+                                  elif protocol == "socks4":
+                                      raw_it_set.add((f"{ip}:{port}", "socks4"))
+                                  elif protocol in ["http", "https"]:
+                                      raw_it_set.add((f"{ip}:{port}", "http"))
                   except Exception:
                       pass
                       
@@ -899,12 +909,14 @@ jobs:
                       it_lock = threading.Lock()
                       it_stop_scanner = threading.Event()
                       
-                      def scan_italian_worker(proxy_addr):
+                      # Esegui il test di liveness di ciascun proxy impostando il suo esatto protocollo nativo
+                      def scan_italian_worker(item):
+                          proxy_addr, scheme = item
                           if it_stop_scanner.is_set():
                               return
                           proxies_dict = {
-                              'http': f'socks5h://{proxy_addr}',
-                              'https': f'socks5h://{proxy_addr}'
+                              'http': f'{scheme}://{proxy_addr}',
+                              'https': f'{scheme}://{proxy_addr}'
                           }
                           try:
                               start_time = time.time()
@@ -913,8 +925,8 @@ jobs:
                               if r.status_code == 200:
                                   with it_lock:
                                       if len(it_working_proxies) < 5 and not it_stop_scanner.is_set():
-                                          it_working_proxies.append((proxy_addr, latency))
-                                          print(f"  [+] Proxy IT valido: {proxy_addr} | Latenza: {latency:.2f}s ({len(it_working_proxies)}/5)", flush=True)
+                                          it_working_proxies.append((proxy_addr, scheme, latency))
+                                          print(f"  [+] Proxy IT valido: {proxy_addr} ({scheme}) | Latenza: {latency:.2f}s ({len(it_working_proxies)}/5)", flush=True)
                                           if len(it_working_proxies) >= 5:
                                               it_stop_scanner.set()
                           except Exception:
@@ -924,26 +936,26 @@ jobs:
                           futures = {scanner_executor.submit(scan_italian_worker, p): p for p in it_raw_proxies[:150]}
                           concurrent.futures.wait(futures)
                           
-                      it_working_proxies.sort(key=lambda x: x[1])
-                      it_sorted_proxies = [p[0] for p in it_working_proxies]
+                      it_working_proxies.sort(key=lambda x: x[2]) # Ordina per latenza
+                      it_sorted_proxies = [(p[0], p[1]) for p in it_working_proxies]
                       
                       if f_sorted := it_sorted_proxies:
                           print(f"\n🎉 Selezionati {len(f_sorted)} proxy IT attivi per il tentativo finale.", flush=True)
                           for url in failed_it_urls:
                               print(f"🔄 Tentativo di recupero italiano per: {url}", flush=True)
                               success_it = False
-                              for f_idx, proxy_addr in enumerate(f_sorted[:5]):
-                                  proxy_url = f"socks5h://{proxy_addr}"
+                              for f_idx, (proxy_addr, scheme) in enumerate(f_sorted[:5]):
+                                  proxy_url = f"{scheme}://{proxy_addr}"
                                   proxies = {
                                       'http': proxy_url,
                                       'https': proxy_url
                                   }
-                                  print(f"  [Tentativo {f_idx+1}/5] Esecuzione curl-cffi tramite proxy IT: {proxy_addr}...", flush=True)
+                                  print(f"  [Tentativo {f_idx+1}/5] Esecuzione curl-cffi tramite proxy IT ({scheme}): {proxy_addr}...", flush=True)
                                   try:
                                       impersonate_target = "chrome120"
                                       headers_cffi = {
                                           "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                                          "accept-language": "en-US,en;q=0.9",
+                                          "accept-language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                                           "cache-control": "max-age=0",
                                           "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
                                           "sec-ch-ua-mobile": "?0",
