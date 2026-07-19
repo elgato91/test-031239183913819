@@ -96,7 +96,6 @@ jobs:
           os.makedirs('output', exist_ok=True)
           total_urls = len(URLS_TO_TEST)
 
-          # Scanner variabili
           proxy_queue = Queue()
           stop_scanner = threading.Event()
           working_count = 0
@@ -104,7 +103,6 @@ jobs:
           max_working = 100
           working_proxies = []
 
-          # Gestione WARP
           warp_success_lock = threading.Lock()
           active_warp_proxies = []
           warp_processes = []
@@ -116,498 +114,238 @@ jobs:
                   parsed = urlparse(url)
                   queries = parse_qs(parsed.query)
                   for param in ['q', 'query', 'p', 'find_desc']:
-                      if param in queries:
-                          return queries[param][0]
-              except Exception:
-                  pass
+                      if param in queries: return queries[param][0]
+              except Exception: pass
               return default
 
           def parse_wgcf_profile(filepath):
-              private_key = None
-              addresses = []
-              dns_servers = []
-              public_key = None
-              endpoint = "engage.cloudflareclient.com:2408"
-              
+              private_key, addresses, dns_servers, public_key, endpoint = None, [], [], None, "engage.cloudflareclient.com:2408"
               if os.path.exists(filepath):
                   with open(filepath, "r") as f:
                       for line in f:
                           line = line.strip()
-                          if not line or line.startswith("#"):
-                              continue
+                          if not line or line.startswith("#"): continue
                           if "=" in line:
-                              key, val = line.split("=", 1)
-                              key = key.strip().lower()
-                              val = val.strip()
-                              if key == "privatekey":
-                                  private_key = val
-                              elif key == "address":
-                                  parts = [p.strip() for p in val.split(",") if p.strip()]
-                                  addresses.extend(parts)
-                              elif key == "dns":
-                                  parts = [p.strip() for p in val.split(",") if p.strip()]
-                                  dns_servers.extend(parts)
-                              elif key == "publickey":
-                                  public_key = val
-                              elif key == "endpoint":
-                                  endpoint = val
-                                  
-              # Integrazione preventiva di server DNS globali alternativi instradati nel tunnel
-              for backup_dns in ["8.8.8.8", "9.9.9.9"]:
-                  if backup_dns not in dns_servers:
-                      dns_servers.append(backup_dns)
-                      
-              if not addresses:
-                  addresses = ["172.16.0.2/32"]
-                  
-              return private_key, addresses, dns_servers, public_key, endpoint
+                              key, val = [x.strip() for x in line.split("=", 1)]
+                              key = key.lower()
+                              if key == "privatekey": private_key = val
+                              elif key == "address": addresses.extend([p.strip() for p in val.split(",") if p.strip()])
+                              elif key == "dns": dns_servers.extend([p.strip() for p in val.split(",") if p.strip()])
+                              elif key == "publickey": public_key = val
+                              elif key == "endpoint": endpoint = val
+              for d in ["8.8.8.8", "9.9.9.9"]:
+                  if d not in dns_servers: dns_servers.append(d)
+              return private_key, addresses or ["172.16.0.2/32"], dns_servers, public_key, endpoint
 
           def validate_markdown(markdown_text, url):
-              if not markdown_text:
-                  return False, "Markdown vuoto"
-                  
-              # Estrazione del solo testo per evitare falsi positivi su markup vuoti o SPA non idratate
+              if not markdown_text: return False, "Markdown vuoto"
               text_only = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', markdown_text)
               text_only = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text_only)
-              text_only = re.sub(r'[*_#>\-`[\]]', ' ', text_only)
-              text_only = ' '.join(text_only.split())
-              
-              char_count = len(text_only)
-              if char_count < 200:
-                  return False, f"Testo utile nel markdown insufficiente ({char_count} caratteri)"
-                  
+              text_only = ' '.join(re.sub(r'[*_#>\-`[\]]', ' ', text_only).split())
+              if len(text_only) < 200: return False, f"Testo utile markdown insufficiente ({len(text_only)} caratteri)"
               low_text = markdown_text.lower()
               blocking_indicators = [
-                  "challenge-platform", "access denied", "403 forbidden", "cloudflare",
-                  "just a moment", "security verification", "please enable js", "enable javascript",
-                  "are you a robot", "please wait for verification", "we've detected unusual activity",
-                  "unusual traffic from your computer network", "checking your browser", 
-                  "prove your humanity", "captcha verification", "robot challenge screen",
-                  "one moment, please...", "pardon our interruption",
-                  "you've been blocked by network security",
-                  "blocked by network security",
-                  "use your developer token",
-                  # Indicatori specifici per bloccare gli avvisi testuali di Jina Reader
-                  "warning: this page maybe requiring captcha",
-                  "please make sure you are authorized to access this page",
-                  "this page maybe requiring captcha",
-                  # Indicatori CloudFront per geoblocking
-                  "the request could not be satisfied",
-                  "block access from your country",
-                  "generated by cloudfront",
-                  # Indicatori di pagine fittizie "Under Construction" (es. Mindtrip)
-                  "under construction",
-                  "mindtrip is under construction",
-                  # Errori SSL / Pagine di errore del browser (proxy corrotti/scaduti)
-                  "problem loading page",
-                  "accept the risk and continue",
-                  "network security settings might be causing this",
-                  "accept the risk",
-                  "connection is untrusted"
+                  "challenge-platform", "access denied", "403 forbidden", "cloudflare", "just a moment",
+                  "security verification", "please enable js", "enable javascript", "are you a robot",
+                  "please wait for verification", "we've detected unusual activity", "unusual traffic from your computer network",
+                  "checking your browser", "prove your humanity", "captcha verification", "robot challenge screen",
+                  "one moment, please...", "pardon our interruption", "warning: this page maybe requiring captcha",
+                  "please make sure you are authorized to access this page", "this page maybe requiring captcha",
+                  "the request could not be satisfied", "block access from your country", "generated by cloudfront",
+                  "under construction", "mindtrip is under construction", "problem loading page", "accept the risk and continue",
+                  "network security settings might be causing this", "accept the risk", "connection is untrusted"
               ]
               for ind in blocking_indicators:
-                  if ind in low_text:
-                      return False, f"Rilevato blocco, captcha o errore nel testo: '{ind}'"
-                      
-              # Rilevamento delle pagine guscio vuote
+                  if ind in low_text: return False, f"Rilevato blocco o errore: '{ind}'"
               domain_match = re.search(r'https?://(?:www\.)?([^/]+)', url)
               if domain_match:
                   domain = domain_match.group(1).lower().split('.')[0]
                   words = text_only.lower().split()
-                  if len(words) > 0:
-                      domain_occurrences = sum(1 for w in words if domain in w)
-                      ratio = domain_occurrences / len(words)
-                      if ratio > 0.35 and len(words) < 100:
-                          return False, f"Contenuto fittizio: contiene quasi esclusivamente riferimenti al dominio '{domain}'"
-                          
+                  if len(words) > 0 and (words.count(domain) / len(words)) > 0.35 and len(words) < 100:
+                      return False, f"Contenuto fittizio dominio '{domain}'"
               return True, ""
 
           def scan_worker(proxy_addr):
               global working_count, working_proxies
-              if stop_scanner.is_set():
-                  return
-              
-              proxies = {
-                  'http': f'socks5h://{proxy_addr}',
-                  'https': f'socks5h://{proxy_addr}'
-              }
+              if stop_scanner.is_set(): return
+              proxies = {'http': f'socks5h://{proxy_addr}', 'https': f'socks5h://{proxy_addr}'}
               try:
-                  test_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                  start_time = time.time()
-                  r = requests.get("https://r.jina.ai/https://example.com", headers=test_headers, proxies=proxies, timeout=3.0)
-                  latency = time.time() - start_time
+                  r = requests.get("https://r.jina.ai/https://example.com", headers={'User-Agent': 'Mozilla/5.0'}, proxies=proxies, timeout=3.0)
+                  latency = time.time()
                   if r.status_code == 200 and "example" in r.text.lower():
                       with working_lock:
                           if len(working_proxies) < max_working and not stop_scanner.is_set():
                               working_proxies.append((proxy_addr, latency))
                               working_count = len(working_proxies)
                               proxy_queue.put(proxy_addr)
-                              print(f"  [+] Proxy valido: {proxy_addr} | Latenza: {latency:.2f}s ({working_count}/{max_working})", flush=True)
-                              if working_count >= max_working:
-                                  stop_scanner.set()
-              except Exception:
-                  pass
+                              print(f"  [+] Proxy valido: {proxy_addr} ({working_count}/{max_working})", flush=True)
+                              if working_count >= max_working: stop_scanner.set()
+              except Exception: pass
 
           def register_single_warp(proxy_addr):
               global warp_counter
-              if stop_registration.is_set():
-                  return
-                  
+              if stop_registration.is_set(): return
               with warp_success_lock:
                   if len(active_warp_proxies) >= 20:
-                      stop_registration.set()
-                      return
+                      stop_registration.set(); return
                   current_idx = warp_counter
                   warp_counter += 1
-                  
               local_port = 20001 + current_idx
               dir_name = f"warp_{current_idx}"
               os.makedirs(dir_name, exist_ok=True)
-              
               env = os.environ.copy()
-              env["HTTP_PROXY"] = f"socks5h://{proxy_addr}"
-              env["HTTPS_PROXY"] = f"socks5h://{proxy_addr}"
-              env["ALL_PROXY"] = f"socks5h://{proxy_addr}"
-              
+              env["HTTP_PROXY"] = env["HTTPS_PROXY"] = env["ALL_PROXY"] = f"socks5h://{proxy_addr}"
               try:
-                  # 1. wgcf register
-                  reg_res = subprocess.run(
-                      ["wgcf", "register", "--accept-tos"],
-                      env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8
-                  )
-                  if reg_res.returncode != 0 or stop_registration.is_set():
-                      return
-                      
-                  # 2. wgcf generate
-                  gen_res = subprocess.run(
-                      ["wgcf", "generate"],
-                      env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8
-                  )
-                  if gen_res.returncode != 0 or stop_registration.is_set():
-                      return
-                      
-                  # 3. Estrazione dinamica e totale dei dati dal profilo wgcf
-                  profile_path = os.path.join(dir_name, "wgcf-profile.conf")
-                  private_key, addresses, dns_servers, public_key, endpoint = parse_wgcf_profile(profile_path)
-                  
-                  if not private_key or not public_key or stop_registration.is_set():
-                      return
-                      
-                  # 4. Generazione configurazione allineata di wireproxy
-                  address_lines = "\n".join([f"Address = {addr}" for addr in addresses])
-                  dns_lines = f"DNS = {', '.join(dns_servers)}"
-                  
+                  reg_res = subprocess.run(["wgcf", "register", "--accept-tos"], env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8)
+                  if reg_res.returncode != 0 or stop_registration.is_set(): return
+                  gen_res = subprocess.run(["wgcf", "generate"], env=env, cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8)
+                  if gen_res.returncode != 0 or stop_registration.is_set(): return
+                  private_key, addresses, dns_servers, public_key, endpoint = parse_wgcf_profile(os.path.join(dir_name, "wgcf-profile.conf"))
+                  if not private_key or not public_key or stop_registration.is_set(): return
                   wp_config_path = os.path.join(dir_name, "wireproxy.conf")
                   wp_config_content = textwrap.dedent(f"""\
                       [Interface]
                       PrivateKey = {private_key}
-                      {address_lines}
-                      {dns_lines}
+                      {"\n".join([f"Address = {addr}" for addr in addresses])}
+                      DNS = {', '.join(dns_servers)}
                       MTU = 1280
-
                       [Peer]
                       PublicKey = {public_key}
                       Endpoint = {endpoint}
                       AllowedIPs = 0.0.0.0/0
                       AllowedIPs = ::/0
-
                       [Socks5]
                       BindAddress = 127.0.0.1:{local_port}
                   """)
-                  with open(wp_config_path, "w") as f:
-                      f.write(wp_config_content)
-                      
-                  if stop_registration.is_set():
-                      return
-
-                  # 5. Avvio wireproxy in background
-                  proc = subprocess.Popen(
-                      ["wireproxy", "-c", "wireproxy.conf"],
-                      cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                  )
-                  
-                  # Test rapido di funzionamento del proxy locale WARP
+                  with open(wp_config_path, "w") as f: f.write(wp_config_content)
+                  if stop_registration.is_set(): return
+                  proc = subprocess.Popen(["wireproxy", "-c", "wireproxy.conf"], cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                   time.sleep(1.0)
-                  test_proxies = {
-                      'http': f'socks5://127.0.0.1:{local_port}',
-                      'https': f'socks5://127.0.0.1:{local_port}'
-                  }
                   try:
-                      test_r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=test_proxies, timeout=4.0)
+                      test_r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies={'http': f'socks5://127.0.0.1:{local_port}', 'https': f'socks5://127.0.0.1:{local_port}'}, timeout=4.0)
                       if "warp=on" in test_r.text:
                           with warp_success_lock:
                               if len(active_warp_proxies) < 20 and not stop_registration.is_set():
                                   active_warp_proxies.append(f"127.0.0.1:{local_port}")
                                   warp_processes.append(proc)
                                   print(f"  [✅ WARP PRONTO] Istanza {len(active_warp_proxies)} avviata su 127.0.0.1:{local_port} (tramite proxy {proxy_addr})", flush=True)
-                                  if len(active_warp_proxies) >= 20:
-                                      stop_registration.set()
-                              else:
-                                  proc.terminate()
-                      else:
-                          proc.terminate()
-                  except Exception:
-                      proc.terminate()
-                      
-              except Exception:
-                  pass
+                                  if len(active_warp_proxies) >= 20: stop_registration.set()
+                              else: proc.terminate()
+                      else: proc.terminate()
+                  except Exception: proc.terminate()
+              except Exception: pass
 
           def fetch_url_lightweight(item, proxies_list):
               index, url = item
               clean_name = re.sub(r'^https?://', '', url)
-              safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
-              filepath = os.path.join('output', f"{safe_filename}.md")
+              filepath = os.path.join('output', f"{re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]}.md")
               jina_url = f"https://r.jina.ai/{url}"
-              
-              # Forza l'instradamento di Bing direttamente verso la Fase 2b con CloakBrowser
               if "bing.com" in url:
                   return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
-                  
               if not proxies_list:
                   return False, f"[⚠️ NO PROXY {index}/{total_urls}] {url}", (index, url, filepath)
-                  
-              max_light_attempts = 2
-              for attempt in range(1, max_light_attempts + 1):
+              for attempt in range(2):
                   proxy_addr = random.choice(proxies_list)
-                  proxy_url = f"socks5://{proxy_addr}" if "127.0.0.1" in proxy_addr else f"socks5h://{proxy_addr}"
-                  proxies = {
-                      'http': proxy_url,
-                      'https': proxy_url
-                  }
-                  
+                  proxies = {'http': f'socks5://{proxy_addr}' if "127.0.0.1" in proxy_addr else f'socks5h://{proxy_addr}',
+                             'https': f'socks5://{proxy_addr}' if "127.0.0.1" in proxy_addr else f'socks5h://{proxy_addr}'}
                   time.sleep(random.uniform(0.1, 0.5))
-                  
-                  # 1. Tentativo curl-cffi stealth
                   try:
-                      impersonate_target = random.choice(["chrome110", "chrome120", "chrome124"])
-                      headers_cffi = {
-                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                          "Accept-Language": "en-US,en;q=0.9",
-                          "Upgrade-Insecure-Requests": "1"
-                      }
-                      response = requests_cffi.get(
-                          url,
-                          headers=headers_cffi,
-                          proxies=proxies,
-                          impersonate=impersonate_target,
-                          timeout=6
-                      )
+                      response = requests_cffi.get(url, headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"}, proxies=proxies, impersonate=random.choice(["chrome110", "chrome120", "chrome124"]), timeout=6)
                       if response.status_code == 200:
                           markdown_content = md(response.text, heading_style="ATX")
-                          is_valid, reason = validate_markdown(markdown_content, url)
+                          is_valid, _ = validate_markdown(markdown_content, url)
                           if is_valid:
-                              with open(filepath, 'w', encoding='utf-8') as f:
-                                  f.write(markdown_content)
+                              with open(filepath, 'w', encoding='utf-8') as f: f.write(markdown_content)
                               return True, f"[✅ STEALTH {index}] {url} -> Scaricato via curl-cffi (Proxy: {proxy_addr})", None
-                  except Exception:
-                      pass
-
-                  # 2. Fallback Jina AI
+                  except Exception: pass
                   try:
-                      jina_headers = {
-                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                          'X-Return-Format': 'markdown'
-                      }
-                      jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=10)
+                      jina_response = requests.get(jina_url, headers={'User-Agent': 'Mozilla/5.0', 'X-Return-Format': 'markdown'}, proxies=proxies, timeout=10)
                       if jina_response.status_code == 200:
                           markdown_content = jina_response.text
-                          is_valid, reason = validate_markdown(markdown_content, url)
+                          is_valid, _ = validate_markdown(markdown_content, url)
                           if is_valid:
-                              with open(filepath, 'w', encoding='utf-8') as f:
-                                  f.write(markdown_content)
+                              with open(filepath, 'w', encoding='utf-8') as f: f.write(markdown_content)
                               return True, f"[✅ JINA {index}] {url} -> Salvato via Jina (Proxy: {proxy_addr})", None
-                  except Exception:
-                      pass
-
+                  except Exception: pass
               return False, f"[⚠️ FAIL {index}] {url} -> Richiede step successivo.", (index, url, filepath)
 
           def cloakbrowser_worker_thread(worker_id, warp_proxy_addr, public_proxies, jobs_queue):
               print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
-              
               try:
-                  # Configurazione avanzata dei parametri stealth di avvio (allineata a CloakBrowser)
-                  browser = launch(
-                      proxy=f"socks5://{warp_proxy_addr}",
-                      headless=False,
-                      geoip=True, 
-                      humanize=True,
-                      args=[
-                          "--no-sandbox",
-                          "--disable-dev-shm-usage",
-                          f"--fingerprint={random.randint(100000, 999999)}",
-                          "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"  # Cartella dei font reali caricata sul runner Linux
-                      ]
-                  )
-                  print(f"  [🕵️ Worker CB {worker_id}] Browser pronto!", flush=True)
-                  
+                  browser = launch(headless=False, geoip=True, humanize=True, args=["--no-sandbox", "--disable-dev-shm-usage", f"--fingerprint={random.randint(100000, 999999)}", "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows"])
+                  context = browser.new_context(proxy={"server": f"socks5://{warp_proxy_addr}"}, viewport={"width": 1920, "height": 1080}, ignore_https_errors=True)
+                  try:
+                      warmup_page = context.new_page()
+                      warmup_page.goto("https://www.google.com", wait_until="load", timeout=25000)
+                      time.sleep(2.0)
+                      warmup_page.goto("https://www.reddit.com", wait_until="load", timeout=25000)
+                      time.sleep(2.0)
+                      warmup_page.close()
+                  except Exception: pass
                   while True:
-                      try:
-                          item = jobs_queue.get_nowait()
-                      except Empty:
-                          break
-                      
+                      try: item = jobs_queue.get_nowait()
+                      except Empty: break
                       index, url, filepath = item
                       print(f"  [🕵️ Worker CB {worker_id}] Scaricamento: {url}", flush=True)
-                      
                       success = False
                       error_msg = ""
-                      query_to_search = get_query_from_url(url)
-                      
-                      # --- TENTATIVO 1: Tramite IP WARP assegnato ---
                       try:
-                          page = browser.new_page()
-                          
+                          page = context.new_page()
                           try:
-                              # Navigazione simulata ad alto tasso di successo per evitare JS block/unusual traffic
-                              if "bing.com" in url:
-                                  page.goto("https://www.bing.com/", wait_until="load", timeout=35000)
-                                  time.sleep(random.uniform(2.5, 4.0))
-                                  try:
-                                      search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                      search_box.fill(query_to_search) 
-                                      page.keyboard.press("Enter")
-                                  except Exception:
-                                      page.goto(url, wait_until="load", timeout=35000)
-                                      
-                              elif "startpage.com" in url:
-                                  page.goto("https://www.startpage.com/", wait_until="load", timeout=35000)
-                                  time.sleep(random.uniform(2.0, 3.5))
-                                  try:
-                                      search_box = page.locator("input#q").first
-                                      search_box.fill(query_to_search)
-                                      page.keyboard.press("Enter")
-                                  except Exception:
-                                      page.goto(url, wait_until="load", timeout=35000)
-                                      
-                              else:
-                                  page.goto(url, wait_until="load", timeout=35000)
-                              
-                              try:
-                                  page.wait_for_load_state("networkidle", timeout=12000)
-                              except Exception:
-                                  pass
-                              
-                              # Assestamento JS e caricamento elementi dinamici
+                              page.goto(url, wait_until="load", timeout=45000)
+                              try: page.wait_for_load_state("networkidle", timeout=12000)
+                              except Exception: pass
                               time.sleep(6.0)
-                              
-                              # Scorrimento Lazy Load simulato
                               page.keyboard.press("PageDown")
                               time.sleep(1.0)
                               page.keyboard.press("PageDown")
                               time.sleep(2.0)
-                          except Exception:
-                              pass
-                                      
-                          html_content = page.content()
+                          except Exception: pass
+                          try: html_content = page.content()
+                          except Exception: html_content = ""
                           markdown_content = md(html_content, heading_style="ATX")
-                          
                           is_valid, reason = validate_markdown(markdown_content, url)
                           if is_valid:
-                              with open(filepath, 'w', encoding='utf-8') as f:
-                                  f.write(markdown_content)
+                              with open(filepath, 'w', encoding='utf-8') as f: f.write(markdown_content)
                               print(f"[✅ CLOAKBROWSER SUCCESS {index}] {url} -> Estratto con successo via WARP!", flush=True)
                               success = True
-                          else:
-                              error_msg = f"Validazione fallita su WARP: {reason}"
+                          else: error_msg = f"Validazione fallita su WARP: {reason}"
                           page.close()
-                      except Exception as e:
-                          error_msg = f"Errore su WARP: {e}"
-                          
-                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
+                      except Exception as e: error_msg = f"Errore su WARP: {e}"
                       if not success and public_proxies:
-                          fallback_attempts = 3
-                          for f_idx in range(fallback_attempts):
+                          for f_idx in range(3):
                               fallback_proxy = random.choice(public_proxies)
-                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy: {fallback_proxy}...", flush=True)
-                              
+                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/3 con proxy: {fallback_proxy}...", flush=True)
                               try:
-                                  fallback_context = browser.new_context(
-                                      proxy={"server": f"socks5://{fallback_proxy}"},
-                                      ignore_https_errors=True
-                                  )
+                                  fallback_context = browser.new_context(proxy={"server": f"socks5://{fallback_proxy}"}, viewport={"width": 1920, "height": 1080}, ignore_https_errors=True)
                                   page = fallback_context.new_page()
-                                  
                                   try:
-                                      if "bing.com" in url:
-                                          page.goto("https://www.bing.com/", wait_until="load", timeout=35000)
-                                          time.sleep(random.uniform(2.5, 4.0))
-                                          try:
-                                              search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                              search_box.fill(query_to_search) 
-                                              page.keyboard.press("Enter")
-                                          except Exception:
-                                              page.goto(url, wait_until="load", timeout=35000)
-                                              
-                                      elif "startpage.com" in url:
-                                          page.goto("https://www.startpage.com/", wait_until="load", timeout=35000)
-                                          time.sleep(random.uniform(2.0, 3.5))
-                                          try:
-                                              search_box = page.locator("input#q").first
-                                              search_box.fill(query_to_search)
-                                              page.keyboard.press("Enter")
-                                          except Exception:
-                                              page.goto(url, wait_until="load", timeout=35000)
-                                              
-                                      elif "google.com" in url:
-                                          page.goto("https://www.google.com/", wait_until="load", timeout=35000)
-                                          time.sleep(random.uniform(2.0, 3.5))
-                                          try:
-                                              consent_btn = page.locator("button:has-text('Accetta tutto'), button:has-text('Accept all')").first
-                                              if consent_btn.is_visible():
-                                                  consent_btn.click()
-                                                  time.sleep(1.5)
-                                          except Exception:
-                                              pass
-                                          try:
-                                              search_box = page.locator("textarea[name='q'], input[name='q']").first
-                                              search_box.fill(query_to_search)
-                                              page.keyboard.press("Enter")
-                                          except Exception:
-                                              page.goto(url, wait_until="load", timeout=35000)
-                                      else:
-                                          page.goto(url, wait_until="load", timeout=35000)
-                                      
-                                      try:
-                                          page.wait_for_load_state("networkidle", timeout=12000)
-                                      except Exception:
-                                          pass
-                                      
+                                      page.goto(url, wait_until="load", timeout=45000)
+                                      try: page.wait_for_load_state("networkidle", timeout=12000)
+                                      except Exception: pass
                                       time.sleep(6.0)
-                                      
                                       page.keyboard.press("PageDown")
                                       time.sleep(1.0)
                                       page.keyboard.press("PageDown")
                                       time.sleep(2.0)
-                                  except Exception:
-                                      pass
-                                              
-                                  html_content = page.content()
+                                  except Exception: pass
+                                  try: html_content = page.content()
+                                  except Exception: html_content = ""
                                   markdown_content = md(html_content, heading_style="ATX")
-                                  
                                   is_valid, reason = validate_markdown(markdown_content, url)
                                   fallback_context.close()
-                                  
                                   if is_valid:
-                                      with open(filepath, 'w', encoding='utf-8') as f:
-                                          f.write(markdown_content)
+                                      with open(filepath, 'w', encoding='utf-8') as f: f.write(markdown_content)
                                       print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
-                                      success = True
-                                      break
-                                  else:
-                                      error_msg = f"Validazione fallita su fallback: {reason}"
-                              except Exception as fe:
-                                  error_msg = f"Errore su fallback: {fe}"
-                                  
-                          if not success:
-                              print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
-                              
+                                      success = True; break
+                                  else: error_msg = f"Validazione fallita su fallback: {reason}"
+                              except Exception as fe: error_msg = f"Errore su fallback: {fe}"
+                          if not success: print(f"[❌ CLOAKBROWSER ALL TRIES FAILED {index}] {url} non recuperato: {error_msg}", flush=True)
                       jobs_queue.task_done()
                   browser.close()
-              except Exception as e:
-                  print(f"  [❌ CLOAKBROWSER Worker {worker_id}] Errore nel thread del browser: {e}", flush=True)
+              except Exception as e: print(f"  [❌ CLOAKBROWSER Worker {worker_id}] Errore thread browser: {e}", flush=True)
 
           if __name__ == '__main__':
-              # DOWNLOAD LISTA PROXY (Sorgenti multiple per massimizzare la freschezza e disponibilità dei SOCKS5 globali)
               print("==========================================", flush=True)
               print("🔄 Scaricamento liste proxy candidati...", flush=True)
               proxy_urls = [
@@ -624,14 +362,11 @@ jobs:
                               line = line.strip()
                               if line and re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', line):
                                   raw_proxies_set.add(line)
-                  except Exception:
-                      pass
-                      
+                  except Exception: pass
               raw_proxies = list(raw_proxies_set)
               random.shuffle(raw_proxies)
               print(f"✅ Recuperati {len(raw_proxies)} proxy candidati totali.", flush=True)
 
-              # AVVIO DELLO SCANNER (Trova fino a 100 proxy sicuri in parallelo)
               print("🚀 Scansione proxy pubblici per la Fase 1 (fino a 100 funzionanti)...", flush=True)
               with concurrent.futures.ThreadPoolExecutor(max_workers=300) as scanner_executor:
                   futures = {scanner_executor.submit(scan_worker, p): p for p in raw_proxies[:2000]}
@@ -639,15 +374,12 @@ jobs:
 
               working_proxies.sort(key=lambda x: x[1])
               sorted_proxy_addrs = [p[0] for p in working_proxies]
-              
               if not sorted_proxy_addrs:
                   print("⚠️ Nessun proxy pubblico valido trovato. Fallback su connessione diretta per la Fase 1.", flush=True)
 
-              # FASE 1: curl-cffi E Jina con i proxy pubblici
               print("\n==========================================", flush=True)
               print(f"🚀 FASE 1: Estrazione con {len(sorted_proxy_addrs)} proxy pubblici...", flush=True)
               print("==========================================\n", flush=True)
-              
               failed_phase1 = []
               with concurrent.futures.ThreadPoolExecutor(max_workers=min(50, total_urls)) as executor:
                   items = list(enumerate(URLS_TO_TEST, start=1))
@@ -655,21 +387,17 @@ jobs:
                   for future in concurrent.futures.as_completed(future_to_url):
                       success, message, failed_item = future.result()
                       print(message, flush=True)
-                      if not success:
-                          failed_phase1.append(failed_item)
+                      if not success: failed_phase1.append(failed_item)
 
-              # FASE 2: Registrazione concorrente WARP (solo per gli URL non estratti)
               if failed_phase1:
                   print("\n==========================================", flush=True)
                   print(f"🌀 FASE 2: Registrazione ultra-concorrente di 20 IP WARP tramite i proxy funzionanti...", flush=True)
                   print("==========================================\n", flush=True)
-                  
                   stop_registration.clear()
                   active_warp_proxies = []
                   warp_processes = []
                   warp_counter = 0
 
-                  # Lancio ultra-veloce della registrazione in parallelo sui proxy preventivamente validati
                   with concurrent.futures.ThreadPoolExecutor(max_workers=40) as register_executor:
                       futures = [register_executor.submit(register_single_warp, p) for p in sorted_proxy_addrs[:100]]
                       concurrent.futures.wait(futures)
@@ -680,55 +408,43 @@ jobs:
                   else:
                       print(f"\n🎉 Totale tunnel WARP locali attivati: {len(active_warp_proxies)}", flush=True)
 
-                  # FASE 2a: Retest degli URL falliti con curl-cffi usando i proxy WARP
                   print("\n==========================================", flush=True)
                   print(f"🚀 FASE 2a: Retest di {len(failed_phase1)} URL falliti tramite IP WARP con curl-cffi/Jina...", flush=True)
                   print("==========================================\n", flush=True)
-                  
                   failed_phase2a = []
                   with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(failed_phase1))) as executor:
                       future_to_url = {executor.submit(fetch_url_lightweight, (item[0], item[1]), active_warp_proxies): item for item in failed_phase1}
                       for future in concurrent.futures.as_completed(future_to_url):
                           success, message, failed_item = future.result()
                           print(message, flush=True)
-                          if not success:
-                              failed_phase2a.append(failed_item)
+                          if not success: failed_phase2a.append(failed_item)
 
-                  # FASE 2b: Avvio CloakBrowser con 20 browser paralleli su WARP per i rimanenti fallimenti
                   if failed_phase2a:
                       print("\n==========================================", flush=True)
                       print(f"🔥 FASE 2b: Avvio di {min(20, len(active_warp_proxies))} browser paralleli CloakBrowser per risolvere {len(failed_phase2a)} URL rimanenti...", flush=True)
                       print("==========================================\n", flush=True)
-                      
                       jobs_queue = Queue()
-                      for item in failed_phase2a:
-                          jobs_queue.put(item)
-                          
+                      for item in failed_phase2a: jobs_queue.put(item)
                       cf_threads = []
                       num_cf_workers = min(20, len(active_warp_proxies), len(failed_phase2a))
-                      
                       for w_id in range(1, num_cf_workers + 1):
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
                           t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, sorted_proxy_addrs, jobs_queue))
                           t.start()
                           cf_threads.append(t)
-                          
-                      for t in cf_threads:
-                          t.join()
+                      for t in cf_threads: t.join()
                   else:
                       print("\n🎉 Tutti gli URL sono stati recuperati con successo nella Fase 2a via WARP + curl-cffi!", flush=True)
               else:
                   print("\n🎉 Tutti gli URL sono stati estratti con successo nella Fase 1!", flush=True)
                   
-              # SPEGNIMENTO DEI PROCESSI WIREPROXY IN BACKGROUND
               if warp_processes:
                   print("\n🧹 Spegnimento dei processi WARP locali in background...", flush=True)
                   for proc in warp_processes:
                       try:
                           proc.terminate()
                           proc.wait(timeout=2)
-                      except Exception:
-                          pass
+                      except Exception: pass
               print("👋 Fine elaborazione.", flush=True)
           EOF
           export PYTHONUNBUFFERED=1
