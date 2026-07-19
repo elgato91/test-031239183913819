@@ -73,6 +73,7 @@ jobs:
           from curl_cffi import requests as requests_cffi
           from markdownify import markdownify as md
           from cloakbrowser import launch
+          from bs4 import BeautifulSoup
 
           URLS_TO_TEST = [
               "https://www.facebook.com/groups/expatsinparaguay/",
@@ -152,7 +153,6 @@ jobs:
                               elif key == "endpoint":
                                   endpoint = val
                                   
-              # Integrazione preventiva di server DNS globali alternativi instradati nel tunnel
               for backup_dns in ["8.8.8.8", "9.9.9.9"]:
                   if backup_dns not in dns_servers:
                       dns_servers.append(backup_dns)
@@ -161,6 +161,21 @@ jobs:
                   addresses = ["172.16.0.2/32"]
                   
               return private_key, addresses, dns_servers, public_key, endpoint
+
+          def clean_html_and_to_markdown(html_content):
+              """
+              Rimuove i blocchi noscript, script e style dall'HTML prima della conversione.
+              Questo evita che la presenza di messaggi standard di avvertimento non visualizzati
+              (es. "Please enable Javascript") all'interno di tag <noscript> inneschi falsi positivi.
+              """
+              try:
+                  soup = BeautifulSoup(html_content, 'html.parser')
+                  for element in soup(["noscript", "script", "style", "iframe", "meta", "head"]):
+                      element.decompose()
+                  cleaned_html = str(soup)
+              except Exception:
+                  cleaned_html = html_content
+              return md(cleaned_html, heading_style="ATX")
 
           def validate_markdown(markdown_text, url):
               if not markdown_text:
@@ -223,7 +238,6 @@ jobs:
               if stop_scanner.is_set():
                   return
               
-              # Utilizziamo socks5h anche per i test iniziali per prevenire leak DNS
               proxies = {
                   'http': f'socks5h://{proxy_addr}',
                   'https': f'socks5h://{proxy_addr}'
@@ -323,7 +337,7 @@ jobs:
                       cwd=dir_name, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                   )
                   
-                  # Test rapido di funzionamento del proxy locale WARP (forziamo DNS sicuro del proxy)
+                  # Test rapido di funzionamento del proxy locale WARP
                   time.sleep(1.0)
                   test_proxies = {
                       'http': f'socks5h://127.0.0.1:{local_port}',
@@ -368,7 +382,6 @@ jobs:
               max_light_attempts = 2
               for attempt in range(1, max_light_attempts + 1):
                   proxy_addr = random.choice(proxies_list)
-                  # Correzione fondamentale: usiamo SEMPRE socks5h:// per evitare DNS leaks sul runner locale
                   proxy_url = f"socks5h://{proxy_addr}"
                   proxies = {
                       'http': proxy_url,
@@ -393,7 +406,8 @@ jobs:
                           timeout=6
                       )
                       if response.status_code == 200:
-                          markdown_content = md(response.text, heading_style="ATX")
+                          # Pulisce l'HTML per evitare avvisi fasulli di noscript
+                          markdown_content = clean_html_and_to_markdown(response.text)
                           is_valid, reason = validate_markdown(markdown_content, url)
                           if is_valid:
                               with open(filepath, 'w', encoding='utf-8') as f:
@@ -421,11 +435,10 @@ jobs:
 
               return False, f"[⚠️ FAIL {index}] {url} -> Richiede step successivo.", (index, url, filepath)
 
-          def cloakbrowser_worker_thread(worker_id, warp_proxy_addr, active_warp_proxies, jobs_queue):
+          def cloakbrowser_worker_thread(worker_id, warp_proxy_addr, active_warp_proxies, public_proxies, jobs_queue):
               print(f"  [🕵️ Worker CB {worker_id}] Avvio CloakBrowser con default WARP {warp_proxy_addr}...", flush=True)
               
               try:
-                  # Configurazione avanzata dei parametri stealth di avvio
                   browser = launch(
                       proxy=f"socks5://{warp_proxy_addr}",
                       headless=False,
@@ -435,7 +448,7 @@ jobs:
                           "--no-sandbox",
                           "--disable-dev-shm-usage",
                           "--fingerprint-fonts-dir=/home/runner/.local/share/fonts/windows",
-                          "--disable-dns-prefetch" # Impedisce a Chromium di effettuare query DNS esterne al proxy SOCKS
+                          "--disable-dns-prefetch"
                       ]
                   )
                   print(f"  [🕵️ Worker CB {worker_id}] Browser pronto!", flush=True)
@@ -496,7 +509,7 @@ jobs:
                               pass
                                       
                           html_content = page.content()
-                          markdown_content = md(html_content, heading_style="ATX")
+                          markdown_content = clean_html_and_to_markdown(html_content)
                           
                           is_valid, reason = validate_markdown(markdown_content, url)
                           if is_valid:
@@ -510,17 +523,14 @@ jobs:
                       except Exception as e:
                           error_msg = f"Errore su WARP: {e}"
                           
-                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su ALTRI proxy WARP attivi ---
-                      # Correzione: evitiamo i proxy pubblici degradati e usiamo solo altri tunnel WARP validati
-                      if not success and active_warp_proxies:
-                          available_warps = [p for p in active_warp_proxies if p != warp_proxy_addr]
-                          if not available_warps:
-                              available_warps = active_warp_proxies
-                              
-                          fallback_attempts = min(3, len(available_warps))
+                      # --- TENTATIVO 2 (FALLBACK): Ciclo iterativo su proxy SOCKS5 pubblici ---
+                      # Correzione: usiamo i proxy SOCKS5 pubblici (non Cloudflare) come fallback
+                      # se l'IP WARP locale subisce blocchi di "unusual traffic" dovuti ad ASN bloccati da Google.
+                      if not success and public_proxies:
+                          fallback_attempts = min(4, len(public_proxies))
                           for f_idx in range(fallback_attempts):
-                              fallback_proxy = random.choice(available_warps)
-                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP primario fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy WARP alternativo: {fallback_proxy}...", flush=True)
+                              fallback_proxy = random.choice(public_proxies)
+                              print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx+1}/{fallback_attempts} con proxy pubblico: {fallback_proxy}...", flush=True)
                               
                               try:
                                   fallback_context = browser.new_context(
@@ -568,7 +578,7 @@ jobs:
                                       pass
                                               
                                   html_content = page.content()
-                                  markdown_content = md(html_content, heading_style="ATX")
+                                  markdown_content = clean_html_and_to_markdown(html_content)
                                   
                                   is_valid, reason = validate_markdown(markdown_content, url)
                                   fallback_context.close()
@@ -576,7 +586,7 @@ jobs:
                                   if is_valid:
                                       with open(filepath, 'w', encoding='utf-8') as f:
                                           f.write(markdown_content)
-                                      print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy WARP alternativo (tentativo {f_idx+1})!", flush=True)
+                                      print(f"[✅ CLOAKBROWSER FALLBACK SUCCESS {index}] {url} -> Estratto con successo via Proxy Pubblico SOCKS5 (tentativo {f_idx+1})!", flush=True)
                                       success = True
                                       break
                                   else:
@@ -694,8 +704,8 @@ jobs:
                       
                       for w_id in range(1, num_cf_workers + 1):
                           proxy_for_worker = active_warp_proxies[(w_id - 1) % len(active_warp_proxies)]
-                          # Correzione: passiamo la lista degli IP WARP attivi per gestire correttamente il fallback dentro il thread
-                          t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, active_warp_proxies, jobs_queue))
+                          # Ripristinata la combinazione: IP WARP iniziale con fallback su SOCKS5 pubblici (sorted_proxy_addrs)
+                          t = threading.Thread(target=cloakbrowser_worker_thread, args=(w_id, proxy_for_worker, active_warp_proxies, sorted_proxy_addrs, jobs_queue))
                           t.start()
                           cf_threads.append(t)
                           
