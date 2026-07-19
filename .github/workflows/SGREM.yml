@@ -398,6 +398,7 @@ jobs:
                   time.sleep(random.uniform(0.1, 0.5))
                   
                   # 1. Tentativo curl-cffi stealth
+                  proxy_is_dead = False
                   try:
                       impersonate_target = "chrome120"
                       headers_cffi = {
@@ -419,7 +420,7 @@ jobs:
                           headers=headers_cffi,
                           proxies=proxies,
                           impersonate=impersonate_target,
-                          timeout=8
+                          timeout=6
                       )
                       if response.status_code == 200:
                           markdown_content = clean_html_and_to_markdown(response.text)
@@ -428,8 +429,14 @@ jobs:
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(markdown_content)
                               return True, f"[✅ STEALTH {index}] {url} -> Scaricato via curl-cffi (Proxy: {proxy_addr})", None
-                  except Exception:
-                      pass
+                  except Exception as e:
+                      err_msg = str(e).lower()
+                      if "timeout" in err_msg or "connection" in err_msg or "proxy" in err_msg or "resolv" in err_msg or "reach" in err_msg:
+                          proxy_is_dead = True
+
+                  # Se il proxy è offline o bloccato, saltiamo immediatamente i passaggi successivi per questo tentativo
+                  if proxy_is_dead:
+                      continue
 
                   # 2. Fallback Jina AI
                   try:
@@ -437,7 +444,7 @@ jobs:
                           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                           'X-Return-Format': 'markdown'
                       }
-                      jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=10)
+                      jina_response = requests.get(jina_url, headers=jina_headers, proxies=proxies, timeout=8)
                       if jina_response.status_code == 200:
                           markdown_content = jina_response.text
                           is_valid, reason = validate_markdown(markdown_content, url)
@@ -445,15 +452,20 @@ jobs:
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(markdown_content)
                               return True, f"[✅ JINA {index}] {url} -> Salvato via Jina (Proxy: {proxy_addr})", None
-                  except Exception:
-                      pass
+                  except Exception as e:
+                      err_msg = str(e).lower()
+                      if "timeout" in err_msg or "connection" in err_msg or "proxy" in err_msg or "resolv" in err_msg or "reach" in err_msg:
+                          proxy_is_dead = True
+
+                  if proxy_is_dead:
+                      continue
 
                   # 3. Fallback markdown.new
                   try:
                       md_new_headers = {
                           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                       }
-                      md_new_response = requests.get(markdown_new_url, headers=md_new_headers, proxies=proxies, timeout=10)
+                      md_new_response = requests.get(markdown_new_url, headers=md_new_headers, proxies=proxies, timeout=8)
                       if md_new_response.status_code == 200:
                           markdown_content = md_new_response.text
                           is_valid, reason = validate_markdown(markdown_content, url)
@@ -473,7 +485,7 @@ jobs:
                   home_dir = os.path.expanduser("~")
                   windows_fonts_dir = os.path.join(home_dir, ".local", "share", "fonts", "windows")
                   
-                  # Configurazione del fingerprint coerente e allineata per emulare sessione persistente
+                  # Configurazione del fingerprint coerente e allineata per emulare sessione prima/dopo
                   base_args = [
                       "--no-sandbox",
                       "--disable-dev-shm-usage",
@@ -484,7 +496,7 @@ jobs:
                   page = None
                   current_proxy = warp_proxy_addr
                   
-                  async def init_browser_context(proxy_addr):
+                  async def init_browser_context(proxy_addr, is_fallback=False):
                       nonlocal context, page, current_proxy
                       if context:
                           try:
@@ -512,19 +524,20 @@ jobs:
                       )
                       page = await context.new_page()
                       
-                      # Warmup integrato identico al codice stabile per generare una cronologia credibile
-                      print(f"  [🕵️ Worker CB {worker_id}] Esecuzione warmup sul proxy {proxy_addr}...", flush=True)
-                      try:
-                          await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=25000)
-                          await asyncio.sleep(2)
-                          await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=25000)
-                          await asyncio.sleep(2)
-                      except Exception as e:
-                          print(f"  [🕵️ Worker CB {worker_id}] Warmup warning su {proxy_addr}: {e}", flush=True)
+                      # Eseguiamo il warmup solo se non siamo in un fallback
+                      if not is_fallback:
+                          print(f"  [🕵️ Worker CB {worker_id}] Esecuzione warmup sul proxy primario {proxy_addr}...", flush=True)
+                          try:
+                              await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=12000)
+                              await asyncio.sleep(1)
+                              await page.goto("https://www.reddit.com", wait_until="domcontentloaded", timeout=12000)
+                              await asyncio.sleep(1)
+                          except Exception as e:
+                              print(f"  [🕵️ Worker CB {worker_id}] Warmup warning su {proxy_addr}: {e}", flush=True)
                   
-                  # Inizializziamo il browser la prima volta sul proxy WARP nativo
+                  # Inizializziamo il browser la prima volta sul proxy WARP nativo (esegue warmup)
                   try:
-                      await init_browser_context(warp_proxy_addr)
+                      await init_browser_context(warp_proxy_addr, is_fallback=False)
                   except Exception as e:
                       print(f"  [❌ Worker CB {worker_id}] Errore critico di avvio browser: {e}", flush=True)
                       return
@@ -538,11 +551,11 @@ jobs:
                       index, url, filepath = item
                       print(f"  [🕵️ Worker CB {worker_id}] Scaricamento: {url}", flush=True)
                       
-                      # Se l'iterazione precedente ha cambiato il proxy, ripristiniamo l'IP WARP primario per iniziare puliti
+                      # Se l'iterazione precedente ha cambiato il proxy, ripristiniamo l'IP WARP primario saltando il warmup
                       if current_proxy != warp_proxy_addr:
                           print(f"  [🕵️ Worker CB {worker_id}] Ripristino dell'IP WARP primario ({warp_proxy_addr}) per il nuovo target...", flush=True)
                           try:
-                              await init_browser_context(warp_proxy_addr)
+                              await init_browser_context(warp_proxy_addr, is_fallback=True)
                           except Exception as e:
                               print(f"  [🕵️ Worker CB {worker_id}] Errore nel ripristino del proxy primario: {e}", flush=True)
                       
@@ -553,31 +566,30 @@ jobs:
                       # --- TENTATIVO 1: Tramite IP WARP assegnato ---
                       try:
                           if "bing.com" in url:
-                              await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(2.5, 4.0))
+                              await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=18000)
+                              await asyncio.sleep(random.uniform(1.5, 3.0))
                               try:
                                   search_box = page.locator("textarea[name='q'], input[name='q']").first
                                   await search_box.fill(query_to_search) 
                                   await page.keyboard.press("Enter")
                               except Exception:
-                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=18000)
                                   
                           elif "startpage.com" in url:
-                              await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                              await asyncio.sleep(random.uniform(2.0, 3.5))
+                              await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=18000)
+                              await asyncio.sleep(random.uniform(1.5, 3.0))
                               try:
                                   search_box = page.locator("input#q").first
                                   await search_box.fill(query_to_search)
                                   await page.keyboard.press("Enter")
                               except Exception:
-                                  await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                  await page.goto(url, wait_until="domcontentloaded", timeout=18000)
                                   
                           else:
-                              # Corretto con l'istruzione obbligatoria 'await' per eseguire l'effettiva navigazione
-                              await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                              await page.goto(url, wait_until="domcontentloaded", timeout=18000)
                           
                           try:
-                              await page.wait_for_load_state("networkidle", timeout=12000)
+                              await page.wait_for_load_state("networkidle", timeout=10000)
                           except Exception:
                               pass
                           
@@ -606,8 +618,7 @@ jobs:
                           error_msg = f"Errore su WARP: {e}"
                           
                       # --- TENTATIVI DI RISERVA (FALLBACK) ---
-                      # Se fallisce l'IP WARP primario, ruotiamo su 2 IP WARP alternativi.
-                      # Se l'URL fa parte di un dominio .it, limitiamo i fallback ai soli IP WARP alternativi senza usare proxy pubblici generici internazionali.
+                      # Se fallisce l'IP WARP primario, ruotiamo su 2 IP WARP alternativi o proxy pubblici saltando il warmup
                       if not success:
                           warp_alternatives = [p for p in active_warp_proxies if p != warp_proxy_addr]
                           random.shuffle(warp_alternatives)
@@ -635,36 +646,34 @@ jobs:
                               print(f"  [🕵️ Worker CB {worker_id}] ⚠️ WARP fallito ({error_msg}) per {url}. Fallback {f_idx}/{len(fallback_queue)} con {proxy_type}: {fallback_proxy}...", flush=True)
                               
                               try:
-                                  await init_browser_context(fallback_proxy)
+                                  # Saltiamo completamente il warmup sui contesti di fallback per garantire la massima velocità
+                                  await init_browser_context(fallback_proxy, is_fallback=True)
                                   
                                   if "bing.com" in url:
-                                      await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                      await asyncio.sleep(random.uniform(2.5, 4.0))
+                                      await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=18000)
+                                      await asyncio.sleep(random.uniform(1.5, 3.0))
                                       try:
                                           search_box = page.locator("textarea[name='q'], input[name='q']").first
                                           await search_box.fill(query_to_search) 
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          # Corretto con l'istruzione obbligatoria 'await' per eseguire la navigazione
-                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=18000)
                                           
                                   elif "startpage.com" in url:
-                                      await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=35000)
-                                      await asyncio.sleep(random.uniform(2.0, 3.5))
+                                      await page.goto("https://www.startpage.com/", wait_until="domcontentloaded", timeout=18000)
+                                      await asyncio.sleep(random.uniform(1.5, 3.0))
                                       try:
                                           search_box = page.locator("input#q").first
                                           await search_box.fill(query_to_search)
                                           await page.keyboard.press("Enter")
                                       except Exception:
-                                          # Corretto con l'istruzione obbligatoria 'await' per eseguire la navigazione
-                                          await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                          await page.goto(url, wait_until="domcontentloaded", timeout=18000)
                                           
                                   else:
-                                      # Corretto con l'istruzione obbligatoria 'await' per eseguire la navigazione
-                                      await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                                      await page.goto(url, wait_until="domcontentloaded", timeout=18000)
                                   
                                   try:
-                                      await page.wait_for_load_state("networkidle", timeout=12000)
+                                      await page.wait_for_load_state("networkidle", timeout=10000)
                                   except Exception:
                                       pass
                                   
