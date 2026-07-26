@@ -69,6 +69,7 @@ jobs:
           import sys
           import textwrap
           import asyncio
+          import json
           from queue import Queue, Empty
           from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests as requests_cffi
@@ -76,24 +77,27 @@ jobs:
           from cloakbrowser import launch_persistent_context_async
           from bs4 import BeautifulSoup
 
-          URLS_TO_TEST = [
-              "https://comune.orvieto.tr.it/it/vivere/pozzo-di-san-patrizio",
-              "https://www.google.com/search?q=cosa+vedere+roma",
-              "https://www.bing.com/search?q=cosa+vedere+roma",
-              "https://www.bloomberg.com/markets/stocks",
-              "https://www.morningstar.com/stocks/xnas/aapl/quote",
-              "https://finance.yahoo.com/quote/AAPL/key-statistics",
-              "https://www.yelp.com/search?find_desc=Restaurants&find_loc=San+Francisco%2C+CA",
-              "https://www.passportindex.org/passport/italy/",
-              "https://katieparla.com/budget-dining-in-rome-revised/",
-              "https://www.google.com/search?q=migliore+carbonara+roma&gbv=1",
-              "https://html.duckduckgo.com/html/?q=migliore+carbonara+roma",
-              "https://www.bing.com/search?q=migliore+carbonara+roma",
-              "https://www.startpage.com/sp/search?query=migliore+carbonara+roma",
-              "https://search.yahoo.com/search?p=migliore+carbonara+roma",
-              "https://www.reddit.com/r/rome/comments/1cn61n5/must_try_restaurants_in_rome/",
-              "https://www.canadianinsider.com/money-is-moving"
-          ]
+          # Caricamento degli URL dal file di configurazione deact_urls.json
+          JSON_FILEPATH = 'deact_urls.json'
+          URLS_TO_TEST = []
+
+          if os.path.exists(JSON_FILEPATH):
+              try:
+                  with open(JSON_FILEPATH, 'r', encoding='utf-8') as f:
+                      data = json.load(f)
+                      # Estrae solo la lista associata alla chiave 'urls_per_scraper'
+                      URLS_TO_TEST = data.get("urls_per_scraper", [])
+                  print(f"✅ Caricati {len(URLS_TO_TEST)} URL da '{JSON_FILEPATH}' (sezione 'urls_per_scraper').", flush=True)
+              except Exception as e:
+                  print(f"❌ Errore durante la lettura o il parsing del file {JSON_FILEPATH}: {e}", flush=True)
+                  sys.exit(1)
+          else:
+              print(f"❌ File '{JSON_FILEPATH}' non trovato nel repository.", flush=True)
+              sys.exit(1)
+
+          if not URLS_TO_TEST:
+              print("⚠️ Nessun URL trovato nella lista 'urls_per_scraper'. Fine elaborazione.", flush=True)
+              sys.exit(0)
 
           os.makedirs('output', exist_ok=True)
           total_urls = len(URLS_TO_TEST)
