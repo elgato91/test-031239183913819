@@ -221,7 +221,15 @@ jobs:
                   "solve the challenge below to continue",
                   "sending automated queries",
                   "not allowed to access yelp",
-                  "yelp.com/captcha"
+                  "yelp.com/captcha",
+                  "was denied",
+                  "authorization to view",
+                  "you don't have authorization",
+                  "http error 403",
+                  "you do not have permission",
+                  "permission denied",
+                  "forbidden",
+                  "unauthorized"
               ]
               for ind in blocking_indicators:
                   if ind in low_text:
