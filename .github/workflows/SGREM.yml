@@ -695,12 +695,11 @@ jobs:
               proxy_urls = [
                   "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
                   "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
-                  "https://raw.githubusercontent.com/Hookzof/socks5_list/master/socks5.txt",
+                  "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
                   "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
                   "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt",
                   "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/socks5.txt",
-                  "https://raw.githubusercontent.com/Jakee8718/Free-Proxies/main/socks5.txt",
-                  "https://raw.githubusercontent.com/proxyscrape/free-proxy-list/main/socks5.txt"
+                  "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/socks5/data.txt"
               ]
               raw_proxies_set = set()
               for p_url in proxy_urls:
