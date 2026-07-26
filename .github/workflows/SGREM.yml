@@ -375,7 +375,6 @@ jobs:
               safe_filename = re.sub(r'[^a-zA-Z0-9]', '_', clean_name)[:150]
               filepath = os.path.join('output', f"{safe_filename}.md")
               jina_url = f"https://r.jina.ai/{url}"
-              markdown_new_url = f"https://markdown.new/{url}"
               
               if "bing.com" in url:
                   return False, f"[⏭️ FORCED BING {index}] {url} -> Forzato a CloakBrowser", (index, url, filepath)
@@ -445,22 +444,6 @@ jobs:
                               with open(filepath, 'w', encoding='utf-8') as f:
                                   f.write(markdown_content)
                               return True, f"[✅ JINA {index}] {url} -> Salvato via Jina (Proxy: {proxy_addr})", None
-                  except Exception:
-                      pass
-
-                  # 3. Fallback markdown.new
-                  try:
-                      md_new_headers = {
-                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                      }
-                      md_new_response = requests.get(markdown_new_url, headers=md_new_headers, proxies=proxies, timeout=10)
-                      if md_new_response.status_code == 200:
-                          markdown_content = md_new_response.text
-                          is_valid, reason = validate_markdown(markdown_content, url)
-                          if is_valid:
-                              with open(filepath, 'w', encoding='utf-8') as f:
-                                  f.write(markdown_content)
-                              return True, f"[✅ MARKDOWN.NEW {index}] {url} -> Salvato via markdown.new (Proxy: {proxy_addr})", None
                   except Exception:
                       pass
 
